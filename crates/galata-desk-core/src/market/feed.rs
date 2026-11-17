@@ -115,6 +115,9 @@ pub struct MarketSnapshot {
     /// The selected market's chart, once its history has loaded. `None` with
     /// nothing selected.
     pub chart: Option<Chart>,
+    /// There is no chart because the last attempt to load the selected
+    /// market's history failed. It is tried again; a success clears this.
+    pub chart_failed: bool,
 }
 
 impl Default for MarketSnapshot {
@@ -126,6 +129,7 @@ impl Default for MarketSnapshot {
             last_message: None,
             listing: Listing::Loading,
             chart: None,
+            chart_failed: false,
         }
     }
 }
@@ -217,6 +221,7 @@ impl MarketFeed {
             ctx: HashMap::new(),
             series: HashMap::new(),
             requested: HashSet::new(),
+            failed: HashSet::new(),
             connection: Connection::Connecting,
             heard_at_ms: None,
             last_message: None,
@@ -285,6 +290,8 @@ struct State<T, S> {
     series: HashMap<(MarketId, Interval), Series>,
     /// History asked for and not yet answered.
     requested: HashSet<(MarketId, Interval)>,
+    /// History whose last load failed, until one succeeds.
+    failed: HashSet<(MarketId, Interval)>,
     connection: Connection,
     /// When the stream last said anything, by the feed's clock.
     heard_at_ms: Option<u64>,
@@ -375,6 +382,7 @@ impl<T: Transport + Clone, S: Subscriptions> State<T, S> {
                 .unsubscribe(Sub::Candles(market.clone(), self.interval()));
         }
         self.ctx.remove(market);
+        self.failed.retain(|(m, _)| m != market);
         self.series.retain(|(m, _), _| m != market);
         self.requested.retain(|(m, _)| m != market);
     }
@@ -467,9 +475,17 @@ impl<T: Transport + Clone, S: Subscriptions> State<T, S> {
         if !self.watched.contains(&key.0) {
             return;
         }
-        // A failed load leaves the tile on placeholders; it is asked again later.
-        if let Ok(candles) = loaded.candles {
-            self.series.entry(key).or_default().set_history(candles);
+        // A failed load leaves the tile on placeholders and is asked again
+        // later. It is remembered, so the chart can say it failed and is not
+        // merely slow.
+        match loaded.candles {
+            Ok(candles) => {
+                self.failed.remove(&key);
+                self.series.entry(key).or_default().set_history(candles);
+            }
+            Err(_) => {
+                self.failed.insert(key);
+            }
         }
     }
 
@@ -570,6 +586,11 @@ impl<T: Transport + Clone, S: Subscriptions> State<T, S> {
                     candles: chart(series.window(now, period.chart_millis()), last),
                 })
             });
+        let chart_failed = chart.is_none()
+            && self
+                .selected
+                .as_ref()
+                .is_some_and(|market| self.failed.contains(&(market.clone(), interval)));
         MarketSnapshot {
             period,
             tiles,
@@ -577,6 +598,7 @@ impl<T: Transport + Clone, S: Subscriptions> State<T, S> {
             last_message: self.last_message,
             listing: self.listing.clone(),
             chart,
+            chart_failed,
         }
     }
 }

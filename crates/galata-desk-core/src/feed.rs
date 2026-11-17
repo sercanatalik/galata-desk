@@ -27,6 +27,7 @@ use tokio::task::JoinHandle;
 use tokio::time::Instant;
 
 use crate::funding::FundingRates;
+use crate::market::fills::{Fill, FillSide, Fills};
 use crate::model::{self, Collateral, DexState, Holdings, OrderRow};
 use crate::venue::{
     ClearinghouseState, Info, PortfolioHistory, SpotMeta, Transport, UserFees, VenueError,
@@ -93,6 +94,8 @@ pub struct Snapshot {
     /// The current funding rate of every market on the dexes the account has
     /// positions on.
     pub rates: Section<FundingRates>,
+    /// The account's latest fills, across all markets.
+    pub fills: Section<Fills>,
     /// The venue has asked the app to slow down and it has not yet recovered.
     pub slowed: bool,
 }
@@ -397,6 +400,32 @@ impl<T: Transport> Refresher<T> {
         }
     }
 
+    /// The account's latest fills, for marking on the chart.
+    pub async fn refresh_fills(&mut self) {
+        let result = self.info.user_fills(&self.user).await;
+        self.settle(&result);
+        match result {
+            Ok(raw) => {
+                let rows = raw
+                    .into_iter()
+                    .map(|f| Fill {
+                        coin: f.coin,
+                        side: match f.side {
+                            crate::venue::Side::Buy => FillSide::Bought,
+                            crate::venue::Side::Sell => FillSide::Sold,
+                        },
+                        price: f.px,
+                        size: f.sz,
+                        time_ms: f.time,
+                        realised: f.closed_pnl,
+                    })
+                    .collect();
+                self.snapshot.fills.succeed(Fills::new(rows));
+            }
+            Err(e) => self.snapshot.fills.fail(e),
+        }
+    }
+
     /// The current funding rates on every dex the account has a position on.
     /// Until the positions are known there is nothing to ask for.
     pub async fn refresh_rates(&mut self) {
@@ -536,6 +565,7 @@ async fn run<T: Transport>(
         if now >= overview_due {
             refresher.refresh_overview().await;
             refresher.refresh_rates().await;
+            refresher.refresh_fills().await;
             overview_due = Instant::now() + refresher.cadence().interval(Tier::Overview);
             publish(&refresher);
         }

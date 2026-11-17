@@ -415,3 +415,28 @@ async fn a_dozen_dexes_are_still_swept_at_once_and_every_minute() {
     r.refresh_orders(true).await;
     assert_eq!(fake.count("frontendOpenOrders:flx"), 1);
 }
+
+// ---- Fills ----------------------------------------------------------------
+
+#[tokio::test]
+async fn the_accounts_fills_arrive_and_a_failed_refresh_keeps_them() {
+    let fake = Fake::new();
+    let mut r = Refresher::new(fake.clone(), USER);
+    assert!(r.snapshot().fills.is_loading());
+    r.refresh_fills().await;
+    let fills = r.snapshot().fills.data.clone().expect("fills arrived");
+    assert_eq!(fake.count("userFills"), 1);
+    assert_eq!(fills.rows.len(), 6);
+    // A handful is all there are: the venue did not cut the answer short.
+    assert!(!fills.capped);
+    // A builder-dex fill keeps its market's full name.
+    assert!(fills.rows.iter().any(|f| f.coin == "xyz:NVDA"));
+
+    fake.set(Mood::Down);
+    r.refresh_fills().await;
+    assert!(r.snapshot().fills.is_stale());
+    assert_eq!(r.snapshot().fills.data.as_ref(), Some(&fills));
+    fake.set(Mood::Fine);
+    r.refresh_fills().await;
+    assert!(!r.snapshot().fills.is_stale());
+}

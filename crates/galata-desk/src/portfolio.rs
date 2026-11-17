@@ -485,6 +485,12 @@ impl Portfolio {
             .into_any_element()
     }
 
+    /// The account's latest fills, once they have loaded. The Markets chart
+    /// marks them.
+    pub fn fills(&self) -> Option<&galata_desk_core::market::fills::Fills> {
+        self.snapshot.fills.data.as_ref()
+    }
+
     /// The account's open positions, once they have loaded. The Markets
     /// section marks the markets among them.
     pub fn positions(&self) -> Option<&[PositionRow]> {
@@ -1184,6 +1190,16 @@ impl Portfolio {
         snapshot.holdings.data = Some(holdings);
         snapshot.holdings.error = None;
         self.apply(snapshot, cx);
+    }
+
+    /// Give the view fills, as if the venue had reported them.
+    pub fn set_fills(
+        &mut self,
+        fills: galata_desk_core::market::fills::Fills,
+        cx: &mut Context<Self>,
+    ) {
+        self.snapshot.fills.data = Some(fills);
+        cx.notify();
     }
 
     /// Give the view funding rates, as if the venue had reported them.

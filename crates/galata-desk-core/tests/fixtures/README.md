@@ -7,3 +7,4 @@ shapes the decoder reads.
 Two are hand-written to the venue's documented shapes, because the recorded
 accounts hold no spot token and no builder-dex position:
 `spotClearinghouseState.json` and the positions in `clearinghouseState_xyz.json`.
+The last entry of `userFills.json` is hand-written too, for a builder-dex fill.

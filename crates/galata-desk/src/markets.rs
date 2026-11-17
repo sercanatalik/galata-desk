@@ -10,6 +10,7 @@ use galata_desk_core::market::candles::Candle;
 use galata_desk_core::market::feed::{
     Connection, Listed, Listing, Live, MarketFeed, MarketSnapshot, Tile,
 };
+use galata_desk_core::market::fills::{self, CandleFills, FillSide, SideFills};
 use galata_desk_core::market::sort::{self, SortBy};
 use galata_desk_core::market::watchlist::{AddError, LIMIT, Watchlist};
 use galata_desk_core::market::{Interval, MarketId, MarketPeriod};
@@ -21,6 +22,8 @@ use gpui_kit::component::button::{Button, ButtonVariants};
 use gpui_kit::component::chart::CandlestickChart;
 use gpui_kit::component::input::{Input, InputEvent, InputState};
 use gpui_kit::component::menu::{DropdownMenu, PopupMenuItem};
+use gpui_kit::component::plot::scale::{Scale, ScaleBand};
+use gpui_kit::component::skeleton::Skeleton;
 use gpui_kit::component::tab::TabBar;
 use gpui_kit::component::{Sizable, h_flex, v_flex};
 use gpui_kit::prelude::*;
@@ -75,6 +78,9 @@ pub struct Markets {
     ordered_at: Option<Instant>,
     /// Work the order out again at the next draw, whatever its age.
     reorder: bool,
+    /// What the chart area last drew, for tests: its state, how many buy and
+    /// sell marks, and the "shown since" time.
+    drawn_chart: std::cell::Cell<(&'static str, usize, usize, Option<u64>)>,
     /// One focus handle per tile, so the keyboard can reach each.
     focus: HashMap<MarketId, FocusHandle>,
     picker_open: bool,
@@ -166,6 +172,7 @@ impl Markets {
             order: Vec::new(),
             ordered_at: None,
             reorder: false,
+            drawn_chart: std::cell::Cell::new(("none", 0, 0, None)),
             focus: HashMap::new(),
             picker_open: false,
             search,
@@ -868,10 +875,18 @@ impl Markets {
                 .as_ref()
                 .filter(|chart| chart.market == market && chart.interval == self.period.interval())
                 .map(|chart| chart.candles.as_slice());
+            // The account's fills in this market, grouped into these candles.
+            let (grouped, since) = match (self.portfolio.read(cx).fills(), candles) {
+                (Some(all), Some(candles)) if !candles.is_empty() => (
+                    fills::group(&all.rows, &market, candles, self.period.interval().millis()),
+                    fills::shown_since(all, candles[0].open_ms),
+                ),
+                _ => (Vec::new(), None),
+            };
             h_flex()
                 .size_full()
                 .child(self.detail(tile, position.as_ref()))
-                .child(self.chart(tile, candles))
+                .child(self.chart(tile, candles, &grouped, since, cx.reduce_motion()))
                 .into_any_element()
         };
 
@@ -1028,7 +1043,15 @@ impl Markets {
     }
 
     /// The panel's right side: the market's candles over the period.
-    fn chart(&self, tile: &Tile, candles: Option<&[Candle]>) -> AnyElement {
+    fn chart(
+        &self,
+        tile: &Tile,
+        candles: Option<&[Candle]>,
+        grouped: &[CandleFills],
+        since: Option<u64>,
+        // The system asks for reduced motion: placeholders hold still.
+        still: bool,
+    ) -> AnyElement {
         let interval = self.period.interval();
         // A period under an hour is too few candles to read, so the chart
         // shows the hour it ends; the heading says so.
@@ -1037,6 +1060,17 @@ impl Markets {
         } else {
             interval_words(interval).to_string()
         };
+        // The venue returns only the latest fills: say so when they do not
+        // reach back to the chart's first candle.
+        let span_ms = candles
+            .and_then(|c| Some(c.last()?.open_ms.saturating_sub(c.first()?.open_ms)))
+            .unwrap_or_default();
+        let since_note = since.map(|at| {
+            format!(
+                "Your trades shown since {}",
+                time_label(at, span_ms.max(24 * 3_600_000))
+            )
+        });
         let heading = h_flex()
             .gap_4()
             .text_size(px(12.5))
@@ -1051,7 +1085,9 @@ impl Markets {
                         self.period.label()
                     )),
             )
-            .child(shown);
+            .child(shown)
+            .child(div().flex_1())
+            .children(since_note.map(|note| div().id("trades-since").child(note).test_support()));
 
         let message = |text: &'static str| {
             h_flex()
@@ -1061,15 +1097,72 @@ impl Markets {
                 .child(text)
                 .into_any_element()
         };
-        let body: AnyElement = match candles {
-            // History has not loaded: a placeholder in the chart's shape.
-            None => div()
-                .size_full()
-                .child(ui::placeholder(px(9999.), px(9999.)))
-                .into_any_element(),
-            Some(candles) if candles.len() < 2 => message("Not enough history for this period yet"),
-            Some(candles) => candle_chart(candles, tile.live.as_ref().map(|l| l.last)),
+        let marks = |side: fn(&CandleFills) -> bool| grouped.iter().filter(|c| side(c)).count();
+        let (state, body): (&'static str, AnyElement) = match candles {
+            // The last attempt to load the candles failed. It is tried again.
+            None if self.snapshot.chart_failed => (
+                "failed",
+                v_flex()
+                    .id("chart-failed")
+                    .size_full()
+                    .items_center()
+                    .justify_center()
+                    .gap(px(6.))
+                    .child(
+                        div()
+                            .text_color(Palette::amber_text())
+                            .child("The chart's candles could not be loaded"),
+                    )
+                    .child(ui::label(
+                        "Trying again in a few seconds. The figures on the left are live.",
+                    ))
+                    .test_support()
+                    .into_any_element(),
+            ),
+            // Still loading: placeholders in the shape of candles, and what
+            // is being waited for.
+            None => (
+                "loading",
+                v_flex()
+                    .id(if still {
+                        "chart-loading-still"
+                    } else {
+                        "chart-loading"
+                    })
+                    .size_full()
+                    .gap_2()
+                    .child(ghost_candles(still))
+                    .child(ui::label(format!(
+                        "Loading {} {} candles\u{2026}",
+                        tile.market.ticker(),
+                        self.period.label()
+                    )))
+                    .test_support()
+                    .into_any_element(),
+            ),
+            Some(candles) if candles.len() < 2 => {
+                ("short", message("Not enough history for this period yet"))
+            }
+            Some(candles) => (
+                "chart",
+                candle_chart(candles, tile.live.as_ref().map(|l| l.last), grouped),
+            ),
         };
+        let drawn = state == "chart";
+        self.drawn_chart.set((
+            state,
+            if drawn {
+                marks(|c| c.bought.is_some())
+            } else {
+                0
+            },
+            if drawn {
+                marks(|c| c.sold.is_some())
+            } else {
+                0
+            },
+            since,
+        ));
 
         v_flex()
             .flex_1()
@@ -1257,6 +1350,124 @@ struct Bar {
     high: Decimal,
     low: Decimal,
     close: Decimal,
+    /// What the account bought and sold in this candle.
+    fills: CandleFills,
+}
+
+/// The component kit's candlestick chart lays its candles out with these
+/// band settings. The fill marks use the same, so they sit on their candles.
+const BAND_PADDING_INNER: f32 = 0.4;
+const BAND_PADDING_OUTER: f32 = 0.2;
+/// A fill mark's side, in pixels.
+const MARK_SIZE: f32 = 16.;
+
+/// A `B` or `S` on the chart: a small bordered chip, centred on its candle.
+fn fill_mark(
+    id: (&'static str, usize),
+    letter: &'static str,
+    colour: gpui_kit::Hsla,
+    x: f32,
+    top: f32,
+) -> AnyElement {
+    div()
+        .id(id)
+        .absolute()
+        .left(gpui_kit::relative(x))
+        .top(px(top))
+        .ml(px(-MARK_SIZE / 2.))
+        .size(px(MARK_SIZE))
+        .flex()
+        .items_center()
+        .justify_center()
+        .rounded(px(4.))
+        .border_1()
+        .border_color(colour.opacity(0.7))
+        .bg(Palette::panel())
+        .text_color(colour)
+        .text_size(px(10.5))
+        .font_weight(gpui_kit::FontWeight::BOLD)
+        .child(letter)
+        .test_support()
+        .into_any_element()
+}
+
+/// One side of a candle's fills, for the readout: `Sold 8 at 103 (2 fills)`
+/// and what it realised.
+fn fills_line(side: FillSide, fills: &SideFills, like: Decimal) -> gpui_kit::Div {
+    let (word, colour) = match side {
+        FillSide::Bought => ("Bought", Palette::gain()),
+        FillSide::Sold => ("Sold", Palette::loss()),
+    };
+    let count = if fills.count == 1 {
+        "1 fill".to_string()
+    } else {
+        format!("{} fills", fills.count)
+    };
+    v_flex()
+        .mt(px(3.))
+        .child(div().text_color(colour).child(format!(
+            "{word} {} at {} ({count})",
+            f::amount(fills.size),
+            f::price_like(fills.average, like),
+        )))
+        .when(!fills.realised.is_zero(), |d| {
+            d.child(
+                div()
+                    .font_family(MONO)
+                    .text_color(ui::tone_of(sign(fills.realised)))
+                    .child(f::usd_signed(fills.realised)),
+            )
+        })
+}
+
+/// Placeholders in the shape of candles, while the real ones load. The
+/// heights are a fixed pattern, so they do not jump from frame to frame.
+fn ghost_candles(still: bool) -> AnyElement {
+    const PATTERN: [(f32, f32); 12] = [
+        (0.30, 0.34),
+        (0.38, 0.22),
+        (0.26, 0.30),
+        (0.44, 0.26),
+        (0.52, 0.18),
+        (0.40, 0.32),
+        (0.34, 0.24),
+        (0.48, 0.28),
+        (0.56, 0.20),
+        (0.46, 0.30),
+        (0.36, 0.26),
+        (0.42, 0.22),
+    ];
+    h_flex()
+        .flex_1()
+        .min_h_0()
+        .h(px(PLOT_HEIGHT))
+        .items_start()
+        .justify_between()
+        .px_2()
+        .children((0..36).map(|i| {
+            let (top, height) = PATTERN[i % PATTERN.len()];
+            v_flex()
+                .h_full()
+                .child(div().h(gpui_kit::relative(top)))
+                // The kit's placeholder pulses whatever the system's motion
+                // setting; when reduced motion is asked for, a plain block of
+                // the same shape stands in for it.
+                .child(if still {
+                    div()
+                        .w(px(8.))
+                        .h(gpui_kit::relative(height))
+                        .rounded(px(2.))
+                        .bg(Palette::text().opacity(0.08))
+                        .into_any_element()
+                } else {
+                    Skeleton::new()
+                        .w(px(8.))
+                        .h(gpui_kit::relative(height))
+                        .rounded(px(2.))
+                        .into_any_element()
+                })
+        }))
+        .into_any_element()
 }
 
 /// A period as the menu names it.
@@ -1313,22 +1524,32 @@ fn plot_y(value: f64, low: f64, high: f64) -> f32 {
 
 /// The candlestick chart with what the kit does not draw: a price axis, a
 /// time axis, and a line at the last price.
-fn candle_chart(candles: &[Candle], last: Option<Decimal>) -> AnyElement {
+fn candle_chart(candles: &[Candle], last: Option<Decimal>, grouped: &[CandleFills]) -> AnyElement {
     let span_ms = match (candles.first(), candles.last()) {
         (Some(first), Some(last)) => last.open_ms.saturating_sub(first.open_ms),
         _ => 0,
     };
     let bars: Vec<Bar> = candles
         .iter()
-        .map(|c| Bar {
+        .enumerate()
+        .map(|(i, c)| Bar {
             key: SharedString::from(c.open_ms.to_string()),
             time: SharedString::from(time_label(c.open_ms, 24 * 3_600_000)),
             open: c.open,
             high: c.high,
             low: c.low,
             close: c.close,
+            fills: grouped.get(i).cloned().unwrap_or_default(),
         })
         .collect();
+    // Where each candle sits across the plot, as a share of its width: the
+    // same band scale, with the same settings, the chart places them by.
+    let keys: Vec<SharedString> = bars.iter().map(|b| b.key.clone()).collect();
+    let bands = ScaleBand::new(keys.iter().cloned(), [0., 1.])
+        .padding_inner(BAND_PADDING_INNER)
+        .padding_outer(BAND_PADDING_OUTER);
+    let half_band = bands.band_width() / 2.;
+    let centre = |key: &SharedString| bands.tick(key).map(|start| start + half_band);
     let f64_of = |d: Decimal| d.to_f64().unwrap_or_default();
     let low = candles.iter().map(|c| c.low).min().unwrap_or_default();
     let high = candles.iter().map(|c| c.high).max().unwrap_or_default();
@@ -1365,7 +1586,44 @@ fn candle_chart(candles: &[Candle], last: Option<Decimal>) -> AnyElement {
                 .child(line("High", b.high))
                 .child(line("Low", b.low))
                 .child(line("Close", b.close))
+                .children(
+                    b.fills
+                        .bought
+                        .as_ref()
+                        .map(|side| fills_line(FillSide::Bought, side, b.open)),
+                )
+                .children(
+                    b.fills
+                        .sold
+                        .as_ref()
+                        .map(|side| fills_line(FillSide::Sold, side, b.open)),
+                )
         });
+
+    let marks: Vec<AnyElement> = candles
+        .iter()
+        .zip(&keys)
+        .zip(grouped)
+        .enumerate()
+        .flat_map(|(i, ((candle, key), fills))| {
+            let Some(x) = centre(key) else {
+                return Vec::new();
+            };
+            let mut out = Vec::new();
+            if fills.bought.is_some() {
+                // Beneath the candle's low, kept inside the plot.
+                let top =
+                    (plot_y(f64_of(candle.low), low_f, high_f) + 3.).min(PLOT_HEIGHT - MARK_SIZE);
+                out.push(fill_mark(("fill-b", i), "B", Palette::gain(), x, top));
+            }
+            if fills.sold.is_some() {
+                // Above the candle's high.
+                let top = (plot_y(f64_of(candle.high), low_f, high_f) - 3. - MARK_SIZE).max(0.);
+                out.push(fill_mark(("fill-s", i), "S", Palette::loss(), x, top));
+            }
+            out
+        })
+        .collect();
 
     // Five price labels, evenly spaced from the high down to the low.
     let labels = (0..5).map(|i| {
@@ -1405,6 +1663,9 @@ fn candle_chart(candles: &[Candle], last: Option<Decimal>) -> AnyElement {
                         .min_w_0()
                         .h(px(PLOT_HEIGHT))
                         .child(chart)
+                        // The account's fills: a B under the candle where
+                        // it bought, an S above the candle where it sold.
+                        .children(marks)
                         // The last price, across the plot.
                         .children(last.map(|last| {
                             div()
@@ -1455,6 +1716,12 @@ impl Markets {
             self.period.label(),
             self.colour.label()
         )
+    }
+
+    /// What the chart area last drew: `loading`, `failed`, `short`, `chart`
+    /// or `none`; how many `B` and `S` marks; and the "shown since" time.
+    pub fn drawn_chart(&self) -> (&'static str, usize, usize, Option<u64>) {
+        self.drawn_chart.get()
     }
 
     /// The tiles in the order they were last drawn.

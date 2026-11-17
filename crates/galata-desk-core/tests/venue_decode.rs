@@ -166,3 +166,20 @@ fn funding_rates_pair_each_market_with_its_context() {
         );
     }
 }
+
+#[test]
+fn user_fills_decode_with_side_price_size_time_and_realised_pnl() {
+    use galata_desk_core::venue::{Side, UserFill};
+    let fills: Vec<UserFill> = decode("userFills", &fixture("userFills")).unwrap();
+    assert_eq!(fills.len(), 6);
+    assert!(
+        fills
+            .iter()
+            .all(|f| f.time > 1_700_000_000_000 && !f.sz.is_zero())
+    );
+    let nvda = fills.iter().find(|f| f.coin == "xyz:NVDA").unwrap();
+    assert_eq!(nvda.side, Side::Buy);
+    assert_eq!(nvda.px.to_string(), "155.42");
+    assert_eq!(nvda.sz.to_string(), "12.5");
+    assert!(nvda.closed_pnl.is_zero());
+}

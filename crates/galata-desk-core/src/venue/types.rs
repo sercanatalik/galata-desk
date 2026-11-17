@@ -108,6 +108,21 @@ pub struct OpenOrder {
     pub trigger_condition: String,
 }
 
+/// One fill of the account's, as the venue reports it.
+#[derive(Debug, Clone, PartialEq, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct UserFill {
+    /// The venue's coin name: `BTC`, `xyz:NVDA`.
+    pub coin: String,
+    pub px: Decimal,
+    pub sz: Decimal,
+    pub side: Side,
+    /// Milliseconds since the epoch.
+    pub time: u64,
+    /// PNL the fill realised; zero when it opened or added to a position.
+    pub closed_pnl: Decimal,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
 pub enum Side {
     /// Bid.

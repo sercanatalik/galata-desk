@@ -110,6 +110,13 @@ volatility over the period.
   - on the right, a candlestick chart over the period (1-minute candles up
     to 1 hour, 15-minute for 24 hours, 2-hour for 7 days) with a line at the
     last price. Point at a candle for its time, open, high, low and close.
+    Your own fills are marked on it: a **B** under a candle where you
+    bought and an **S** above one where you sold, one per candle and side;
+    pointing at the candle adds the size, average price and realised PNL.
+    Hyperliquid returns only your latest 2,000 fills, so when they do not
+    reach back to the chart's start, the chart says from when your trades
+    are shown. While candles load, the chart shows placeholders and says
+    what it is loading; if loading fails it says so and tries again.
 
   The chart is drawn from the same candles the tiles are computed from. For
   a period under an hour it shows the last hour, so there is something to
@@ -185,7 +192,7 @@ The account shown is one of Hyperliquid's own public vaults.
 | | |
 |---|---|
 | ![Portfolio: account value, breakdown, PNL chart and positions](assets/screenshots/portfolio.png) | ![Markets: the selected market's detail and candlestick chart above heatmap tiles](assets/screenshots/markets.png) |
-| **Portfolio.** Summary, breakdown, history chart and the positions table, with the footer beneath. | **Markets.** The panel on a builder-dex market, above tiles coloured by 24-hour change. |
+| **Portfolio.** Summary, breakdown, history chart and the positions table, with the footer beneath. | **Markets.** The panel on a 1-hour chart with the account's fills marked B and S, above tiles coloured by change. |
 
 <img src="assets/screenshots/connect.png" alt="The connect page in a browser" width="420">
 

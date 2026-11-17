@@ -1189,3 +1189,163 @@ fn disconnecting_keeps_saved_api_keys(cx: &mut TestAppContext) {
     })
     .unwrap();
 }
+
+// ---- The chart: loading, failed, and the account's fills -------------------
+
+use galata_desk_core::market::candles::Candle;
+use galata_desk_core::market::feed::Chart;
+use galata_desk_core::market::fills::{Fill, FillSide, Fills};
+use galata_desk_core::market::{Interval, MarketPeriod};
+
+const CANDLE_T0: u64 = 1_794_900_000_000;
+
+/// A snapshot with a chart of `count` 15-minute candles for `coin`.
+fn charted(coin: &str, watched: &[&str], count: u64) -> MarketSnapshot {
+    let mut snapshot = snapshot(watched, watched);
+    snapshot.chart = Some(Chart {
+        market: MarketId::new(coin),
+        interval: Interval::M15,
+        candles: (0..count)
+            .map(|i| Candle {
+                open_ms: CANDLE_T0 + i * Interval::M15.millis(),
+                open: Decimal::from(100 + i),
+                high: Decimal::from(102 + i),
+                low: Decimal::from(99 + i),
+                close: Decimal::from(101 + i),
+            })
+            .collect(),
+    });
+    snapshot
+}
+
+fn a_fill(coin: &str, side: FillSide, candle: u64) -> Fill {
+    Fill {
+        coin: coin.into(),
+        side,
+        price: Decimal::from(100),
+        size: Decimal::ONE,
+        time_ms: CANDLE_T0 + candle * Interval::M15.millis() + 1,
+        realised: Decimal::ZERO,
+    }
+}
+
+#[gpui_kit::test]
+fn the_chart_area_shows_loading_then_failed_then_the_chart(cx: &mut TestAppContext) {
+    let (window, desk, _dir) = open_with(cx, Some(&["BTC", "ETH"]));
+    let markets = go_to_markets(window, &desk, cx);
+    cx.update_window(window.into(), |_, window, cx| {
+        assert_eq!(MarketPeriod::default().interval(), Interval::M15);
+        // No chart yet and no failure: loading, and it says what.
+        markets.update(cx, |view, cx| {
+            view.set_snapshot(snapshot(&["BTC", "ETH"], &["BTC", "ETH"]), cx)
+        });
+        window.render_frame(cx);
+        assert_eq!(markets.read(cx).drawn_chart().0, "loading");
+        assert!(window.try_find("chart-loading").is_some());
+        assert!(window.try_find("chart-failed").is_none());
+
+        // With reduced motion asked for, the placeholders hold still and the
+        // text still says what is loading.
+        cx.set_reduce_motion(true);
+        markets.update(cx, |_, cx| cx.notify());
+        window.render_frame(cx);
+        assert_eq!(markets.read(cx).drawn_chart().0, "loading");
+        assert!(window.try_find("chart-loading-still").is_some());
+        assert!(window.try_find("chart-loading").is_none());
+        cx.set_reduce_motion(false);
+
+        // The load failed: the chart area says so.
+        let mut failed = snapshot(&["BTC", "ETH"], &["BTC", "ETH"]);
+        failed.chart_failed = true;
+        markets.update(cx, |view, cx| view.set_snapshot(failed, cx));
+        window.render_frame(cx);
+        assert_eq!(markets.read(cx).drawn_chart().0, "failed");
+        assert!(window.try_find("chart-failed").is_some());
+        assert!(window.try_find("chart-loading").is_none());
+
+        // A later attempt succeeds: the chart, and no message.
+        markets.update(cx, |view, cx| {
+            view.set_snapshot(charted("BTC", &["BTC", "ETH"], 40), cx)
+        });
+        window.render_frame(cx);
+        assert_eq!(markets.read(cx).drawn_chart().0, "chart");
+        assert!(window.try_find("chart-failed").is_none());
+        assert!(window.try_find("chart-loading").is_none());
+    })
+    .unwrap();
+}
+
+#[gpui_kit::test]
+fn the_accounts_fills_are_marked_on_the_selected_markets_chart(cx: &mut TestAppContext) {
+    let (window, desk, _dir) = open_with(cx, Some(&["BTC", "ETH"]));
+    let markets = go_to_markets(window, &desk, cx);
+    cx.update_window(window.into(), |_, window, cx| {
+        markets.update(cx, |view, cx| {
+            view.set_snapshot(charted("BTC", &["BTC", "ETH"], 40), cx)
+        });
+        window.render_frame(cx);
+        // Until fills arrive the chart is drawn without marks.
+        assert_eq!(markets.read(cx).drawn_chart(), ("chart", 0, 0, None));
+
+        let portfolio = desk.read(cx).portfolio_view().unwrap();
+        portfolio.update(cx, |view, cx| {
+            view.set_fills(
+                Fills::new(vec![
+                    // Two buys in candle 5 are one mark; a sell there is another.
+                    a_fill("BTC", FillSide::Bought, 5),
+                    a_fill("BTC", FillSide::Bought, 5),
+                    a_fill("BTC", FillSide::Sold, 5),
+                    a_fill("BTC", FillSide::Sold, 20),
+                    // Another market's fills are not this chart's.
+                    a_fill("ETH", FillSide::Bought, 7),
+                ]),
+                cx,
+            )
+        });
+        markets.update(cx, |_, cx| cx.notify());
+        window.render_frame(cx);
+        assert_eq!(markets.read(cx).drawn_chart(), ("chart", 1, 2, None));
+        assert!(window.try_find(("fill-b", 5usize)).is_some());
+        assert!(window.try_find(("fill-s", 5usize)).is_some());
+        assert!(window.try_find(("fill-s", 20usize)).is_some());
+        assert!(window.try_find(("fill-b", 7usize)).is_none());
+        // Few fills: the venue did not cut them short, so nothing is said.
+        assert!(window.try_find("trades-since").is_none());
+
+        // The other market's chart shows its own fill and none of BTC's.
+        markets.update(cx, |view, cx| {
+            view.set_snapshot(charted("ETH", &["BTC", "ETH"], 40), cx)
+        });
+        window.click(("tile", 1usize), cx);
+        window.render_frame(cx);
+        assert_eq!(markets.read(cx).selected_market().as_deref(), Some("ETH"));
+        assert_eq!(markets.read(cx).drawn_chart(), ("chart", 1, 0, None));
+        assert!(window.try_find(("fill-b", 7usize)).is_some());
+    })
+    .unwrap();
+}
+
+#[gpui_kit::test]
+fn the_chart_says_from_when_trades_are_shown_only_when_the_venue_cut_them_short(
+    cx: &mut TestAppContext,
+) {
+    let (window, desk, _dir) = open_with(cx, Some(&["BTC"]));
+    let markets = go_to_markets(window, &desk, cx);
+    cx.update_window(window.into(), |_, window, cx| {
+        markets.update(cx, |view, cx| {
+            view.set_snapshot(charted("BTC", &["BTC"], 40), cx)
+        });
+        let portfolio = desk.read(cx).portfolio_view().unwrap();
+        // As many fills as the venue gives at once, the earliest in candle 30.
+        let mut rows = vec![a_fill("ETH", FillSide::Bought, 30); 1999];
+        rows.push(a_fill("BTC", FillSide::Sold, 35));
+        portfolio.update(cx, |view, cx| view.set_fills(Fills::new(rows), cx));
+        markets.update(cx, |_, cx| cx.notify());
+        window.render_frame(cx);
+        let (state, bought, sold, since) = markets.read(cx).drawn_chart();
+        assert_eq!((state, bought, sold), ("chart", 0, 1));
+        assert_eq!(since, Some(CANDLE_T0 + 30 * Interval::M15.millis() + 1));
+        assert!(window.try_find("trades-since").is_some());
+    })
+    .unwrap();
+}

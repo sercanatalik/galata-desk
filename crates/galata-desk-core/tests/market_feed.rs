@@ -57,6 +57,8 @@ struct Venue {
     /// How many of the next history requests are answered "slow down".
     slow_downs: Arc<AtomicU64>,
     listing_fails: Arc<AtomicBool>,
+    /// A coin whose history requests fail while it is named here.
+    broken: Arc<Mutex<Option<String>>>,
     asked: Arc<Mutex<Vec<String>>>,
 }
 
@@ -66,6 +68,7 @@ impl Venue {
             hold: Arc::default(),
             slow_downs: Arc::default(),
             listing_fails: Arc::default(),
+            broken: Arc::default(),
             asked: Arc::default(),
         }
     }
@@ -117,6 +120,9 @@ impl Transport for Venue {
                     .push(format!("candleSnapshot {coin} {interval}"));
                 while self.hold.load(Ordering::SeqCst) {
                     tokio::time::sleep(Duration::from_millis(10)).await;
+                }
+                if self.broken.lock().unwrap().as_deref() == Some(coin) {
+                    return Err(VenueError::Unreachable("no connection".into()));
                 }
                 if self.slow_downs.load(Ordering::SeqCst) > 0 {
                     self.slow_downs.fetch_sub(1, Ordering::SeqCst);
@@ -923,4 +929,51 @@ async fn a_short_period_chosen_first_still_loads_an_hour() {
     r.feed.set_period(MarketPeriod::Min3);
     let snapshot = r.settle().await;
     assert!((60..=61).contains(&snapshot.chart.unwrap().candles.len()));
+}
+
+// ---- A chart whose history could not be loaded ----------------------------
+
+#[tokio::test(start_paused = true)]
+async fn a_failed_history_load_is_reported_and_a_later_success_clears_it() {
+    let venue = Venue::new();
+    *venue.broken.lock().unwrap() = Some("BTC".into());
+    let mut r = rig_with(venue, &["BTC", "ETH"]);
+    r.feed.select(Some(id("BTC")));
+    let snapshot = r.settle().await;
+    assert_eq!(snapshot.chart, None);
+    assert!(
+        snapshot.chart_failed,
+        "the selected market's history failed"
+    );
+    // The other market loaded: its tile has figures.
+    assert!(snapshot.tiles[1].stats.is_some());
+
+    // A failure belongs to its market: selecting the one that loaded shows
+    // its chart and no failure.
+    r.feed.select(Some(id("ETH")));
+    let snapshot = r.settle().await;
+    assert!(snapshot.chart.is_some());
+    assert!(!snapshot.chart_failed);
+
+    // The venue recovers; the feed asks again by itself.
+    r.feed.select(Some(id("BTC")));
+    *r.venue.broken.lock().unwrap() = None;
+    tokio::time::sleep(Duration::from_secs(40)).await;
+    let snapshot = r.settle().await;
+    assert!(
+        snapshot.chart.is_some(),
+        "the chart loaded on a later attempt"
+    );
+    assert!(!snapshot.chart_failed);
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_chart_that_is_only_slow_is_not_reported_as_failed() {
+    let venue = Venue::new();
+    venue.hold.store(true, Ordering::SeqCst);
+    let mut r = rig_with(venue, &["BTC"]);
+    r.feed.select(Some(id("BTC")));
+    let snapshot = r.settle().await;
+    assert_eq!(snapshot.chart, None);
+    assert!(!snapshot.chart_failed);
 }

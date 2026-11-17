@@ -172,6 +172,13 @@ impl<T: Transport> Info<T> {
         .await
     }
 
+    /// The account's latest fills across all markets, newest first. The
+    /// venue returns at most 2,000.
+    pub async fn user_fills(&self, user: &str) -> Result<Vec<UserFill>, VenueError> {
+        self.ask("userFills", json!({ "type": "userFills", "user": user }))
+            .await
+    }
+
     /// Account value and PNL history, and volume, per period and scope.
     pub async fn portfolio(&self, user: &str) -> Result<PortfolioHistory, VenueError> {
         let periods: Vec<(String, PeriodHistory)> = self
