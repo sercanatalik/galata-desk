@@ -5,95 +5,161 @@
 
 # galata-desk
 
-**A native desktop view of a Hyperliquid account's portfolio.**
+[![MIT](https://img.shields.io/badge/licence-MIT-blue.svg)](LICENSE-MIT)
+[![Rust 1.98+](https://img.shields.io/badge/rust-1.98%2B-b7410e.svg)](rust-toolchain.toml)
+[![Built with GPUI Kit](https://img.shields.io/badge/ui-GPUI%20Kit%200.10-000000.svg)](https://github.com/longbridge/gpui-kit)
+[![macOS](https://img.shields.io/badge/platform-macOS-lightgrey.svg)](#quick-start)
 
-galata-desk shows what one Hyperliquid account is worth, how it has performed,
-what it holds and what orders it has resting. It is read-only: it places no
-order, moves no funds and holds no private key. It learns which account to
-show by having you prove, with a wallet in your browser, that you own the
-address.
+**A native desktop view of a Hyperliquid account and the markets it trades.
+Read-only, and it never holds a key.**
 
-It is the first trading-side screen of **Galata**, a low-latency algorithmic
-trading framework, alongside
-[galata-datawatch](https://github.com/sercanatalik/galata-datawatch),
-[galata-tower](https://github.com/sercanatalik/galata-tower),
-[galata-vault](https://github.com/sercanatalik/galata-vault) and
-galata-research.
+galata-desk shows what one Hyperliquid account is worth, how it has
+performed, what it holds and what orders it has resting, beside a live heatmap
+of the markets you choose to watch. It learns which account to show by having
+you prove, with a wallet in your browser, that you own the address. After
+that it only reads public data.
 
-> **Status: 0.x.** macOS only. The portfolio screen and the connection flow
-> are built; connecting with a real wallet has not yet been exercised end to end.
+> **Status: 0.x.** macOS only. The Portfolio and Markets sections, the account
+> footer and the wallet connection are built. It places no orders, and is not
+> meant to yet.
+
+---
+
+## Contents
+
+- [Where it fits in Galata](#where-it-fits-in-galata)
+- [What it shows](#what-it-shows)
+- [Screenshots](#screenshots)
+- [Quick start](#quick-start)
+- [Connecting an account](#connecting-an-account)
+- [How the figures are defined](#how-the-figures-are-defined)
+- [Configuration](#configuration)
+- [Architecture](#architecture)
+- [Development](#development)
+- [A packaged app](#a-packaged-app)
+- [Not built](#not-built)
+- [Licence](#licence)
+
+---
+
+## Where it fits in Galata
+
+Galata is a low-latency algorithmic trading framework in Rust.
+[galata-datawatch](https://github.com/sercanatalik/galata-datawatch) records
+market data, [galata-tower](https://github.com/sercanatalik/galata-tower) is
+the operator's window onto that record,
+[galata-vault](https://github.com/sercanatalik/galata-vault) keeps its
+secrets, and galata-research studies it. galata-desk is the first screen on
+the trading side: it looks at an account, live, straight from the venue.
+
+It depends on none of its siblings and needs none of them running.
+
+```mermaid
+flowchart LR
+    WALLET["wallet<br/>browser extension or phone"]
+    PAGE["connect page<br/>served on 127.0.0.1"]
+    INFO[("Hyperliquid<br/>info API")]
+    WS[("Hyperliquid<br/>WebSocket")]
+
+    subgraph DESK["galata-desk (one binary)"]
+        CORE["galata-desk-core<br/>feeds, arithmetic, bridge"]
+        UI["GPUI window<br/>Portfolio · Markets · footer"]
+    end
+
+    WALLET -- "signs one message" --> PAGE
+    PAGE -- "address + signature" --> CORE
+    INFO -- "unsigned queries" --> CORE
+    WS -- "prices, funding, candles" --> CORE
+    CORE -- "snapshots" --> UI
+```
+
+| It talks to | For | Never |
+|---|---|---|
+| Hyperliquid's info API | the account's state and history, candle history | sends a signed request |
+| Hyperliquid's WebSocket | live market figures and candles | sends anything but subscribe, unsubscribe and ping |
+| your wallet, through a local page | one signature proving you own the address | sees a key, or asks for a transaction |
 
 ---
 
 ## What it shows
 
+### Portfolio
+
 - **Account value**, 14-day volume, and taker and maker fee rates for
   perpetuals or spot.
-- **A breakdown**: PNL, volume and max drawdown for 24 hours, 7 days, 30 days
-  or all time, for the whole account or perpetuals only; and total, perpetuals,
-  spot and vault equity, and the staking balance.
+- **A breakdown**: PNL, volume and max drawdown over 24 hours, 7 days, 30
+  days or all time, for the whole account or perpetuals only; and total,
+  spot, perpetuals and vault equity, and the staking balance.
 - **A history chart** of account value or PNL.
-- **Positions** on every perpetuals dex, including builder-deployed ones;
-  **balances**; and **open orders**.
-- **Markets**: a live heatmap of the markets you watch (below).
-
-Positions and balances refresh every 5 seconds, orders every 10, the rest
-every minute. When Hyperliquid cannot be reached the last figures stay on
-screen, marked with the time they are from. Gains are blue and losses orange,
-and every signed amount carries its `+` or `-`.
-
-Everything comes from Hyperliquid's public info API, which takes no signature.
-The app sends nothing else.
-
-### The footer
-
-A line along the bottom of the window, under both sections, sums the account
-up: **equity** (the same figure as Account value), **unrealised PNL** across
-open positions and its share of equity, **PNL over 24 hours** and **all
-time**, the number of open positions, the margin they use as a share of
-equity, and when the figures were last refreshed. If Hyperliquid stops
-answering, the figures stay and the time turns amber.
+- **Positions** on every perpetuals dex, including builder-deployed ones such
+  as `xyz`; **balances**; and **open orders**.
 
 ### Markets
 
-A second section, beside Portfolio, shows the markets you watch as a grid of
-tiles. Each tile has:
+The markets you watch, as a grid of tiles. Each tile has the ticker and its
+dex, an amber dot when you hold a position in it, the last price, the signed
+change over the period, the period's low and high with a marker for where the
+last price sits between them, and volatility over the period.
 
-- the ticker, the builder dex it trades on (for example `xyz`), and an amber
-  dot when you hold a position in it;
-- the last price (the mid, or the mark where there is no mid) and the signed
-  change over the period;
-- the period's low and high, with a marker for where the last price sits
-  between them;
-- volatility over the period.
+- **Period**: 1 hour, 24 hours or 7 days.
+- **Colour by**: change, volatility, or funding (blue where longs pay, orange
+  where shorts pay). A legend above the grid shows the scale.
+- **Detail**: point at a tile, or tab to it, for a sparkline of the period,
+  mark and oracle price, premium, funding per hour and as a yearly rate,
+  24-hour volume, open interest, and your position if you have one.
+- **Watchlist**: **+ Add market** lists every perpetual market Hyperliquid
+  has, on the main dex and on builder dexes, with a search field. Remove a
+  market with the `×` on its tile, or with Delete while it is focused. It
+  holds up to 40 markets, is remembered between launches, and starts from the
+  markets you hold positions in.
 
-**Period** is 1 hour, 24 hours or 7 days, and is a rolling window ending now,
-built from 1-minute, 15-minute or 2-hour candles. **Volatility** is the sample
-standard deviation of the returns between those candles' closes, scaled to the
-whole period. It is not annualised: `3.0%` over 24 hours reads as "it typically
-moved about 3% in a day".
+### The footer
 
-**Colour by** tints the tiles by change, by volatility, or by funding (blue
-where longs pay, orange where shorts pay). The legend above the grid shows the
-scale. The colour is strongest at a fixed bound: 1%, 6% and 15% change for the
-three periods.
+A line along the bottom of the window, under both sections: equity,
+unrealised PNL and its share of equity, PNL over 24 hours and all time, the
+number of open positions, the margin they use as a share of equity, and when
+the figures were last refreshed.
 
-Point at a tile, or tab to it, for its detail: a sparkline of the period, mark
-and oracle price, premium, funding per hour and as a yearly rate, 24-hour
-volume, open interest, and your position if you have one.
+### Throughout
 
-**+ Add market** lists every perpetual market Hyperliquid has, on the main dex
-and on builder dexes, with a search field. Remove a market with the `×` on its
-tile, or with Delete while it is focused. The watchlist holds up to 40 markets
-and is remembered between launches; the first time, it starts from the markets
-you hold positions in.
+- Gains are blue and losses orange, and every signed figure carries its `+`
+  or `-`, so colour is never the only cue.
+- Until a figure arrives its place holds a placeholder, never a zero.
+- When Hyperliquid stops answering, the last figures stay on screen, marked
+  with the time they are from, and the app keeps retrying.
 
-Market data arrives over Hyperliquid's WebSocket and is live to within a
-second or two; the title bar says **Live** or **Not live**. Candle history is
-loaded once per market over REST, at a measured pace: the first five markets
-at once, then about eleven a minute, so a full watchlist of 40 fills in over
-about three minutes. If the connection drops, the last figures stay on
-screen, marked with the time they are from, and the app reconnects by itself.
+---
+
+## Screenshots
+
+The account shown is one of Hyperliquid's own public vaults.
+
+| | |
+|---|---|
+| ![Portfolio: account value, breakdown, PNL chart and positions](assets/screenshots/portfolio.png) | ![Markets: heatmap tiles with a detail card open](assets/screenshots/markets.png) |
+| **Portfolio.** Summary, breakdown, history chart and the positions table, with the footer beneath. | **Markets.** Tiles coloured by 24-hour change, with the detail card open on a builder-dex market. |
+
+<img src="assets/screenshots/connect.png" alt="The connect page in a browser" width="420">
+
+**The connect page**, as the app serves it to your browser.
+
+---
+
+## Quick start
+
+You need macOS and a Rust toolchain. `rust-toolchain.toml` pins stable
+1.98.1, which `rustup` installs by itself.
+
+```sh
+git clone https://github.com/sercanatalik/galata-desk
+cd galata-desk
+cargo run -p galata-desk
+```
+
+Press **Connect wallet**, pick a wallet in the page that opens, sign the
+message, and the portfolio appears. The first build takes a few minutes.
+
+To install it as a double-clickable app, see [A packaged app](#a-packaged-app).
 
 ---
 
@@ -109,7 +175,7 @@ needs one thing: an address, and proof that it is yours.
      to the page) are listed by name. Nothing needs configuring.
    - **Phone wallets** (MetaMask or Rabby on iOS, and others) connect by
      scanning a WalletConnect QR code. This needs a relay project id; see
-     below.
+     [Configuration](#configuration).
 3. The wallet asks you to sign a short plain-text message. Signing it proves
    you own the address. It is not a transaction, costs nothing, and grants no
    permission to trade or move funds. The message reads:
@@ -128,10 +194,37 @@ needs one thing: an address, and proof that it is yours.
    page says you can close the tab.
 
 An attempt that is not finished in five minutes expires. The app remembers
-the address between launches and does not ask again until you disconnect.
+the address between launches and does not ask again until you **Disconnect**.
 
 Connect with the account that holds the funds. An API wallet (agent) address
 has no portfolio of its own, and the venue answers for it with an empty one.
+
+---
+
+## How the figures are defined
+
+Most figures are Hyperliquid's own. These are the ones the app works out, or
+where a choice was made.
+
+| Figure | Definition |
+|---|---|
+| **Total equity** | Depends on how the account holds collateral, which the app asks the venue. With separate perpetuals and spot accounts: perpetuals + spot + vaults. With a unified or portfolio-margin account, where perpetuals are margined from the spot balance: spot + vaults, because the perpetuals figure is already part of spot. |
+| **Mark price** (positions) | Position value divided by size; the venue reports both. |
+| **Max drawdown** | The largest fall in PNL from an earlier peak, divided by the account value at that peak, over the venue's history for the period. |
+| **Unrealised PNL** (footer) | The sum over open positions. |
+| **Last price** (markets) | The venue's mid price, or its mark where there is no mid. |
+| **Change** (markets) | Last price against the price at the start of a rolling window ending now. The venue's own page measures from the previous day's price, so its 24-hour percentage differs. |
+| **Volatility** (markets) | The sample standard deviation of the returns between consecutive candle closes in the period, scaled to the whole period. Not annualised: `3.0%` over 24 hours reads as "it typically moved about 3% in a day". |
+| **Funding (yearly)** | The hourly rate times 24 × 365. |
+
+A period is built from candles: 1-minute for 1 hour, 15-minute for 24 hours,
+2-hour for 7 days.
+
+---
+
+## Configuration
+
+Nothing needs configuring to use browser-extension wallets.
 
 ### Phone wallets: the relay project id
 
@@ -140,7 +233,8 @@ secret: every site that uses WalletConnect ships its own in its page.
 
 1. Create a project at <https://dashboard.reown.com>. No domain needs adding:
    pages on `127.0.0.1` are always permitted.
-2. Give the id to galata-desk in either of two ways:
+2. Give the id to galata-desk in either of two ways. The environment variable
+   wins when both are set.
 
    ```toml
    # ~/Library/Application Support/galata-desk/config.toml
@@ -151,28 +245,161 @@ secret: every site that uses WalletConnect ships its own in its page.
    export GALATA_DESK_REOWN_PROJECT_ID=your-project-id
    ```
 
-   The environment variable wins when both are set.
-
 Without an id the page still connects browser extensions, and says how to
 enable phone wallets where the QR option would be.
 
 ### What is stored
 
-One file, readable only by you:
+Everything is in `~/Library/Application Support/galata-desk/`:
 
-```text
-~/Library/Application Support/galata-desk/account.json
-```
+| File | Holds |
+|---|---|
+| `account.json` | The connected address and when it was proven. Readable only by you. **Disconnect** deletes it. |
+| `watchlist.json` | The watched markets, in order: tickers and dex names. |
+| `config.toml` | Optional. The relay project id. |
 
-It holds the address and when it was proven. **Disconnect** deletes it.
+No key, seed phrase or wallet session is ever stored.
 
 ---
 
-## The app icon and a packaged app
+## Architecture
+
+Two crates and a web page.
+
+```text
+crates/galata-desk-core/   no UI: venue client, arithmetic, feeds, bridge, store
+crates/galata-desk/        the GPUI app: theme, Portfolio, Markets, footer
+connect/                   the connect page (TypeScript, built to connect/dist)
+```
+
+### The core links no UI
+
+Everything that can be tested without a window lives in `galata-desk-core`:
+decoding the venue's answers, every figure's arithmetic, the refresh
+schedules, the connection bridge and the signature check. It runs on a Tokio
+runtime the app owns, and hands the window snapshots over channels. A GPUI
+upgrade or compile failure cannot block its tests.
+
+### Connecting: a browser page, served locally
+
+Rabby and MetaMask on the desktop are browser extensions, and a native
+process cannot call them. So the app serves a page:
+
+- It binds `127.0.0.1` on a port the system picks, for one attempt, and stops
+  on success, on cancel, and after five minutes.
+- Every API call must carry a one-time token from the URL, name this server as
+  its `Host`, and come from it as `Origin`. A page elsewhere, or a hostname
+  rebound to loopback, is refused.
+- The page finds extensions through EIP-6963 and uses WalletConnect's provider
+  only for the QR path. Its scripts, styles and fonts come from the app; a
+  Content-Security-Policy allows connections only to itself and WalletConnect.
+- The wallet signs the challenge with `personal_sign`. The app rebuilds the
+  text, recovers the signer and compares addresses. The nonce lives only for
+  the attempt, so an old signature proves nothing to a new one.
+
+The page is built to `connect/dist`, which is committed and embedded in the
+binary, so building the app needs no Node toolchain.
+
+### Portfolio: tiered polling
+
+| Tier | Every | Asks |
+|---|---|---|
+| holdings | 5 s | perpetuals state of each dex the account is on, spot balances |
+| orders | 10 s | resting orders on each such dex |
+| overview | 60 s | history, fees, vaults, staking, and a sweep of every dex |
+
+Only dexes where the account has something are asked every few seconds; the
+sweep finds them. A tier that fails keeps its last data. HTTP 429 doubles
+every interval, and each later success halves it back.
+
+### Markets: WebSocket, with history on a budget
+
+- One connection carries two subscriptions per watched market: its live
+  figures and its current candle. It pings, detects a dead line, reconnects
+  with backoff, and puts every subscription back.
+- The stream sends only the candle being formed, so the candles before it are
+  loaded over REST once per market and period, rationed: five at once, then
+  about eleven a minute. A full watchlist of 40 fills in over about three
+  minutes.
+- A market is subscribed to only once the venue's list of markets shows it
+  exists. Hyperliquid closes the whole connection on a subscription to a
+  market it does not list, so one delisted market would otherwise take every
+  tile offline.
+- A silence longer than one candle, such as a laptop asleep, leaves a hole in
+  history. The feed measures silence from the last message it received and
+  reloads history when that is too long.
+
+### Staying inside the venue's limits
+
+Hyperliquid allows 1,200 request-weight a minute per IP address, shared with
+anything else on that address, such as galata-datawatch. Measured with a full
+40-market watchlist: 840 in the app's first minute, about 280 a minute once
+history has loaded, and no rate-limit answers.
+
+---
+
+## Development
+
+```sh
+cargo run -p galata-desk                 # the app
+cargo test --workspace                   # 183 tests, none needs a network
+cargo clippy --workspace --all-targets -- -D warnings
+
+# One account's portfolio from the live venue, in the terminal:
+cargo run -p galata-desk-core --example portfolio -- 0x<address>
+
+# Live market tiles in the terminal (1h, 24h or 7d; default 24h):
+cargo run -p galata-desk-core --example markets -- --period 7d BTC xyz:NVDA
+
+# One connection attempt, without the app:
+cargo run -p galata-desk-core --example connect
+```
+
+The core's tests run against recorded venue answers, a scripted market
+stream, and an in-process WebSocket server. The app's tests drive real clicks
+in a headless window.
+
+After changing the connect page, rebuild it and commit `connect/dist`:
+
+```sh
+cd connect && pnpm install && pnpm build
+```
+
+### Switches
+
+All are environment variables, and none is needed in normal use.
+
+| Variable | Effect |
+|---|---|
+| `GALATA_DESK_DIR` | Use this directory instead of the application data directory. |
+| `GALATA_DESK_INFO_URL` | Ask this info endpoint instead of Hyperliquid's. |
+| `GALATA_DESK_WS_URL` | Use this WebSocket endpoint for market data. |
+| `GALATA_DESK_SIZE` | Open the window at this size, for example `1100x700`. |
+
+### Rendering the window to a file
+
+Checking a layout normally needs screen-recording permission. The `shot`
+feature renders the window offscreen to a PNG and quits, with the window
+hidden:
+
+```sh
+cargo build -p galata-desk --features shot
+GALATA_DESK_SHOT=/tmp/desk.png \
+GALATA_DESK_SHOT_AFTER_MS=5000 \
+GALATA_DESK_SHOT_STATE=section=markets,colour=funding,mopen=xyz:NVDA \
+  ./target/debug/galata-desk
+```
+
+`GALATA_DESK_SHOT_STATE` sets the selections to open with. A plain
+`cargo run` afterwards rebuilds the binary without the feature.
+
+---
+
+## A packaged app
 
 The icon is the family's Galata Tower mark on a dark tile: `assets/icon.svg`,
 with `assets/icon.png` and `assets/AppIcon.icns` rendered from it. The running
-app sets it as its Dock icon, so it shows even under `cargo run`.
+app sets it as its Dock icon, so it shows under `cargo run` too.
 
 To build a double-clickable app with the icon in Finder and Launchpad:
 
@@ -182,51 +409,26 @@ open "target/bundle/Galata Desk.app"
 ```
 
 The bundle is signed ad hoc, which is enough to run it on the machine that
-built it.
+built it. Distributing it would need a real signing identity.
 
 ---
 
-## Development
+## Not built
 
-```sh
-cargo run -p galata-desk                 # the app
-cargo test --workspace                   # everything that needs no window
+- **Trading.** No order entry, no transfers, no API wallet. The connection
+  flow leaves room for approving one later; nothing uses it.
+- **History tabs**: trade history, funding history, TWAP.
+- **Spot markets** in the Markets section, tiles sized by volume, and alerts.
+- **Windows and Linux.** GPUI runs there; this app has only been built and
+  run on macOS.
+- **Smart-contract wallets.** Ownership is proven by recovering a signature,
+  so an address that signs through a contract cannot connect.
 
-# One account's portfolio from the live venue, in the terminal:
-cargo run -p galata-desk-core --example portfolio -- 0x<address>
+---
 
-# One connection attempt, without the app:
-cargo run -p galata-desk-core --example connect
+## Licence
 
-# Live market tiles in the terminal (1h, 24h or 7d; default 24h):
-cargo run -p galata-desk-core --example markets -- --period 7d BTC xyz:NVDA
-```
+MIT. See [LICENSE-MIT](LICENSE-MIT).
 
-Development switches, all environment variables:
-
-| Variable | Effect |
-|---|---|
-| `GALATA_DESK_DIR` | Use this directory instead of the application data directory. |
-| `GALATA_DESK_INFO_URL` | Ask this info endpoint instead of Hyperliquid's. |
-| `GALATA_DESK_WS_URL` | Use this WebSocket endpoint for market data instead of Hyperliquid's. |
-| `GALATA_DESK_SHOT` | With `--features shot`: render the window offscreen to this PNG and quit. The window stays hidden. |
-| `GALATA_DESK_SHOT_AFTER_MS` | How long to let the screen load first (default 2500). |
-| `GALATA_DESK_SHOT_STATE` | Selections to open with, for example `tab=orders,period=week,series=value` or `section=markets,colour=funding,mopen=xyz:NVDA`. |
-| `GALATA_DESK_SIZE` | Open the window at this size, for example `1100x700`. |
-
-```sh
-cargo run -p galata-desk --features shot   # with GALATA_DESK_SHOT=/tmp/desk.png
-```
-
-The connect page lives in `connect/` and its build output, `connect/dist`, is
-committed: the Rust build embeds it and needs no Node toolchain. After
-changing the page:
-
-```sh
-cd connect && pnpm install && pnpm build
-```
-
-`crates/galata-desk-core` links no UI toolkit and holds everything testable
-without a window: the venue client, the portfolio's arithmetic, the refresh
-schedule, the connection bridge and the proof check. `crates/galata-desk` is
-the GPUI app on top of it.
+The embedded fonts, Instrument Sans and JetBrains Mono, are under the SIL
+Open Font License; their licences are in `assets/fonts/`.
