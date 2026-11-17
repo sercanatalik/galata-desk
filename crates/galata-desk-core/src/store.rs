@@ -10,6 +10,7 @@ use time::OffsetDateTime;
 use crate::connect::Address;
 use crate::market::MarketId;
 use crate::market::watchlist::Watchlist;
+use crate::network::Network;
 
 /// The environment variable that names the WalletConnect relay project.
 pub const PROJECT_ID_ENV: &str = "GALATA_DESK_REOWN_PROJECT_ID";
@@ -17,6 +18,7 @@ pub const PROJECT_ID_ENV: &str = "GALATA_DESK_REOWN_PROJECT_ID";
 const ACCOUNT_FILE: &str = "account.json";
 const CONFIG_FILE: &str = "config.toml";
 const WATCHLIST_FILE: &str = "watchlist.json";
+const SETTINGS_FILE: &str = "settings.json";
 
 /// The connected account.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -63,6 +65,18 @@ struct WatchedMarket {
 #[derive(Debug, Default, Deserialize)]
 struct ConfigFile {
     reown_project_id: Option<String>,
+}
+
+/// What the user has chosen in settings. No secret is ever part of it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct Settings {
+    pub network: Network,
+}
+
+#[derive(Serialize, Deserialize)]
+struct SettingsRecord {
+    v: u32,
+    network: Network,
 }
 
 /// The app's directory on disk.
@@ -143,6 +157,28 @@ impl Store {
         };
         let text = serde_json::to_string_pretty(&record).expect("the record serialises");
         self.write_whole(WATCHLIST_FILE, &text)
+    }
+
+    /// The app's settings. A missing or unreadable file gives the defaults:
+    /// the main network.
+    pub fn settings(&self) -> Settings {
+        std::fs::read_to_string(self.dir.join(SETTINGS_FILE))
+            .ok()
+            .and_then(|text| serde_json::from_str::<SettingsRecord>(&text).ok())
+            .filter(|record| record.v == 1)
+            .map(|record| Settings {
+                network: record.network,
+            })
+            .unwrap_or_default()
+    }
+
+    pub fn save_settings(&self, settings: &Settings) -> std::io::Result<()> {
+        let record = SettingsRecord {
+            v: 1,
+            network: settings.network,
+        };
+        let text = serde_json::to_string_pretty(&record).expect("the record serialises");
+        self.write_whole(SETTINGS_FILE, &text)
     }
 
     /// Write a file under another name and rename it into place, readable by
@@ -316,6 +352,38 @@ mod tests {
                 "selected": { "dex": "xyz", "ticker": "NVDA" },
             })
         );
+    }
+
+    #[test]
+    fn settings_default_to_the_main_network_and_are_remembered() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::at(dir.path());
+        // Never saved: the main network.
+        assert_eq!(store.settings().network, Network::Mainnet);
+        store
+            .save_settings(&Settings {
+                network: Network::Testnet,
+            })
+            .unwrap();
+        assert_eq!(store.settings().network, Network::Testnet);
+        let text = std::fs::read_to_string(dir.path().join(SETTINGS_FILE)).unwrap();
+        let value: serde_json::Value = serde_json::from_str(&text).unwrap();
+        assert_eq!(value, serde_json::json!({ "v": 1, "network": "testnet" }));
+    }
+
+    #[test]
+    fn unreadable_settings_fall_back_to_the_main_network() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::at(dir.path());
+        for bad in [
+            "",
+            "not json",
+            r#"{"v":2,"network":"testnet"}"#,
+            r#"{"v":1,"network":"moon"}"#,
+        ] {
+            std::fs::write(dir.path().join(SETTINGS_FILE), bad).unwrap();
+            assert_eq!(store.settings().network, Network::Mainnet, "{bad:?}");
+        }
     }
 
     #[test]

@@ -47,12 +47,17 @@ fn open(
     let (window, desk) = cx.update(|cx| {
         gpui_kit::init(cx);
         crate::theme::install(cx);
+        let store_network = store.settings().network;
         cx.set_global(Core {
             runtime: Arc::new(runtime),
             store,
-            // Nothing listens here: every venue request fails at once.
-            info_url: "http://127.0.0.1:9/info".into(),
-            ws_url: "ws://127.0.0.1:9/ws".into(),
+            // Tests never touch the real keychain.
+            secrets: Arc::new(galata_desk_core::secrets::MemorySecrets::default()),
+            network: store_network,
+            // Nothing listens here: every venue request fails at once,
+            // whichever network is chosen.
+            info_override: Some("http://127.0.0.1:9/info".into()),
+            ws_override: Some("ws://127.0.0.1:9/ws".into()),
         });
         let (window, desk) = gpui_kit::open_window(
             WindowOptions {
@@ -911,6 +916,276 @@ fn funding_with_no_positions_says_so_and_is_not_offered_before_connecting(cx: &m
         assert!(window.try_find("funding").is_some());
         // No rows to scroll: the section says there are no positions.
         assert!(window.try_find("funding-rows").is_none());
+    })
+    .unwrap();
+}
+
+// ---- Settings -------------------------------------------------------------
+
+use galata_desk_core::network::Network;
+
+/// Click the "Use testnet" switch.
+fn flip_testnet(window: &mut gpui_kit::Window, cx: &mut gpui_kit::App) {
+    window.click("testnet", cx);
+}
+
+/// A valid key, and the address of its wallet: a standard test vector.
+const TEST_KEY: &str = "0x0000000000000000000000000000000000000000000000000000000000000001";
+const TEST_KEY_ADDRESS: &str = "0x7e5f4552091a69125d5dfcb7b8c2659029395bdf";
+
+#[gpui_kit::test]
+fn settings_opens_over_a_section_and_returns_to_it_unchanged(cx: &mut TestAppContext) {
+    let (window, desk, _dir) = open_with(cx, Some(&["BTC", "ETH"]));
+    let markets = go_to_markets(window, &desk, cx);
+    cx.update_window(window.into(), |_, window, cx| {
+        window.within("colour").click(2usize, cx);
+        window.click("settings", cx);
+    })
+    .unwrap();
+    cx.run_until_parked();
+    cx.update_window(window.into(), |_, window, cx| {
+        window.render_frame(cx);
+        assert!(window.try_find("settings-page").is_some());
+        // The section is not shown while settings is, and is still there.
+        assert!(window.try_find("tiles").is_none());
+        assert_eq!(desk.read(cx).section(), Some(Section::Markets));
+        window.click("settings-done", cx);
+    })
+    .unwrap();
+    cx.run_until_parked();
+    cx.update_window(window.into(), |_, window, cx| {
+        window.render_frame(cx);
+        assert!(window.try_find("settings-page").is_none());
+        assert_eq!(desk.read(cx).section(), Some(Section::Markets));
+        // The same Markets view, with its selection kept.
+        assert_eq!(desk.read(cx).markets_view().unwrap(), markets);
+        assert!(markets.read(cx).selections().ends_with("colour=Funding"));
+    })
+    .unwrap();
+}
+
+#[gpui_kit::test]
+fn settings_is_reachable_before_connecting(cx: &mut TestAppContext) {
+    let (window, desk, _dir) = open(cx, false);
+    cx.update_window(window.into(), |_, window, cx| {
+        window.render_frame(cx);
+        window.click("settings", cx);
+    })
+    .unwrap();
+    cx.run_until_parked();
+    cx.update_window(window.into(), |_, window, cx| {
+        window.render_frame(cx);
+        assert!(window.try_find("settings-page").is_some());
+        window.click("settings-done", cx);
+    })
+    .unwrap();
+    cx.run_until_parked();
+    cx.update_window(window.into(), |_, window, cx| {
+        window.render_frame(cx);
+        assert!(window.try_find("settings-page").is_none());
+        assert_eq!(desk.read(cx).section(), None);
+        assert!(window.try_find("connect").is_some());
+    })
+    .unwrap();
+}
+
+#[gpui_kit::test]
+fn the_testnet_switch_changes_the_network_marks_it_and_is_remembered(cx: &mut TestAppContext) {
+    let (window, desk, dir) = open(cx, true);
+    cx.update_window(window.into(), |_, window, cx| {
+        window.render_frame(cx);
+        assert_eq!(Core::get(cx).network, Network::Mainnet);
+        assert!(window.try_find("testnet-badge").is_none());
+        window.click("settings", cx);
+    })
+    .unwrap();
+    cx.run_until_parked();
+    let before = cx
+        .update_window(window.into(), |_, window, cx| {
+            window.render_frame(cx);
+            let before = desk.read(cx).portfolio_view().unwrap();
+            flip_testnet(window, cx);
+            before
+        })
+        .unwrap();
+    cx.run_until_parked();
+    cx.update_window(window.into(), |_, window, cx| {
+        window.render_frame(cx);
+        assert_eq!(Core::get(cx).network, Network::Testnet);
+        assert!(window.try_find("testnet-badge").is_some());
+        // The sections were built afresh for the new network, and settings
+        // is still open over them.
+        assert_ne!(desk.read(cx).portfolio_view().unwrap(), before);
+        assert!(window.try_find("settings-page").is_some());
+        // The addresses in tests are development overrides, which win.
+        assert!(Core::get(cx).overridden());
+        assert_eq!(Core::get(cx).info_url(), "http://127.0.0.1:9/info");
+    })
+    .unwrap();
+    // Remembered at once.
+    assert_eq!(Store::at(dir.path()).settings().network, Network::Testnet);
+
+    // And back: the mark goes.
+    cx.update_window(window.into(), |_, window, cx| flip_testnet(window, cx))
+        .unwrap();
+    cx.run_until_parked();
+    cx.update_window(window.into(), |_, window, cx| {
+        window.render_frame(cx);
+        assert_eq!(Core::get(cx).network, Network::Mainnet);
+        assert!(window.try_find("testnet-badge").is_none());
+    })
+    .unwrap();
+    assert_eq!(Store::at(dir.path()).settings().network, Network::Mainnet);
+}
+
+#[gpui_kit::test]
+fn the_app_starts_on_the_remembered_network(cx: &mut TestAppContext) {
+    let dir = tempfile::tempdir().unwrap();
+    Store::at(dir.path())
+        .save_settings(&galata_desk_core::store::Settings {
+            network: Network::Testnet,
+        })
+        .unwrap();
+    assert_eq!(Store::at(dir.path()).settings().network, Network::Testnet);
+    // `open` reads the stored network as `main` does; a fresh directory is mainnet.
+    let (window, _desk, _dir) = open(cx, false);
+    cx.update_window(window.into(), |_, window, cx| {
+        window.render_frame(cx);
+        assert_eq!(Core::get(cx).network, Network::Mainnet);
+        assert!(window.try_find("testnet-badge").is_none());
+    })
+    .unwrap();
+}
+
+#[gpui_kit::test]
+fn an_api_key_is_saved_shown_only_as_an_address_and_removed(cx: &mut TestAppContext) {
+    let (window, desk, dir) = open(cx, false);
+    cx.update_window(window.into(), |_, window, cx| {
+        window.render_frame(cx);
+        window.click("settings", cx);
+    })
+    .unwrap();
+    cx.run_until_parked();
+    let settings = cx
+        .update_window(window.into(), |_, window, cx| {
+            window.render_frame(cx);
+            let settings = desk.read(cx).settings_view().unwrap();
+            assert_eq!(settings.read(cx).saved_address(), None);
+            settings.update(cx, |view, cx| view.set_key_text(TEST_KEY, window, cx));
+            window.render_frame(cx);
+            window.click("save-key", cx);
+            settings
+        })
+        .unwrap();
+    cx.run_until_parked();
+    cx.update_window(window.into(), |_, window, cx| {
+        window.render_frame(cx);
+        let view = settings.read(cx);
+        assert_eq!(view.saved_address().as_deref(), Some(TEST_KEY_ADDRESS));
+        // The field is emptied, and the entry is in the secret store.
+        assert_eq!(view.key_text(cx), "");
+        assert_eq!(
+            view.message(),
+            Some(("Saved to the keychain.".into(), false))
+        );
+        let stored = Core::get(cx).secrets.get("api-key-mainnet").unwrap();
+        assert_eq!(stored.as_deref(), Some(&TEST_KEY[2..]));
+        // Nothing on the page reads as the key.
+        assert!(window.find_all_by_label(TEST_KEY).is_empty());
+        assert!(window.find_all_by_label(&TEST_KEY[2..]).is_empty());
+        assert!(window.try_find("save-key").is_none());
+    })
+    .unwrap();
+
+    // No file in the app's directory holds the key.
+    for entry in std::fs::read_dir(dir.path()).unwrap() {
+        let text = std::fs::read_to_string(entry.unwrap().path()).unwrap_or_default();
+        assert!(!text.contains(&TEST_KEY[2..]), "a file holds the key");
+    }
+
+    // Each network has its own key: testnet has none.
+    cx.update_window(window.into(), |_, window, cx| flip_testnet(window, cx))
+        .unwrap();
+    cx.run_until_parked();
+    cx.update_window(window.into(), |_, window, cx| {
+        window.render_frame(cx);
+        assert_eq!(settings.read(cx).saved_address(), None);
+        assert!(window.try_find("save-key").is_some());
+        flip_testnet(window, cx);
+    })
+    .unwrap();
+    cx.run_until_parked();
+
+    // Back on mainnet the key is there, and Remove deletes it.
+    cx.update_window(window.into(), |_, window, cx| {
+        window.render_frame(cx);
+        assert_eq!(
+            settings.read(cx).saved_address().as_deref(),
+            Some(TEST_KEY_ADDRESS)
+        );
+        window.click("remove-key", cx);
+    })
+    .unwrap();
+    cx.run_until_parked();
+    cx.update_window(window.into(), |_, window, cx| {
+        window.render_frame(cx);
+        assert_eq!(settings.read(cx).saved_address(), None);
+        assert_eq!(Core::get(cx).secrets.get("api-key-mainnet").unwrap(), None);
+        assert!(window.try_find("save-key").is_some());
+    })
+    .unwrap();
+}
+
+#[gpui_kit::test]
+fn text_that_is_not_a_key_is_refused_and_nothing_is_stored(cx: &mut TestAppContext) {
+    let (window, desk, _dir) = open(cx, false);
+    cx.update_window(window.into(), |_, window, cx| {
+        window.render_frame(cx);
+        window.click("settings", cx);
+    })
+    .unwrap();
+    cx.run_until_parked();
+    cx.update_window(window.into(), |_, window, cx| {
+        window.render_frame(cx);
+        let settings = desk.read(cx).settings_view().unwrap();
+        for bad in ["", "hello", TEST_KEY_ADDRESS] {
+            settings.update(cx, |view, cx| view.set_key_text(bad, window, cx));
+            window.render_frame(cx);
+            window.click("save-key", cx);
+            window.render_frame(cx);
+            let (message, problem) = settings.read(cx).message().unwrap();
+            assert!(problem, "{bad:?}");
+            assert!(message.contains("64 hexadecimal characters"), "{message}");
+            assert_eq!(settings.read(cx).saved_address(), None);
+        }
+        assert_eq!(Core::get(cx).secrets.get("api-key-mainnet").unwrap(), None);
+    })
+    .unwrap();
+}
+
+#[gpui_kit::test]
+fn disconnecting_keeps_saved_api_keys(cx: &mut TestAppContext) {
+    let (window, desk, _dir) = open(cx, true);
+    cx.update_window(window.into(), |_, window, cx| {
+        window.render_frame(cx);
+        Core::get(cx)
+            .secrets
+            .set("api-key-mainnet", &TEST_KEY[2..])
+            .unwrap();
+        window.click("disconnect", cx);
+    })
+    .unwrap();
+    cx.run_until_parked();
+    cx.update_window(window.into(), |_, window, cx| {
+        window.render_frame(cx);
+        assert_eq!(desk.read(cx).section(), None);
+        assert!(
+            Core::get(cx)
+                .secrets
+                .get("api-key-mainnet")
+                .unwrap()
+                .is_some()
+        );
     })
     .unwrap();
 }

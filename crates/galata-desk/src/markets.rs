@@ -98,8 +98,8 @@ impl Markets {
         let feed = {
             let _io = core.runtime.enter();
             MarketFeed::live(
-                Http::at(core.info_url.clone()),
-                core.ws_url.clone(),
+                Http::at(core.info_url()),
+                core.ws_url(),
                 MarketPeriod::default(),
                 watched,
             )

@@ -29,7 +29,7 @@ impl Address {
         &self.0
     }
 
-    fn from_key(key: &VerifyingKey) -> Self {
+    pub(crate) fn from_key(key: &VerifyingKey) -> Self {
         let point = key.to_encoded_point(false);
         // An address is the last 20 bytes of the hash of the public key,
         // without the 0x04 tag that marks it uncompressed.

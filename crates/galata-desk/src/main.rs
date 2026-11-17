@@ -7,6 +7,7 @@ mod grid;
 mod market_tile;
 mod markets;
 mod portfolio;
+mod settings;
 #[cfg(feature = "shot")]
 mod shot;
 mod theme;
@@ -16,6 +17,8 @@ mod ui_tests;
 
 use std::sync::Arc;
 
+use galata_desk_core::network::{self, Network};
+use galata_desk_core::secrets::Secrets;
 use galata_desk_core::store::Store;
 use gpui_kit::component::TitleBar;
 use gpui_kit::prelude::*;
@@ -28,12 +31,15 @@ pub struct Core {
     /// on what they send back.
     pub runtime: Arc<tokio::runtime::Runtime>,
     pub store: Store,
-    /// The venue's info endpoint. `GALATA_DESK_INFO_URL` points the app at
-    /// another one, for development.
-    pub info_url: String,
-    /// The venue's WebSocket endpoint for market data. `GALATA_DESK_WS_URL`
-    /// points the app at another one, for development.
-    pub ws_url: String,
+    /// Where secrets are kept: the system keychain.
+    pub secrets: Arc<dyn Secrets>,
+    /// Which of the venue's networks is shown. Chosen in settings.
+    pub network: Network,
+    /// `GALATA_DESK_INFO_URL` points the app at another info endpoint, for
+    /// development. It is used whatever the network.
+    pub info_override: Option<String>,
+    /// `GALATA_DESK_WS_URL` does the same for the market data stream.
+    pub ws_override: Option<String>,
 }
 
 impl Global for Core {}
@@ -41,6 +47,42 @@ impl Global for Core {}
 impl Core {
     pub fn get(cx: &App) -> &Core {
         cx.global::<Core>()
+    }
+
+    fn endpoints(&self) -> network::Endpoints {
+        network::endpoints(
+            self.network,
+            self.info_override.clone(),
+            self.ws_override.clone(),
+        )
+    }
+
+    /// The venue's info endpoint for the network in use.
+    pub fn info_url(&self) -> String {
+        self.endpoints().info_url
+    }
+
+    /// The venue's market data stream for the network in use.
+    pub fn ws_url(&self) -> String {
+        self.endpoints().ws_url
+    }
+
+    /// The addresses come from the development environment, not the network.
+    pub fn overridden(&self) -> bool {
+        self.endpoints().overridden
+    }
+}
+
+/// The system keychain. A screenshot run keeps its secrets in memory, so it
+/// can never read or change real ones.
+fn secrets() -> Arc<dyn Secrets> {
+    #[cfg(all(target_os = "macos", not(feature = "shot")))]
+    {
+        Arc::new(galata_desk_core::secrets::Keychain::new())
+    }
+    #[cfg(not(all(target_os = "macos", not(feature = "shot"))))]
+    {
+        Arc::new(galata_desk_core::secrets::MemorySecrets::default())
     }
 }
 
@@ -90,13 +132,15 @@ fn main() {
             theme::install(cx);
             #[cfg(target_os = "macos")]
             set_dock_icon();
+            let store = store();
+            let network = store.settings().network;
             cx.set_global(Core {
                 runtime: Arc::new(runtime),
-                store: store(),
-                info_url: std::env::var("GALATA_DESK_INFO_URL")
-                    .unwrap_or_else(|_| galata_desk_core::venue::INFO_URL.to_string()),
-                ws_url: std::env::var("GALATA_DESK_WS_URL")
-                    .unwrap_or_else(|_| galata_desk_core::market::ws::WS_URL.to_string()),
+                store,
+                secrets: secrets(),
+                network,
+                info_override: std::env::var("GALATA_DESK_INFO_URL").ok(),
+                ws_override: std::env::var("GALATA_DESK_WS_URL").ok(),
             });
 
             // `GALATA_DESK_SIZE=1100x700` opens the window at another size.

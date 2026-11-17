@@ -202,6 +202,17 @@ pub struct Refresher<T> {
 /// How often the orders tier asks every dex instead of only the active ones.
 const ORDER_SWEEP_EVERY: Duration = Duration::from_secs(300);
 
+/// A sweep asks one question per dex. The main network has about a dozen
+/// dexes; the test network has hundreds, and asking them all at once is
+/// refused. So a sweep goes out in batches with a pause between them.
+const SWEEP_BATCH: usize = 32;
+const SWEEP_PAUSE: Duration = Duration::from_secs(1);
+/// With more dexes than this, the costly sweeps are rationed: positions are
+/// looked for everywhere only every ten minutes, and open orders only on the
+/// dexes where the account is already known to be.
+const MANY_DEXES: usize = 32;
+const WIDE_SWEEP_EVERY: Duration = Duration::from_secs(600);
+
 impl<T: Transport> Refresher<T> {
     pub fn new(transport: T, user: impl Into<String>) -> Self {
         Self {
@@ -222,6 +233,20 @@ impl<T: Transport> Refresher<T> {
 
     pub fn snapshot(&self) -> &Snapshot {
         &self.snapshot
+    }
+
+    /// The network has too many dexes to ask them all often.
+    pub fn many_dexes(&self) -> bool {
+        self.dexes.len() > MANY_DEXES
+    }
+
+    /// How long until positions are looked for on every dex again.
+    pub fn sweep_interval(&self) -> Duration {
+        if self.many_dexes() {
+            WIDE_SWEEP_EVERY
+        } else {
+            self.cadence.interval(Tier::Overview)
+        }
     }
 
     pub fn cadence(&self) -> &Cadence {
@@ -262,14 +287,23 @@ impl<T: Transport> Refresher<T> {
         } else {
             self.active.iter().cloned().collect()
         };
-        // One request per dex, all at once: a sweep of every dex should not
-        // take a dozen round trips in a row.
-        let states = try_join_all(
-            asked
-                .iter()
-                .map(|dex| self.info.clearinghouse_state(&self.user, dex)),
-        )
-        .await?;
+        // One request per dex, a batch at a time: a sweep of a dozen dexes
+        // goes out at once, and one of hundreds is spread out so the venue
+        // does not refuse it.
+        let mut states = Vec::with_capacity(asked.len());
+        for (n, batch) in asked.chunks(SWEEP_BATCH).enumerate() {
+            if n > 0 {
+                tokio::time::sleep(SWEEP_PAUSE).await;
+            }
+            states.extend(
+                try_join_all(
+                    batch
+                        .iter()
+                        .map(|dex| self.info.clearinghouse_state(&self.user, dex)),
+                )
+                .await?,
+            );
+        }
         for (dex, state) in asked.into_iter().zip(states) {
             let has_something =
                 !state.asset_positions.is_empty() || !state.margin_summary.account_value.is_zero();
@@ -323,7 +357,11 @@ impl<T: Transport> Refresher<T> {
 
     async fn fetch_orders(&mut self, sweep: bool) -> Result<Vec<OrderRow>, VenueError> {
         self.reference().await?;
-        let asked: Vec<String> = if sweep {
+        // An order query costs ten times a position query. Where there are
+        // hundreds of dexes, only those the account is known to be on are
+        // asked: an order resting on a dex with no position or balance there
+        // is not found.
+        let asked: Vec<String> = if sweep && !self.many_dexes() {
             self.dexes.clone()
         } else {
             self.active.union(&self.with_orders).cloned().collect()
@@ -484,7 +522,7 @@ async fn run<T: Transport>(
             let sweep = now >= holdings_sweep_due;
             refresher.refresh_holdings(sweep).await;
             if sweep && refresher.snapshot().holdings.error.is_none() {
-                holdings_sweep_due = Instant::now() + refresher.cadence().interval(Tier::Overview);
+                holdings_sweep_due = Instant::now() + refresher.sweep_interval();
             }
             holdings_due = Instant::now() + refresher.cadence().interval(Tier::Holdings);
             publish(&refresher);

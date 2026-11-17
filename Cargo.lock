@@ -2250,6 +2250,7 @@ dependencies = [
  "rust-embed",
  "rust_decimal",
  "rustls",
+ "security-framework",
  "serde",
  "serde_json",
  "serde_path_to_error",

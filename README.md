@@ -146,7 +146,22 @@ A plus is funding you receive and a minus funding you pay. The per-hour and
 per-day figures assume the current rate and position size hold. Rates are
 refreshed once a minute.
 
-### The footer
+### Settings
+
+**Settings**, at the right of the title bar, is there with or without a
+connected account.
+
+- **Use testnet** switches everything the app shows to Hyperliquid's test
+  network, which has test funds. It takes effect at once and is remembered.
+  While it is on, a **TESTNET** badge shows beside the logo on every screen.
+- **API key**: the private key of an API wallet you created on Hyperliquid,
+  one for mainnet and one for testnet. The page shows the wallet's address,
+  derived from the key, so you can check it against the one Hyperliquid
+  shows. The key itself is not shown again, and **Remove** deletes it.
+
+A saved key is only stored. Nothing uses it yet, and the app still places no
+orders.
+
 
 A line along the bottom of the window, under every section: equity,
 unrealised PNL and its share of equity, PNL over 24 hours and all time, the
@@ -259,6 +274,15 @@ A period is built from candles: 1-minute for 1 hour, 15-minute for 24 hours,
 
 Nothing needs configuring to use browser-extension wallets.
 
+### Network and API keys
+
+See [Settings](#settings). The network choice is in `settings.json`; API keys
+are in the macOS Keychain under `dev.galata.desk`.
+
+A development build is unsigned, so after rebuilding it macOS may ask for
+your login password before the app can read a key an earlier build saved.
+The packaged app does not have this.
+
 ### Phone wallets: the relay project id
 
 WalletConnect's relay requires a project id. It is free, and it is not a
@@ -289,9 +313,11 @@ Everything is in `~/Library/Application Support/galata-desk/`:
 |---|---|
 | `account.json` | The connected address and when it was proven. Readable only by you. **Disconnect** deletes it. |
 | `watchlist.json` | The watched markets, in order, and which is selected: tickers and dex names. |
+| `settings.json` | The network in use: mainnet or testnet. |
 | `config.toml` | Optional. The relay project id. |
 
-No key, seed phrase or wallet session is ever stored.
+No key, seed phrase or wallet session is ever written to these files. An API
+key you save in Settings is kept in the macOS Keychain, not here.
 
 ---
 
@@ -368,6 +394,11 @@ Hyperliquid allows 1,200 request-weight a minute per IP address, shared with
 anything else on that address, such as galata-datawatch. Measured with a full
 40-market watchlist: 840 in the app's first minute, about 280 a minute once
 history has loaded, and no rate-limit answers.
+
+The test network lists hundreds of dexes where the main network has about a
+dozen. There the app looks for positions on every dex in batches, every ten
+minutes, and looks for open orders only on dexes where the account already
+has a position or balance. The first load takes about ten seconds.
 
 ---
 
@@ -448,8 +479,8 @@ built it. Distributing it would need a real signing identity.
 
 ## Not built
 
-- **Trading.** No order entry, no transfers, no API wallet. The connection
-  flow leaves room for approving one later; nothing uses it.
+- **Trading.** No order entry and no transfers. An API key can be saved in
+  Settings, and nothing uses it yet.
 - **History tabs**: trade history, funding history, TWAP.
 - **Spot markets** in the Markets section, tiles sized by volume, and alerts.
 - **Windows and Linux.** GPUI runs there; this app has only been built and

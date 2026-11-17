@@ -85,7 +85,7 @@ impl Portfolio {
         let feed = {
             let core = Core::get(cx);
             let _io = core.runtime.enter();
-            Feed::start(Http::at(core.info_url.clone()), address.as_str())
+            Feed::start(Http::at(core.info_url()), address.as_str())
         };
         #[allow(unused_mut)]
         let mut snapshots = feed.snapshots();

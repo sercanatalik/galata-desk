@@ -2,16 +2,19 @@
 //! portfolio.
 
 use galata_desk_core::connect::{Attempt, AttemptEvent};
-use galata_desk_core::store::Account;
+use galata_desk_core::network::Network;
+use galata_desk_core::store::{Account, Settings as StoredSettings};
+use gpui_kit::component::button::{Button, ButtonVariants};
 use gpui_kit::component::tab::TabBar;
 use gpui_kit::component::{ActiveTheme, Sizable, TitleBar, h_flex, v_flex};
 use gpui_kit::prelude::*;
-use gpui_kit::{Context, Entity, Subscription, Window, div};
+use gpui_kit::{Context, Entity, Subscription, TestSupportExt, Window, div};
 
 use crate::Core;
 use crate::connect::{self, ConnectState};
 use crate::markets::Markets;
 use crate::portfolio::{Portfolio, PortfolioEvent};
+use crate::settings::{Settings, SettingsEvent};
 use crate::theme::Palette;
 
 /// What is shown while an account is connected.
@@ -37,6 +40,9 @@ enum Screen {
 
 pub struct Desk {
     screen: Screen,
+    /// The settings page, while it is open over the current screen. The
+    /// screen underneath is kept, so closing settings returns to it as it was.
+    settings: Option<(Entity<Settings>, Subscription)>,
 }
 
 impl Desk {
@@ -46,7 +52,63 @@ impl Desk {
             Some(account) => Self::portfolio(account, window, cx),
             None => Screen::Connect(ConnectState::Idle { notice: None }),
         };
-        Self { screen }
+        #[allow(unused_mut)]
+        let mut this = Self {
+            screen,
+            settings: None,
+        };
+        #[cfg(feature = "shot")]
+        if std::env::var("GALATA_DESK_SHOT_STATE")
+            .unwrap_or_default()
+            .split(',')
+            .any(|kv| kv == "settings=1")
+        {
+            this.open_settings(window, cx);
+        }
+        this
+    }
+
+    /// Show the settings page over the current screen.
+    pub fn open_settings(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.settings.is_some() {
+            return;
+        }
+        let view = cx.new(|cx| Settings::new(window, cx));
+        let events = cx.subscribe_in(&view, window, |this, _, event, window, cx| match event {
+            SettingsEvent::Network(network) => this.set_network(*network, window, cx),
+            SettingsEvent::Done => this.close_settings(cx),
+        });
+        self.settings = Some((view, events));
+        cx.notify();
+    }
+
+    pub fn close_settings(&mut self, cx: &mut Context<Self>) {
+        self.settings = None;
+        cx.notify();
+    }
+
+    /// Show another network from now on: remember the choice, and build the
+    /// connected sections afresh, since each reads the venue's addresses and
+    /// opens its connections when it is created.
+    fn set_network(&mut self, network: Network, window: &mut Window, cx: &mut Context<Self>) {
+        if Core::get(cx).network == network {
+            return;
+        }
+        cx.global_mut::<Core>().network = network;
+        // A choice that could not be saved still applies until the app quits.
+        let _ = Core::get(cx)
+            .store
+            .save_settings(&StoredSettings { network });
+        if matches!(self.screen, Screen::Connected { .. })
+            && let Some(account) = Core::get(cx).store.account()
+        {
+            self.screen = Self::portfolio(account, window, cx);
+        }
+        // Each network has its own API key.
+        if let Some((settings, _)) = &self.settings {
+            settings.update(cx, |view, cx| view.reload(cx));
+        }
+        cx.notify();
     }
 
     fn portfolio(account: Account, window: &mut Window, cx: &mut Context<Self>) -> Screen {
@@ -251,7 +313,34 @@ impl Render for Desk {
                     .font_weight(gpui_kit::FontWeight::SEMIBOLD)
                     .child("galata"),
             )
-            .child(div().text_color(Palette::muted()).child("desk"));
+            .child(div().text_color(Palette::muted()).child("desk"))
+            // Never leave it in doubt that this is not the real venue.
+            .when(Core::get(cx).network.is_testnet(), |d| {
+                d.child(
+                    div()
+                        .id("testnet-badge")
+                        .ml_1()
+                        .px_2()
+                        .rounded(gpui_kit::px(5.))
+                        .bg(Palette::amber().opacity(0.16))
+                        .text_color(Palette::amber())
+                        .text_size(gpui_kit::px(11.5))
+                        .font_weight(gpui_kit::FontWeight::SEMIBOLD)
+                        .child("TESTNET")
+                        .test_support(),
+                )
+            });
+        let settings_button = Button::new("settings")
+            .small()
+            .ghost()
+            .label("Settings")
+            .on_click(cx.listener(|this, _, window, cx| {
+                if this.settings.is_some() {
+                    this.close_settings(cx);
+                } else {
+                    this.open_settings(window, cx);
+                }
+            }));
 
         let (switch, bar_end, body, footer) = match &self.screen {
             Screen::Connect(state) => (
@@ -312,6 +401,13 @@ impl Render for Desk {
             }
         };
 
+        // Settings is drawn over whichever screen is current, which stays as
+        // it is underneath.
+        let (switch, body) = match &self.settings {
+            Some((settings, _)) => (None, settings.clone().into_any_element()),
+            None => (switch, body),
+        };
+
         v_flex()
             .size_full()
             .bg(cx.theme().background)
@@ -320,7 +416,8 @@ impl Render for Desk {
                 TitleBar::new()
                     .child(h_flex().gap_4().child(title).children(switch))
                     .child(div().flex_1())
-                    .children(bar_end),
+                    .children(bar_end)
+                    .child(settings_button),
             )
             .child(div().flex_1().min_h_0().child(body))
             .children(footer)
@@ -329,6 +426,11 @@ impl Render for Desk {
 
 #[cfg(test)]
 impl Desk {
+    /// The settings page, while it is open.
+    pub fn settings_view(&self) -> Option<Entity<Settings>> {
+        self.settings.as_ref().map(|(view, _)| view.clone())
+    }
+
     /// The portfolio view, when an account is connected.
     pub fn portfolio_view(&self) -> Option<Entity<Portfolio>> {
         match &self.screen {

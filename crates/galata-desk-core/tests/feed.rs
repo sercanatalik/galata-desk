@@ -21,6 +21,11 @@ struct Fake {
     mood: Arc<Mutex<Mood>>,
     /// Every query asked, as `type` or `type:dex`.
     asked: Arc<Mutex<Vec<String>>>,
+    /// When each query was asked, by the test clock.
+    asked_at: Arc<Mutex<Vec<tokio::time::Instant>>>,
+    /// When set, the venue lists this many builder dexes, as the test
+    /// network does, in place of the fixture's two.
+    dexes: Arc<Mutex<Option<usize>>>,
 }
 
 impl Fake {
@@ -28,6 +33,8 @@ impl Fake {
         Self {
             mood: Arc::new(Mutex::new(Mood::Fine)),
             asked: Arc::default(),
+            asked_at: Arc::default(),
+            dexes: Arc::default(),
         }
     }
     fn set(&self, mood: Mood) {
@@ -54,6 +61,18 @@ impl Transport for Fake {
             Some(dex) => format!("{kind}:{dex}"),
             None => kind.to_string(),
         });
+        self.asked_at
+            .lock()
+            .unwrap()
+            .push(tokio::time::Instant::now());
+        if kind == "perpDexs"
+            && let Some(count) = *self.dexes.lock().unwrap()
+        {
+            let names: Vec<String> = (0..count)
+                .map(|i| format!(r#"{{"name":"d{i}","fullName":"dex {i}"}}"#))
+                .collect();
+            return Ok(format!("[null,{}]", names.join(",")).into_bytes());
+        }
         match *self.mood.lock().unwrap() {
             Mood::Down => return Err(VenueError::Unreachable("no connection".into())),
             Mood::RateLimiting => return Err(VenueError::RateLimited),
@@ -320,4 +339,79 @@ async fn a_failed_refresh_keeps_the_last_funding_rates() {
     fake.set(Mood::Fine);
     r.refresh_rates().await;
     assert!(!r.snapshot().rates.is_stale());
+}
+
+// ---- A network with hundreds of dexes -------------------------------------
+
+#[tokio::test(start_paused = true)]
+async fn a_sweep_of_hundreds_of_dexes_goes_out_in_batches() {
+    let fake = Fake::new();
+    // The test network lists hundreds of dexes; the main one about a dozen.
+    *fake.dexes.lock().unwrap() = Some(284);
+    let mut r = Refresher::new(fake.clone(), USER);
+    assert!(!r.many_dexes(), "not known until the list has been read");
+    r.refresh_holdings(true).await;
+    assert!(
+        r.snapshot().holdings.data.is_some(),
+        "{:?}",
+        r.snapshot().holdings.error
+    );
+    assert!(r.many_dexes());
+
+    // Every dex was asked, the main one included.
+    let asked = fake.asked.lock().unwrap().clone();
+    let states = asked
+        .iter()
+        .filter(|a| a.starts_with("clearinghouseState"))
+        .count();
+    assert_eq!(states, 285);
+
+    // But never more than a batch at one moment.
+    let times = fake.asked_at.lock().unwrap().clone();
+    let mut at_once = std::collections::HashMap::new();
+    for (name, at) in asked.iter().zip(&times) {
+        if name.starts_with("clearinghouseState") {
+            *at_once.entry(*at).or_insert(0usize) += 1;
+        }
+    }
+    assert!(at_once.len() >= 9, "{} batches", at_once.len());
+    assert!(at_once.values().all(|n| *n <= 32), "{:?}", at_once.values());
+    // And it is not repeated every minute.
+    assert_eq!(r.sweep_interval(), Duration::from_secs(600));
+}
+
+#[tokio::test(start_paused = true)]
+async fn with_hundreds_of_dexes_orders_are_asked_only_where_the_account_is() {
+    let fake = Fake::new();
+    *fake.dexes.lock().unwrap() = Some(284);
+    let mut r = Refresher::new(fake.clone(), USER);
+    r.refresh_holdings(true).await;
+    fake.clear();
+    r.refresh_orders(true).await;
+    assert!(r.snapshot().orders.data.is_some());
+    let asked = fake.asked.lock().unwrap().clone();
+    let orders: Vec<&String> = asked
+        .iter()
+        .filter(|a| a.starts_with("frontendOpenOrders"))
+        .collect();
+    // The main dex only: the account has nothing on any of the others.
+    assert_eq!(
+        orders,
+        ["frontendOpenOrders"],
+        "{} order queries",
+        orders.len()
+    );
+}
+
+#[tokio::test]
+async fn a_dozen_dexes_are_still_swept_at_once_and_every_minute() {
+    let fake = Fake::new();
+    let mut r = Refresher::new(fake.clone(), USER);
+    r.refresh_holdings(true).await;
+    assert!(!r.many_dexes());
+    assert_eq!(r.sweep_interval(), Duration::from_secs(60));
+    // The orders sweep still covers every dex.
+    fake.clear();
+    r.refresh_orders(true).await;
+    assert_eq!(fake.count("frontendOpenOrders:flx"), 1);
 }
