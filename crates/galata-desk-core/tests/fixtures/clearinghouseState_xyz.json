@@ -1,0 +1,66 @@
+{
+ "marginSummary": {
+  "accountValue": "2458.65",
+  "totalNtlPos": "0.0",
+  "totalRawUsd": "0.0",
+  "totalMarginUsed": "0.0"
+ },
+ "crossMarginSummary": {
+  "accountValue": "0.0",
+  "totalNtlPos": "0.0",
+  "totalRawUsd": "0.0",
+  "totalMarginUsed": "0.0"
+ },
+ "crossMaintenanceMarginUsed": "0.0",
+ "withdrawable": "0.0",
+ "assetPositions": [
+  {
+   "type": "oneWay",
+   "position": {
+    "coin": "xyz:NVDA",
+    "szi": "123.467",
+    "leverage": {
+     "type": "cross",
+     "value": 10
+    },
+    "entryPx": "161.99",
+    "positionValue": "19533.71407",
+    "unrealizedPnl": "-466.2",
+    "returnOnEquity": "-0.233",
+    "liquidationPx": "17.308",
+    "marginUsed": "1953.37",
+    "maxLeverage": 10,
+    "cumFunding": {
+     "allTime": "22.3",
+     "sinceOpen": "22.3",
+     "sinceChange": "1.1"
+    }
+   }
+  },
+  {
+   "type": "oneWay",
+   "position": {
+    "coin": "xyz:SILVER",
+    "szi": "212.54",
+    "leverage": {
+     "type": "isolated",
+     "value": 20,
+     "rawUsd": "-9600.0"
+    },
+    "entryPx": "47.048",
+    "positionValue": "10105.64",
+    "unrealizedPnl": "106.06",
+    "returnOnEquity": "0.212",
+    "liquidationPx": null,
+    "marginUsed": "505.28",
+    "maxLeverage": 20,
+    "cumFunding": {
+     "allTime": "1.68",
+     "sinceOpen": "1.68",
+     "sinceChange": "0.0"
+    }
+   }
+  }
+ ],
+ "time": 1794888363133
+}

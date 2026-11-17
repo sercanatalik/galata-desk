@@ -1,0 +1,289 @@
+/* The Galata house look, as galata-tower's screen has it. */
+:root {
+  --ground: #0e1012;
+  --panel: #15181b;
+  --raise: #1b1f23;
+  --line: #262b30;
+  --rule: #20252a;
+  --text: #ece8df;
+  --muted: #a29e94;
+  --faint: #6e6b64;
+  --amber: #f0a73a;
+  --amber-ground: #2a2112;
+  --amber-line: #5c4520;
+  --amber-text: #f6d9a8;
+  --gain: #6aa9e0;
+  --loss: #e8843f;
+  --sans: 'Instrument Sans Variable', system-ui, sans-serif;
+  --mono: 'JetBrains Mono Variable', ui-monospace, monospace;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+html,
+body {
+  margin: 0;
+  min-height: 100%;
+  background: var(--ground);
+  color: var(--text);
+  font-family: var(--sans);
+  font-size: 15px;
+  line-height: 1.5;
+  -webkit-font-smoothing: antialiased;
+}
+
+main {
+  width: min(100% - 32px, 440px);
+  margin: 0 auto;
+  padding: 56px 0 40px;
+}
+
+.wordmark {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-weight: 600;
+  letter-spacing: 0.01em;
+  color: var(--amber);
+}
+
+.wordmark svg {
+  width: 24px;
+  height: 24px;
+  flex: none;
+  fill: var(--text);
+}
+
+h1 {
+  margin: 20px 0 6px;
+  font-size: 26px;
+  font-weight: 600;
+  line-height: 1.2;
+  text-wrap: balance;
+}
+
+.lede {
+  margin: 0 0 28px;
+  color: var(--muted);
+}
+
+h2 {
+  margin: 24px 0 8px;
+  font-size: 12px;
+  font-weight: 500;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--faint);
+}
+
+.panel {
+  background: var(--panel);
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  overflow: hidden;
+}
+
+.wallet {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  width: 100%;
+  padding: 13px 14px;
+  background: none;
+  border: 0;
+  border-top: 1px solid var(--rule);
+  color: inherit;
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+
+.wallet:first-child {
+  border-top: 0;
+}
+
+.wallet:hover,
+.wallet:focus-visible {
+  background: var(--raise);
+}
+
+.wallet:focus-visible,
+.button:focus-visible {
+  outline: 2px solid var(--amber);
+  outline-offset: -2px;
+}
+
+.wallet img,
+.wallet .glyph {
+  width: 28px;
+  height: 28px;
+  border-radius: 7px;
+  flex: none;
+}
+
+.wallet .glyph {
+  display: grid;
+  place-items: center;
+  background: var(--raise);
+  color: var(--muted);
+  font-family: var(--mono);
+  font-size: 13px;
+}
+
+.wallet .name {
+  flex: 1;
+  font-weight: 500;
+}
+
+.wallet .hint {
+  color: var(--faint);
+  font-size: 13px;
+}
+
+.note {
+  margin: 0;
+  padding: 14px;
+  color: var(--muted);
+  font-size: 14px;
+}
+
+.note code,
+.address,
+.code {
+  font-family: var(--mono);
+  font-size: 13px;
+}
+
+.note code {
+  color: var(--amber-text);
+}
+
+.button {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  padding: 9px 16px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--raise);
+  color: var(--text);
+  font: inherit;
+  font-weight: 500;
+  cursor: pointer;
+}
+
+.button:hover {
+  border-color: var(--faint);
+}
+
+.button.primary {
+  background: var(--amber);
+  border-color: var(--amber);
+  color: var(--ground);
+}
+
+.button.primary:hover {
+  background: #f4b85c;
+}
+
+.qr {
+  display: grid;
+  justify-items: center;
+  gap: 12px;
+  padding: 18px 14px;
+}
+
+.qr img {
+  width: 232px;
+  height: 232px;
+  border-radius: 8px;
+  background: #fff;
+  padding: 10px;
+  image-rendering: pixelated;
+}
+
+.qr p {
+  margin: 0;
+  color: var(--muted);
+  font-size: 14px;
+  text-align: center;
+}
+
+.status {
+  display: grid;
+  gap: 14px;
+  padding: 22px 18px;
+}
+
+.status .title {
+  margin: 0;
+  font-size: 17px;
+  font-weight: 600;
+}
+
+.status p {
+  margin: 0;
+  color: var(--muted);
+}
+
+.status .actions {
+  display: flex;
+  gap: 10px;
+  margin-top: 4px;
+}
+
+.status.problem {
+  border-color: var(--amber-line);
+  background: var(--amber-ground);
+}
+
+.status.problem .title {
+  color: var(--amber-text);
+}
+
+.status.done .title {
+  color: var(--gain);
+}
+
+.address {
+  color: var(--text);
+}
+
+.spinner {
+  width: 18px;
+  height: 18px;
+  border: 2px solid var(--line);
+  border-top-color: var(--amber);
+  border-radius: 50%;
+  animation: spin 0.9s linear infinite;
+}
+
+.row {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+
+@keyframes spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .spinner {
+    animation: none;
+    border-top-color: var(--line);
+    border-left-color: var(--amber);
+  }
+}
+
+footer {
+  margin-top: 28px;
+  padding-top: 16px;
+  border-top: 1px solid var(--rule);
+  color: var(--faint);
+  font-size: 13px;
+}

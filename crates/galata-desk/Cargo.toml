@@ -1,0 +1,32 @@
+[package]
+name = "galata-desk"
+description = "A native desktop view of a Hyperliquid account's portfolio."
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+version.workspace = true
+
+[dependencies]
+galata-desk-core.workspace = true
+gpui-kit = "=0.10.0"
+serde_json = "1.0.154"
+image = { version = "0.25", default-features = false, features = ["png"], optional = true }
+chrono = { version = "0.4.45", default-features = false, features = ["clock", "std"] }
+tokio = { version = "1.54.1", features = ["rt-multi-thread"] }
+
+# The Dock icon, set when the app starts, so it shows the Galata Tower even
+# when run straight from `cargo run` with no app bundle around it.
+[target.'cfg(target_os = "macos")'.dependencies]
+objc2 = "0.6"
+objc2-app-kit = { version = "0.3", default-features = false, features = ["std", "NSApplication", "NSImage", "NSResponder"] }
+objc2-foundation = { version = "0.3", default-features = false, features = ["std", "NSData"] }
+
+[dev-dependencies]
+gpui-kit = { version = "=0.10.0", features = ["test-support"] }
+tempfile = "3"
+
+[features]
+# Developer aid: `GALATA_DESK_SHOT=<file.png>` renders the window offscreen to
+# that file and quits. It exists because checking a layout otherwise needs
+# screen-recording permission. Off by default; it pulls GPUI's test support.
+shot = ["gpui-kit/test-support", "dep:image"]

@@ -1,0 +1,12 @@
+[workspace]
+resolver = "3"
+members = ["crates/galata-desk-core", "crates/galata-desk"]
+
+[workspace.package]
+edition = "2024"
+license = "MIT"
+repository = "https://github.com/sercanatalik/galata-desk"
+version = "0.1.0"
+
+[workspace.dependencies]
+galata-desk-core = { path = "crates/galata-desk-core" }

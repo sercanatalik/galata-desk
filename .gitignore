@@ -1,0 +1,11 @@
+/target
+
+# The maintainer's local tooling, as in the sibling trees.
+/.claude/
+/openspec/
+
+# The connect page's build inputs. `connect/dist` is NOT here: rust-embed reads
+# it at compile time, so the tree must carry it or the binary does not build.
+/connect/node_modules/
+
+.DS_Store

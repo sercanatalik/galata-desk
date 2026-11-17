@@ -1,0 +1,21 @@
+{
+  "name": "galata-desk-connect",
+  "private": true,
+  "type": "module",
+  "description": "The page galata-desk opens in the browser to connect a wallet.",
+  "scripts": {
+    "dev": "vite",
+    "build": "tsc --noEmit && vite build"
+  },
+  "dependencies": {
+    "@fontsource-variable/instrument-sans": "5.3.0",
+    "@fontsource-variable/jetbrains-mono": "5.3.0",
+    "@walletconnect/ethereum-provider": "2.26.0",
+    "qrcode": "1.5.4"
+  },
+  "devDependencies": {
+    "@types/qrcode": "1.5.6",
+    "typescript": "5.9.3",
+    "vite": "7.1.12"
+  }
+}

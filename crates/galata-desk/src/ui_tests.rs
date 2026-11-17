@@ -1,0 +1,596 @@
+//! The window, driven by real clicks in a headless window.
+//!
+//! The venue is pointed at a closed local port, so nothing here touches the
+//! network: these tests are about what the controls do, not what they show.
+
+use std::sync::Arc;
+
+use galata_desk_core::connect::Address;
+use galata_desk_core::store::{Account, Store};
+use gpui_kit::test::{TestQueryExt, TestWindowExt};
+use gpui_kit::{
+    AppContext, Bounds, Entity, Point, TestAppContext, WindowBounds, WindowHandle, WindowOptions,
+    base::Root, px, size,
+};
+
+use std::sync::Arc as StdArc;
+
+use galata_desk_core::market::MarketId;
+use galata_desk_core::market::feed::{Listed, Listing, MarketSnapshot, Tile};
+use galata_desk_core::market::watchlist::{LIMIT, Watchlist};
+use galata_desk_core::model::PositionRow;
+use galata_desk_core::rust_decimal::Decimal;
+use galata_desk_core::venue::MarginMode;
+
+use crate::Core;
+use crate::desk::{Desk, Section};
+use crate::markets::Markets;
+
+const ADDRESS: &str = "0x010461c14e146ac35fe42271bdc1134ee31c703a";
+
+fn open(
+    cx: &mut TestAppContext,
+    remembered: bool,
+) -> (WindowHandle<Root>, Entity<Desk>, tempfile::TempDir) {
+    let dir = tempfile::tempdir().unwrap();
+    let store = Store::at(dir.path());
+    if remembered {
+        store
+            .remember(&Account::proven_now(Address::parse(ADDRESS).unwrap()))
+            .unwrap();
+    }
+    let runtime = tokio::runtime::Builder::new_multi_thread()
+        .worker_threads(1)
+        .enable_all()
+        .build()
+        .unwrap();
+    let (window, desk) = cx.update(|cx| {
+        gpui_kit::init(cx);
+        crate::theme::install(cx);
+        cx.set_global(Core {
+            runtime: Arc::new(runtime),
+            store,
+            // Nothing listens here: every venue request fails at once.
+            info_url: "http://127.0.0.1:9/info".into(),
+            ws_url: "ws://127.0.0.1:9/ws".into(),
+        });
+        let (window, desk) = gpui_kit::open_window(
+            WindowOptions {
+                window_bounds: Some(WindowBounds::Windowed(Bounds {
+                    origin: Point::default(),
+                    size: size(px(1320.), px(860.)),
+                })),
+                ..Default::default()
+            },
+            cx,
+            |window, cx| cx.new(|cx| Desk::new(window, cx)),
+        )
+        .unwrap();
+        (window.downcast::<Root>().unwrap(), desk)
+    });
+    (window, desk, dir)
+}
+
+#[gpui_kit::test]
+fn with_no_account_the_connect_screen_is_shown(cx: &mut TestAppContext) {
+    let (window, desk, _dir) = open(cx, false);
+    cx.update_window(window.into(), |_, window, cx| {
+        window.render_frame(cx);
+        assert!(window.try_find("connect").is_some());
+        assert!(window.try_find("disconnect").is_none());
+        assert!(desk.read(cx).portfolio_view().is_none());
+    })
+    .unwrap();
+}
+
+#[gpui_kit::test]
+fn a_remembered_account_opens_its_portfolio_and_disconnect_forgets_it(cx: &mut TestAppContext) {
+    let (window, desk, dir) = open(cx, true);
+    cx.update_window(window.into(), |_, window, cx| {
+        window.render_frame(cx);
+        assert!(desk.read(cx).portfolio_view().is_some());
+        assert!(window.try_find("connect").is_none());
+
+        window.click("disconnect", cx);
+    })
+    .unwrap();
+    // The click's effect reaches the window after the update that made it.
+    cx.run_until_parked();
+    cx.update_window(window.into(), |_, window, cx| {
+        window.render_frame(cx);
+        assert!(desk.read(cx).portfolio_view().is_none());
+        assert!(window.try_find("connect").is_some());
+    })
+    .unwrap();
+    // The account is forgotten on disk too: a relaunch shows the connect screen.
+    assert_eq!(Store::at(dir.path()).account(), None);
+}
+
+#[gpui_kit::test]
+fn the_selectors_change_what_is_selected(cx: &mut TestAppContext) {
+    let (window, desk, _dir) = open(cx, true);
+    cx.update_window(window.into(), |_, window, cx| {
+        window.render_frame(cx);
+        let view = desk.read(cx).portfolio_view().unwrap();
+        assert_eq!(
+            view.read(cx).selections(),
+            "scope=All period=AllTime series=Pnl chart=Month fees=perps tab=positions"
+        );
+
+        // Each selector is a row of tabs, identified by position.
+        window.within("scope").click(1usize, cx);
+        window.within("period").click(1usize, cx);
+        window.within("series").click(0usize, cx);
+        window.within("chart-period").click(0usize, cx);
+        window.within("fee-market").click(1usize, cx);
+        window.within("holdings").click(2usize, cx);
+        assert_eq!(
+            view.read(cx).selections(),
+            "scope=Perps period=Week series=AccountValue chart=Day fees=spot tab=orders"
+        );
+
+        window.within("holdings").click(0usize, cx);
+        assert!(view.read(cx).selections().ends_with("tab=balances"));
+    })
+    .unwrap();
+}
+
+#[gpui_kit::test]
+fn no_control_on_the_portfolio_screen_trades(cx: &mut TestAppContext) {
+    let (window, _desk, _dir) = open(cx, true);
+    cx.update_window(window.into(), |_, window, cx| {
+        window.render_frame(cx);
+        // Every button the screen can show, by its accessible label.
+        for forbidden in [
+            "Close",
+            "Close All",
+            "Limit",
+            "Market",
+            "Reverse",
+            "Trailing",
+            "Deposit",
+            "Withdraw",
+            "Send",
+            "Buy",
+            "Sell",
+        ] {
+            assert!(
+                window.find_all_by_label(forbidden).is_empty(),
+                "a `{forbidden}` control is on a read-only screen"
+            );
+        }
+    })
+    .unwrap();
+}
+
+// ---- The Markets section -------------------------------------------------
+
+fn watchlist(coins: &[&str]) -> Watchlist {
+    Watchlist::from_markets(coins.iter().map(|c| MarketId::new(*c)))
+}
+
+/// Open the window with a remembered account and, optionally, a watchlist.
+fn open_with(
+    cx: &mut TestAppContext,
+    list: Option<&[&str]>,
+) -> (WindowHandle<Root>, Entity<Desk>, tempfile::TempDir) {
+    let (window, desk, dir) = open(cx, true);
+    if let Some(coins) = list {
+        Store::at(dir.path())
+            .save_watchlist(&watchlist(coins))
+            .unwrap();
+    }
+    (window, desk, dir)
+}
+
+/// Click Markets in the section switch and return the view.
+fn go_to_markets(
+    window: WindowHandle<Root>,
+    desk: &Entity<Desk>,
+    cx: &mut TestAppContext,
+) -> Entity<Markets> {
+    cx.update_window(window.into(), |_, window, cx| {
+        window.render_frame(cx);
+        window.within("sections").click(1usize, cx);
+    })
+    .unwrap();
+    cx.run_until_parked();
+    cx.update_window(window.into(), |_, window, cx| {
+        window.render_frame(cx);
+        desk.read(cx).markets_view().expect("Markets was opened")
+    })
+    .unwrap()
+}
+
+fn position(market: &str, dex: &str, value: i64) -> PositionRow {
+    PositionRow {
+        market: market.into(),
+        dex: dex.into(),
+        leverage: 10,
+        mode: MarginMode::Cross,
+        size: Decimal::ONE,
+        value: Decimal::from(value),
+        entry: Decimal::ONE,
+        mark: None,
+        pnl: Decimal::ZERO,
+        roe: Decimal::ZERO,
+        liquidation: None,
+        margin: Decimal::ZERO,
+        funding: Decimal::ZERO,
+    }
+}
+
+/// What the feed would report for these markets, with this list of markets
+/// on offer.
+fn snapshot(watched: &[&str], listed: &[&str]) -> MarketSnapshot {
+    MarketSnapshot {
+        tiles: watched
+            .iter()
+            .map(|coin| Tile {
+                market: MarketId::new(*coin),
+                live: None,
+                stats: None,
+                max_leverage: Some(10),
+                unavailable: false,
+            })
+            .collect(),
+        listing: Listing::Ready(StdArc::new(
+            listed
+                .iter()
+                .map(|coin| Listed {
+                    market: MarketId::new(*coin),
+                    max_leverage: 10,
+                })
+                .collect(),
+        )),
+        ..MarketSnapshot::default()
+    }
+}
+
+#[gpui_kit::test]
+fn the_connect_screen_has_no_section_switch(cx: &mut TestAppContext) {
+    let (window, desk, _dir) = open(cx, false);
+    cx.update_window(window.into(), |_, window, cx| {
+        window.render_frame(cx);
+        assert_eq!(desk.read(cx).section(), None);
+        assert!(window.find_all_by_label("Markets").is_empty());
+    })
+    .unwrap();
+}
+
+#[gpui_kit::test]
+fn the_app_opens_on_portfolio_and_the_switch_shows_markets(cx: &mut TestAppContext) {
+    let (window, desk, _dir) = open_with(cx, Some(&["BTC"]));
+    cx.update_window(window.into(), |_, window, cx| {
+        window.render_frame(cx);
+        assert_eq!(desk.read(cx).section(), Some(Section::Portfolio));
+        // Markets, and its stream, do not exist until it is first chosen.
+        assert!(desk.read(cx).markets_view().is_none());
+    })
+    .unwrap();
+    go_to_markets(window, &desk, cx);
+    cx.update_window(window.into(), |_, _, cx| {
+        assert_eq!(desk.read(cx).section(), Some(Section::Markets));
+    })
+    .unwrap();
+}
+
+#[gpui_kit::test]
+fn each_sections_selections_survive_a_round_trip(cx: &mut TestAppContext) {
+    let (window, desk, _dir) = open_with(cx, Some(&["BTC"]));
+    let markets = go_to_markets(window, &desk, cx);
+    cx.update_window(window.into(), |_, window, cx| {
+        assert_eq!(markets.read(cx).selections(), "period=24H colour=Change");
+        window.within("mperiod").click(2usize, cx);
+        window.within("colour").click(2usize, cx);
+        assert_eq!(markets.read(cx).selections(), "period=7D colour=Funding");
+        // To Portfolio, change something there, and back.
+        window.within("sections").click(0usize, cx);
+    })
+    .unwrap();
+    cx.run_until_parked();
+    cx.update_window(window.into(), |_, window, cx| {
+        window.render_frame(cx);
+        assert_eq!(desk.read(cx).section(), Some(Section::Portfolio));
+        window.within("holdings").click(2usize, cx);
+        window.within("sections").click(1usize, cx);
+    })
+    .unwrap();
+    cx.run_until_parked();
+    cx.update_window(window.into(), |_, window, cx| {
+        window.render_frame(cx);
+        assert_eq!(markets.read(cx).selections(), "period=7D colour=Funding");
+        let portfolio = desk.read(cx).portfolio_view().unwrap();
+        assert!(portfolio.read(cx).selections().ends_with("tab=orders"));
+        // The same Markets view, not a new one.
+        assert_eq!(desk.read(cx).markets_view().unwrap(), markets);
+    })
+    .unwrap();
+}
+
+#[gpui_kit::test]
+fn the_period_and_colour_controls_each_select(cx: &mut TestAppContext) {
+    let (window, desk, _dir) = open_with(cx, Some(&["BTC"]));
+    let markets = go_to_markets(window, &desk, cx);
+    cx.update_window(window.into(), |_, window, cx| {
+        for (ix, period) in ["1H", "24H", "7D"].iter().enumerate() {
+            window.within("mperiod").click(ix, cx);
+            assert!(
+                markets
+                    .read(cx)
+                    .selections()
+                    .starts_with(&format!("period={period} "))
+            );
+        }
+        for (ix, colour) in ["Change", "Volatility", "Funding"].iter().enumerate() {
+            window.within("colour").click(ix, cx);
+            assert!(
+                markets
+                    .read(cx)
+                    .selections()
+                    .ends_with(&format!("colour={colour}"))
+            );
+        }
+    })
+    .unwrap();
+}
+
+#[gpui_kit::test]
+fn focusing_or_pointing_at_a_tile_opens_its_detail(cx: &mut TestAppContext) {
+    let (window, desk, _dir) = open_with(cx, Some(&["BTC", "ETH"]));
+    let markets = go_to_markets(window, &desk, cx);
+    cx.update_window(window.into(), |_, window, cx| {
+        assert_eq!(markets.read(cx).open_market(window), None);
+
+        // Keyboard focus.
+        markets.update(cx, |view, cx| view.focus_market("ETH", window, cx));
+        window.render_frame(cx);
+        assert_eq!(markets.read(cx).open_market(window).as_deref(), Some("ETH"));
+
+        // The pointer, on another tile: focus stays where it was, and the
+        // tile pointed at is open too.
+        window.hover(("tile", 0usize), cx);
+        window.render_frame(cx);
+        assert!(markets.read(cx).open_market(window).is_some());
+    })
+    .unwrap();
+}
+
+#[gpui_kit::test]
+fn a_tile_is_removed_by_its_button_or_from_the_keyboard(cx: &mut TestAppContext) {
+    let (window, desk, dir) = open_with(cx, Some(&["BTC", "ETH", "SOL"]));
+    let markets = go_to_markets(window, &desk, cx);
+    cx.update_window(window.into(), |_, window, cx| {
+        // The button shows while the tile is pointed at.
+        window.hover(("tile", 1usize), cx);
+        window.render_frame(cx);
+        window.click(("remove", 1usize), cx);
+        window.render_frame(cx);
+        assert_eq!(markets.read(cx).watched(), ["BTC", "SOL"]);
+
+        // From the keyboard: focus a tile and press Backspace.
+        markets.update(cx, |view, cx| view.focus_market("BTC", window, cx));
+        window.render_frame(cx);
+        window.press("backspace", cx);
+        window.render_frame(cx);
+        assert_eq!(markets.read(cx).watched(), ["SOL"]);
+    })
+    .unwrap();
+    // Remembered at once.
+    assert_eq!(Store::at(dir.path()).watchlist(), Some(watchlist(&["SOL"])));
+}
+
+#[gpui_kit::test]
+fn removing_the_last_market_leaves_an_empty_remembered_list(cx: &mut TestAppContext) {
+    let (window, desk, dir) = open_with(cx, Some(&["BTC"]));
+    let markets = go_to_markets(window, &desk, cx);
+    cx.update_window(window.into(), |_, window, cx| {
+        markets.update(cx, |view, cx| view.focus_market("BTC", window, cx));
+        window.render_frame(cx);
+        window.press("delete", cx);
+        window.render_frame(cx);
+        assert!(markets.read(cx).watched().is_empty());
+        // The empty state offers the add action.
+        assert!(window.try_find("add-first").is_some());
+    })
+    .unwrap();
+    assert_eq!(
+        Store::at(dir.path()).watchlist(),
+        Some(Watchlist::default())
+    );
+}
+
+#[gpui_kit::test]
+fn a_market_is_added_by_search_and_not_added_twice(cx: &mut TestAppContext) {
+    let (window, desk, dir) = open_with(cx, Some(&["BTC"]));
+    let markets = go_to_markets(window, &desk, cx);
+    let listed = ["BTC", "ETH", "SOL", "xyz:TSLA", "flx:TSLA"];
+    cx.update_window(window.into(), |_, window, cx| {
+        markets.update(cx, |view, cx| {
+            view.set_snapshot(snapshot(&["BTC"], &listed), cx)
+        });
+        window.render_frame(cx);
+        window.click("add-market", cx);
+        window.render_frame(cx);
+        assert!(markets.read(cx).picker_is_open());
+
+        markets.update(cx, |view, cx| view.set_search("tsl", window, cx));
+        window.render_frame(cx);
+        // Both TSLA markets match; BTC does not.
+        assert!(window.try_find(("pick", 3usize)).is_some());
+        assert!(window.try_find(("pick", 4usize)).is_some());
+        assert!(window.try_find(("pick", 0usize)).is_none());
+
+        // Choose the one on `xyz`: only that one is added.
+        window.click(("pick", 3usize), cx);
+        window.render_frame(cx);
+        assert_eq!(markets.read(cx).watched(), ["BTC", "xyz:TSLA"]);
+
+        // It now reads as watched; choosing it again adds nothing.
+        window.click(("pick", 3usize), cx);
+        window.render_frame(cx);
+        assert_eq!(markets.read(cx).watched(), ["BTC", "xyz:TSLA"]);
+    })
+    .unwrap();
+    assert_eq!(
+        Store::at(dir.path()).watchlist(),
+        Some(watchlist(&["BTC", "xyz:TSLA"]))
+    );
+}
+
+#[gpui_kit::test]
+fn a_full_watchlist_takes_no_more(cx: &mut TestAppContext) {
+    let coins: Vec<String> = (0..LIMIT).map(|i| format!("M{i}")).collect();
+    let refs: Vec<&str> = coins.iter().map(String::as_str).collect();
+    let (window, desk, _dir) = open_with(cx, Some(&refs));
+    let markets = go_to_markets(window, &desk, cx);
+    cx.update_window(window.into(), |_, window, cx| {
+        markets.update(cx, |view, cx| {
+            view.set_snapshot(snapshot(&refs, &["BTC", "ETH"]), cx)
+        });
+        window.render_frame(cx);
+        window.click("add-market", cx);
+        window.render_frame(cx);
+        window.click(("pick", 0usize), cx);
+        window.render_frame(cx);
+        assert_eq!(markets.read(cx).watched().len(), LIMIT);
+        assert!(!markets.read(cx).watched().contains(&"BTC".to_string()));
+    })
+    .unwrap();
+}
+
+#[gpui_kit::test]
+fn the_first_watchlist_is_what_the_account_holds(cx: &mut TestAppContext) {
+    let (window, desk, dir) = open_with(cx, None);
+    let markets = go_to_markets(window, &desk, cx);
+    cx.update_window(window.into(), |_, _, cx| {
+        // Positions have not loaded: nothing is decided yet.
+        assert!(markets.read(cx).watched().is_empty());
+        let portfolio = desk.read(cx).portfolio_view().unwrap();
+        portfolio.update(cx, |view, cx| {
+            view.set_positions(
+                vec![
+                    position("BTC", "", 10_000),
+                    position("ETH", "", 25_000),
+                    position("NVDA", "xyz", 19_500),
+                ],
+                cx,
+            )
+        });
+    })
+    .unwrap();
+    cx.run_until_parked();
+    cx.update_window(window.into(), |_, window, cx| {
+        window.render_frame(cx);
+        assert_eq!(markets.read(cx).watched(), ["ETH", "xyz:NVDA", "BTC"]);
+    })
+    .unwrap();
+    // Remembered, so the next launch shows the same markets in the same order.
+    assert_eq!(
+        Store::at(dir.path()).watchlist(),
+        Some(watchlist(&["ETH", "xyz:NVDA", "BTC"]))
+    );
+}
+
+#[gpui_kit::test]
+fn with_no_position_the_first_watchlist_is_four_majors(cx: &mut TestAppContext) {
+    let (window, desk, _dir) = open_with(cx, None);
+    cx.update_window(window.into(), |_, window, cx| {
+        window.render_frame(cx);
+        let portfolio = desk.read(cx).portfolio_view().unwrap();
+        portfolio.update(cx, |view, cx| view.set_positions(Vec::new(), cx));
+    })
+    .unwrap();
+    let markets = go_to_markets(window, &desk, cx);
+    cx.update_window(window.into(), |_, _, cx| {
+        assert_eq!(markets.read(cx).watched(), ["BTC", "ETH", "SOL", "HYPE"]);
+    })
+    .unwrap();
+}
+
+#[gpui_kit::test]
+fn a_remembered_watchlist_is_shown_as_it_was_left(cx: &mut TestAppContext) {
+    let (window, desk, _dir) = open_with(cx, Some(&["SOL", "xyz:NVDA", "BTC"]));
+    let markets = go_to_markets(window, &desk, cx);
+    cx.update_window(window.into(), |_, window, cx| {
+        // Even when the account holds other things.
+        let portfolio = desk.read(cx).portfolio_view().unwrap();
+        portfolio.update(cx, |view, cx| {
+            view.set_positions(vec![position("ETH", "", 1)], cx)
+        });
+        window.render_frame(cx);
+        assert_eq!(markets.read(cx).watched(), ["SOL", "xyz:NVDA", "BTC"]);
+    })
+    .unwrap();
+}
+
+#[gpui_kit::test]
+fn no_control_in_the_markets_section_trades(cx: &mut TestAppContext) {
+    let (window, desk, _dir) = open_with(cx, Some(&["BTC", "ETH"]));
+    let markets = go_to_markets(window, &desk, cx);
+    cx.update_window(window.into(), |_, window, cx| {
+        markets.update(cx, |view, cx| view.focus_market("BTC", window, cx));
+        window.render_frame(cx);
+        for forbidden in [
+            "Trade", "Buy", "Sell", "Long", "Short", "Close", "Limit", "Market", "Deposit",
+            "Withdraw", "Send",
+        ] {
+            assert!(
+                window.find_all_by_label(forbidden).is_empty(),
+                "a `{forbidden}` control is in a read-only section"
+            );
+        }
+        // Activating a tile does nothing but focus it.
+        window.click(("tile", 0usize), cx);
+        window.press("enter", cx);
+        window.render_frame(cx);
+        assert_eq!(markets.read(cx).watched(), ["BTC", "ETH"]);
+        assert_eq!(desk.read(cx).section(), Some(Section::Markets));
+    })
+    .unwrap();
+}
+
+// ---- The account footer --------------------------------------------------
+
+#[gpui_kit::test]
+fn the_account_footer_shows_under_both_sections_and_not_before_connecting(cx: &mut TestAppContext) {
+    let (window, _desk, _dir) = open(cx, false);
+    cx.update_window(window.into(), |_, window, cx| {
+        window.render_frame(cx);
+        assert!(window.try_find("account-footer").is_none());
+    })
+    .unwrap();
+
+    let (window, desk, _dir) = open_with(cx, Some(&["BTC"]));
+    cx.update_window(window.into(), |_, window, cx| {
+        window.render_frame(cx);
+        assert!(
+            window.try_find("account-footer").is_some(),
+            "under Portfolio"
+        );
+    })
+    .unwrap();
+    go_to_markets(window, &desk, cx);
+    cx.update_window(window.into(), |_, window, cx| {
+        window.render_frame(cx);
+        assert!(window.try_find("account-footer").is_some(), "under Markets");
+    })
+    .unwrap();
+}
+
+#[gpui_kit::test]
+fn the_account_summary_waits_for_both_holdings_and_history(cx: &mut TestAppContext) {
+    let (window, desk, _dir) = open_with(cx, Some(&["BTC"]));
+    cx.update_window(window.into(), |_, window, cx| {
+        window.render_frame(cx);
+        let portfolio = desk.read(cx).portfolio_view().unwrap();
+        // Nothing has loaded: no figures, so the footer shows placeholders.
+        assert!(portfolio.read(cx).account_summary().is_none());
+        // Positions alone are not enough: equity needs the history's side too.
+        portfolio.update(cx, |view, cx| {
+            view.set_positions(vec![position("ETH", "", 100)], cx)
+        });
+        assert!(portfolio.read(cx).account_summary().is_none());
+    })
+    .unwrap();
+}
