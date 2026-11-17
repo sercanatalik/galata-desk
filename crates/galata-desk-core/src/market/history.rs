@@ -98,6 +98,8 @@ enum Ask {
     /// Forget queued requests at any other interval: the period changed, and
     /// nobody is waiting for them any more.
     KeepOnly(Interval),
+    /// Serve this market's queued request next: someone is looking at it.
+    First(MarketId, Interval),
 }
 
 /// A running loader. Requests are served in the order they arrive.
@@ -119,6 +121,12 @@ impl Loader {
 
     pub fn request(&self, request: Request) {
         let _ = self.requests.send(Ask::Load(request));
+    }
+
+    /// Move a market's queued request to the front. Nothing happens if it is
+    /// not queued.
+    pub fn prioritise(&self, market: MarketId, interval: Interval) {
+        let _ = self.requests.send(Ask::First(market, interval));
     }
 
     /// Drop queued requests that are not for `interval`.
@@ -188,6 +196,15 @@ fn take(queue: &mut VecDeque<Request>, ask: Ask) {
     match ask {
         Ask::Load(request) => queue.push_back(request),
         Ask::KeepOnly(interval) => queue.retain(|r| r.interval == interval),
+        Ask::First(market, interval) => {
+            if let Some(at) = queue
+                .iter()
+                .position(|r| r.market == market && r.interval == interval)
+                && let Some(request) = queue.remove(at)
+            {
+                queue.push_front(request);
+            }
+        }
     }
 }
 

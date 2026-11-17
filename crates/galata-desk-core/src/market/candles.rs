@@ -101,8 +101,6 @@ pub struct Stats {
     /// Realised volatility over the period, as a fraction. `None` with fewer
     /// than two returns.
     pub volatility: Option<f64>,
-    /// The period's closes, ending with the last price: the sparkline.
-    pub spark: Vec<f64>,
 }
 
 /// The statistics of one window of candles. `last` is the live last price;
@@ -133,10 +131,6 @@ pub fn stats(window: &[Candle], last: Option<Decimal>) -> Option<Stats> {
     };
 
     let closes: Vec<f64> = window.iter().filter_map(|c| c.close.to_f64()).collect();
-    let mut spark = closes.clone();
-    if let (Some(last), Some(end)) = (last.to_f64(), spark.last_mut()) {
-        *end = last;
-    }
 
     Some(Stats {
         start,
@@ -145,8 +139,20 @@ pub fn stats(window: &[Candle], last: Option<Decimal>) -> Option<Stats> {
         high,
         marker,
         volatility: volatility(&closes),
-        spark,
     })
+}
+
+/// A window of candles as a chart shows it: the newest candle ends at the
+/// live last price and reaches as far as it, so the chart's last close, low
+/// and high are the same figures [`stats`] reports for the window.
+pub fn chart(window: &[Candle], last: Option<Decimal>) -> Vec<Candle> {
+    let mut candles = window.to_vec();
+    if let (Some(last), Some(newest)) = (last, candles.last_mut()) {
+        newest.close = last;
+        newest.high = newest.high.max(last);
+        newest.low = newest.low.min(last);
+    }
+    candles
 }
 
 /// Realised volatility: the sample standard deviation of the log returns
@@ -323,10 +329,30 @@ mod tests {
     }
 
     #[test]
-    fn the_sparkline_ends_at_the_last_price() {
-        let window = [flat(0, "100"), flat(1, "101"), flat(2, "102")];
-        let s = stats(&window, Some(d("105"))).unwrap();
-        assert_eq!(s.spark, [100.0, 101.0, 105.0]);
+    fn the_chart_ends_at_the_last_price_and_agrees_with_the_statistics() {
+        let window = [
+            candle(0, "100", "104", "99", "101"),
+            candle(1, "101", "103", "100", "102"),
+        ];
+        let last = Some(d("105"));
+        let shown = chart(&window, last);
+        let s = stats(&window, last).unwrap();
+        // The first candle opens where the change is measured from.
+        assert_eq!(shown[0].open, s.start);
+        // The newest candle ends at the last price and reaches up to it.
+        assert_eq!(shown[1].close, d("105"));
+        assert_eq!(shown[1].high, d("105"));
+        assert_eq!(shown[1].open, d("101"), "its open is untouched");
+        // The chart's extremes are the statistics' low and high.
+        assert_eq!(shown.iter().map(|c| c.low).min(), Some(s.low));
+        assert_eq!(shown.iter().map(|c| c.high).max(), Some(s.high));
+    }
+
+    #[test]
+    fn a_chart_with_no_live_price_is_the_candles_as_they_are() {
+        let window = [flat(0, "100"), flat(1, "101")];
+        assert_eq!(chart(&window, None), window);
+        assert!(chart(&[], Some(d("1"))).is_empty());
     }
 
     #[test]

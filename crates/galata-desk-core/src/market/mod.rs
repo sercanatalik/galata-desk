@@ -54,6 +54,10 @@ impl fmt::Display for MarketId {
 /// ending now.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
 pub enum MarketPeriod {
+    Min3,
+    Min5,
+    Min15,
+    Min30,
     Hour,
     #[default]
     Day,
@@ -61,10 +65,22 @@ pub enum MarketPeriod {
 }
 
 impl MarketPeriod {
-    pub const ALL: [MarketPeriod; 3] = [MarketPeriod::Hour, MarketPeriod::Day, MarketPeriod::Week];
+    pub const ALL: [MarketPeriod; 7] = [
+        MarketPeriod::Min3,
+        MarketPeriod::Min5,
+        MarketPeriod::Min15,
+        MarketPeriod::Min30,
+        MarketPeriod::Hour,
+        MarketPeriod::Day,
+        MarketPeriod::Week,
+    ];
 
     pub fn label(self) -> &'static str {
         match self {
+            MarketPeriod::Min3 => "3m",
+            MarketPeriod::Min5 => "5m",
+            MarketPeriod::Min15 => "15m",
+            MarketPeriod::Min30 => "30m",
             MarketPeriod::Hour => "1H",
             MarketPeriod::Day => "24H",
             MarketPeriod::Week => "7D",
@@ -74,19 +90,36 @@ impl MarketPeriod {
     /// How long the window is, in milliseconds.
     pub fn millis(self) -> u64 {
         const HOUR: u64 = 3_600_000;
+        const MINUTE: u64 = 60_000;
         match self {
+            MarketPeriod::Min3 => 3 * MINUTE,
+            MarketPeriod::Min5 => 5 * MINUTE,
+            MarketPeriod::Min15 => 15 * MINUTE,
+            MarketPeriod::Min30 => 30 * MINUTE,
             MarketPeriod::Hour => HOUR,
             MarketPeriod::Day => 24 * HOUR,
             MarketPeriod::Week => 7 * 24 * HOUR,
         }
     }
 
-    /// The candle interval the period is built from. Each choice gives 60 to
-    /// 100 candles in the window: enough for a volatility figure and a
-    /// sparkline, and about the same cost to load whichever period is chosen.
+    /// How much time the chart shows: the period, and never less than an
+    /// hour. A period of a few minutes is a handful of candles, too few to
+    /// read, so its chart shows the hour it ends.
+    pub fn chart_millis(self) -> u64 {
+        self.millis().max(MarketPeriod::Hour.millis())
+    }
+
+    /// The candle interval the period is built from. From an hour up, each
+    /// choice gives 60 to 100 candles in the window: enough for a volatility
+    /// figure and a chart, and about the same cost to load whichever period
+    /// is chosen. Shorter periods use the finest candles there are.
     pub fn interval(self) -> Interval {
         match self {
-            MarketPeriod::Hour => Interval::M1,
+            MarketPeriod::Min3
+            | MarketPeriod::Min5
+            | MarketPeriod::Min15
+            | MarketPeriod::Min30
+            | MarketPeriod::Hour => Interval::M1,
             MarketPeriod::Day => Interval::M15,
             MarketPeriod::Week => Interval::H2,
         }
@@ -171,6 +204,6 @@ mod tests {
         for interval in [Interval::M1, Interval::M15, Interval::H2] {
             assert_eq!(Interval::from_venue(interval.as_str()), Some(interval));
         }
-        assert_eq!(Interval::from_venue("3m"), None);
+        assert_eq!(Interval::from_venue("4h"), None);
     }
 }

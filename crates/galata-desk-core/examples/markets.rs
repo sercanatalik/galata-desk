@@ -3,7 +3,11 @@
 //! ```text
 //! cargo run -p galata-desk-core --example markets -- BTC xyz:NVDA
 //! cargo run -p galata-desk-core --example markets -- --period 7d ETH SOL
+//! cargo run -p galata-desk-core --example markets -- --chart xyz:NVDA BTC xyz:NVDA
 //! ```
+//!
+//! `--chart <coin>` also prints that market's newest candles, as the market
+//! panel charts them.
 //!
 //! Read-only: one WebSocket subscription pair per market, and one history
 //! query each. `GALATA_DESK_WS_URL` and `GALATA_DESK_INFO_URL` point it at
@@ -20,27 +24,35 @@ use galata_desk_core::venue::{Http, INFO_URL};
 #[tokio::main]
 async fn main() {
     let mut period = MarketPeriod::Day;
+    let mut chart: Option<MarketId> = None;
     let mut coins = Vec::new();
     let mut args = std::env::args().skip(1);
     while let Some(arg) = args.next() {
         if arg == "--period" {
             period = match args.next().as_deref() {
+                Some("3m") => MarketPeriod::Min3,
+                Some("5m") => MarketPeriod::Min5,
+                Some("15m") => MarketPeriod::Min15,
+                Some("30m") => MarketPeriod::Min30,
                 Some("1h") => MarketPeriod::Hour,
                 Some("7d") => MarketPeriod::Week,
                 _ => MarketPeriod::Day,
             };
+        } else if arg == "--chart" {
+            chart = args.next().map(MarketId::new);
         } else {
             coins.push(MarketId::new(arg));
         }
     }
     if coins.is_empty() {
-        eprintln!("usage: markets [--period 1h|24h|7d] <coin>...");
+        eprintln!("usage: markets [--period 3m|5m|15m|30m|1h|24h|7d] [--chart <coin>] <coin>...");
         std::process::exit(2);
     }
 
     let info = std::env::var("GALATA_DESK_INFO_URL").unwrap_or_else(|_| INFO_URL.into());
     let ws = std::env::var("GALATA_DESK_WS_URL").unwrap_or_else(|_| WS_URL.into());
     let feed = MarketFeed::live(Http::at(info), ws, period, coins);
+    feed.select(chart.clone());
     let mut snapshots = feed.snapshots();
 
     // Wait until every tile has both its live figures and its history, or
@@ -99,5 +111,34 @@ async fn main() {
                 .map(|l| format!("up to {l}x"))
                 .unwrap_or_default(),
         );
+    }
+    if let Some(chart) = &snapshot.chart {
+        let candles = &chart.candles;
+        println!(
+            "\n{} · {} candles at {} · first open {} · last close {}",
+            chart.market,
+            candles.len(),
+            chart.interval.as_str(),
+            candles
+                .first()
+                .map(|c| f::price(c.open))
+                .unwrap_or_default(),
+            candles
+                .last()
+                .map(|c| f::price(c.close))
+                .unwrap_or_default(),
+        );
+        for candle in candles.iter().rev().take(5).rev() {
+            println!(
+                "  t={}  open {:>12}  high {:>12}  low {:>12}  close {:>12}",
+                candle.open_ms,
+                f::price(candle.open),
+                f::price(candle.high),
+                f::price(candle.low),
+                f::price(candle.close),
+            );
+        }
+    } else if chart.is_some() {
+        println!("\nno chart: the selected market's history has not loaded");
     }
 }

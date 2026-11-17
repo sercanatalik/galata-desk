@@ -96,17 +96,29 @@ flowchart LR
 
 ### Markets
 
-The markets you watch, as a grid of tiles. Each tile has the ticker and its
-dex, an amber dot when you hold a position in it, the last price, the signed
-change over the period, the period's low and high with a marker for where the
-last price sits between them, and volatility over the period.
+The markets you watch, as a grid of tiles under a panel for the one you have
+selected. Each tile has the ticker and its dex, an amber dot when you hold a
+position in it, the last price, the signed change over the period, and
+volatility over the period.
 
-- **Period**: 1 hour, 24 hours or 7 days.
+- **Market panel**: click a tile, or press Enter or Space while it is
+  focused, to select its market. Pointing at a tile selects nothing. The
+  panel stays above the tiles and shows the selected market:
+  - on the left, its last price and change, mark and oracle price, premium,
+    funding per hour and as a yearly rate, 24-hour volume, open interest, the
+    period's low and high, volatility, and your position if you have one;
+  - on the right, a candlestick chart over the period (1-minute candles up
+    to 1 hour, 15-minute for 24 hours, 2-hour for 7 days) with a line at the
+    last price. Point at a candle for its time, open, high, low and close.
+
+  The chart is drawn from the same candles the tiles are computed from. For
+  a period under an hour it shows the last hour, so there is something to
+  read. The selected market is remembered between launches.
+
+- **Period**: one menu for the whole section, tiles and chart alike: 3, 5,
+  15 or 30 minutes, 1 hour, 24 hours or 7 days.
 - **Colour by**: change, volatility, or funding (blue where longs pay, orange
   where shorts pay). A legend above the grid shows the scale.
-- **Detail**: point at a tile, or tab to it, for a sparkline of the period,
-  mark and oracle price, premium, funding per hour and as a yearly rate,
-  24-hour volume, open interest, and your position if you have one.
 - **Watchlist**: **+ Add market** lists every perpetual market Hyperliquid
   has, on the main dex and on builder dexes, with a search field. Remove a
   market with the `×` on its tile, or with Delete while it is focused. It
@@ -136,8 +148,8 @@ The account shown is one of Hyperliquid's own public vaults.
 
 | | |
 |---|---|
-| ![Portfolio: account value, breakdown, PNL chart and positions](assets/screenshots/portfolio.png) | ![Markets: heatmap tiles with a detail card open](assets/screenshots/markets.png) |
-| **Portfolio.** Summary, breakdown, history chart and the positions table, with the footer beneath. | **Markets.** Tiles coloured by 24-hour change, with the detail card open on a builder-dex market. |
+| ![Portfolio: account value, breakdown, PNL chart and positions](assets/screenshots/portfolio.png) | ![Markets: the selected market's detail and candlestick chart above heatmap tiles](assets/screenshots/markets.png) |
+| **Portfolio.** Summary, breakdown, history chart and the positions table, with the footer beneath. | **Markets.** The panel on a builder-dex market, above tiles coloured by 24-hour change. |
 
 <img src="assets/screenshots/connect.png" alt="The connect page in a browser" width="420">
 
@@ -255,7 +267,7 @@ Everything is in `~/Library/Application Support/galata-desk/`:
 | File | Holds |
 |---|---|
 | `account.json` | The connected address and when it was proven. Readable only by you. **Disconnect** deletes it. |
-| `watchlist.json` | The watched markets, in order: tickers and dex names. |
+| `watchlist.json` | The watched markets, in order, and which is selected: tickers and dex names. |
 | `config.toml` | Optional. The relay project id. |
 
 No key, seed phrase or wallet session is ever stored.
@@ -386,7 +398,7 @@ hidden:
 cargo build -p galata-desk --features shot
 GALATA_DESK_SHOT=/tmp/desk.png \
 GALATA_DESK_SHOT_AFTER_MS=5000 \
-GALATA_DESK_SHOT_STATE=section=markets,colour=funding,mopen=xyz:NVDA \
+GALATA_DESK_SHOT_STATE=section=markets,colour=funding,select=xyz:NVDA \
   ./target/debug/galata-desk
 ```
 

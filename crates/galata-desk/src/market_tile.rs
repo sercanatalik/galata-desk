@@ -34,9 +34,17 @@ impl ColourBy {
     /// The value at which the colour is strongest, as a fraction.
     pub fn bound(self, period: MarketPeriod) -> f64 {
         match (self, period) {
+            (ColourBy::Change, MarketPeriod::Min3) => 0.002,
+            (ColourBy::Change, MarketPeriod::Min5) => 0.003,
+            (ColourBy::Change, MarketPeriod::Min15) => 0.005,
+            (ColourBy::Change, MarketPeriod::Min30) => 0.007,
             (ColourBy::Change, MarketPeriod::Hour) => 0.01,
             (ColourBy::Change, MarketPeriod::Day) => 0.06,
             (ColourBy::Change, MarketPeriod::Week) => 0.15,
+            (ColourBy::Volatility, MarketPeriod::Min3) => 0.003,
+            (ColourBy::Volatility, MarketPeriod::Min5) => 0.004,
+            (ColourBy::Volatility, MarketPeriod::Min15) => 0.008,
+            (ColourBy::Volatility, MarketPeriod::Min30) => 0.011,
             (ColourBy::Volatility, MarketPeriod::Hour) => 0.015,
             (ColourBy::Volatility, MarketPeriod::Day) => 0.08,
             (ColourBy::Volatility, MarketPeriod::Week) => 0.20,
@@ -118,8 +126,10 @@ pub fn legend(colour: ColourBy, period: MarketPeriod) -> (String, Vec<Hsla>, Str
     };
     let (low, high) = match colour {
         ColourBy::Change => {
+            // Whole percents from an hour up; tenths for a few minutes.
             let pct = bound * 100.0;
-            (format!("-{pct:.0}%"), format!("+{pct:.0}%"))
+            let places = if pct < 1.0 { 1 } else { 0 };
+            (format!("-{pct:.places$}%"), format!("+{pct:.places$}%"))
         }
         ColourBy::Volatility => ("calm".into(), "volatile".into()),
         ColourBy::Funding => ("shorts pay".into(), "longs pay".into()),
@@ -201,6 +211,8 @@ mod tests {
         let (low, steps, high) = legend(ColourBy::Change, MarketPeriod::Day);
         assert_eq!((low.as_str(), high.as_str()), ("-6%", "+6%"));
         assert_eq!(steps.len(), 7);
+        let (low, _, high) = legend(ColourBy::Change, MarketPeriod::Min5);
+        assert_eq!((low.as_str(), high.as_str()), ("-0.3%", "+0.3%"));
         let (low, _, high) = legend(ColourBy::Change, MarketPeriod::Week);
         assert_eq!((low.as_str(), high.as_str()), ("-15%", "+15%"));
         let (low, _, high) = legend(ColourBy::Funding, MarketPeriod::Day);

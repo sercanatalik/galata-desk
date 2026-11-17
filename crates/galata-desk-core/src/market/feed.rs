@@ -13,7 +13,7 @@ use tokio::sync::{mpsc, watch};
 use tokio::task::JoinHandle;
 use tokio::time::Instant;
 
-use super::candles::{Series, Stats, stats};
+use super::candles::{Candle, Series, Stats, chart, stats};
 use super::history::{Budget, Loaded, Loader, Request};
 use super::ws::{Event, Sub, Subscriptions, WsClient};
 use super::{Interval, MarketId, MarketPeriod};
@@ -63,6 +63,16 @@ pub struct Tile {
     pub unavailable: bool,
 }
 
+/// The selected market's candles over the period, for the market panel.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Chart {
+    pub market: MarketId,
+    pub interval: Interval,
+    /// Oldest first. The newest is the candle still forming, ending at the
+    /// live last price: the same window the market's tile is computed from.
+    pub candles: Vec<Candle>,
+}
+
 /// Whether the stream is up.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum Connection {
@@ -102,6 +112,9 @@ pub struct MarketSnapshot {
     /// When the stream last said anything.
     pub last_message: Option<SystemTime>,
     pub listing: Listing,
+    /// The selected market's chart, once its history has loaded. `None` with
+    /// nothing selected.
+    pub chart: Option<Chart>,
 }
 
 impl Default for MarketSnapshot {
@@ -112,6 +125,7 @@ impl Default for MarketSnapshot {
             connection: Connection::Connecting,
             last_message: None,
             listing: Listing::Loading,
+            chart: None,
         }
     }
 }
@@ -120,6 +134,7 @@ enum Command {
     Watch(MarketId),
     Unwatch(MarketId),
     SetPeriod(MarketPeriod),
+    Select(Option<MarketId>),
     RefreshListing,
 }
 
@@ -197,6 +212,7 @@ impl MarketFeed {
             clock,
             period,
             watched: Vec::new(),
+            selected: None,
             active: HashSet::new(),
             ctx: HashMap::new(),
             series: HashMap::new(),
@@ -233,6 +249,12 @@ impl MarketFeed {
         let _ = self.commands.send(Command::SetPeriod(period));
     }
 
+    /// Name the market the panel shows; its candles are published with each
+    /// snapshot. `None` publishes no chart.
+    pub fn select(&self, market: Option<MarketId>) {
+        let _ = self.commands.send(Command::Select(market));
+    }
+
     /// Reload the list of markets if it failed or has grown old.
     pub fn refresh_listing(&self) {
         let _ = self.commands.send(Command::RefreshListing);
@@ -252,6 +274,8 @@ struct State<T, S> {
     clock: Clock,
     period: MarketPeriod,
     watched: Vec<MarketId>,
+    /// The market the panel shows.
+    selected: Option<MarketId>,
     /// Watched markets the venue is known to list, and so subscribed to. The
     /// venue closes the whole connection on a subscription to a market it does
     /// not list, so nothing is subscribed before the list says it may be.
@@ -298,9 +322,25 @@ impl<T: Transport + Clone, S: Subscriptions> State<T, S> {
             market: market.clone(),
             interval,
             // One candle more than the window, so its oldest candle is whole.
-            from_ms: now.saturating_sub(self.period.millis() + interval.millis()),
+            from_ms: now.saturating_sub(self.period.chart_millis() + interval.millis()),
             to_ms: now,
         });
+        self.hurry_selected();
+    }
+
+    /// The selected market's history is the one someone is waiting to see:
+    /// if it is queued, it goes to the front.
+    fn hurry_selected(&self) {
+        if let Some(market) = &self.selected
+            && self.requested.contains(&(market.clone(), self.interval()))
+        {
+            self.loader.prioritise(market.clone(), self.interval());
+        }
+    }
+
+    fn select(&mut self, market: Option<MarketId>) {
+        self.selected = market;
+        self.hurry_selected();
     }
 
     fn watch(&mut self, market: MarketId) {
@@ -346,6 +386,10 @@ impl<T: Transport + Clone, S: Subscriptions> State<T, S> {
         let old = self.interval();
         self.period = period;
         let new = self.interval();
+        // Periods of an hour and less share their candles: nothing to reload.
+        if old == new {
+            return;
+        }
         // History still queued for the old period is no longer wanted.
         self.loader.keep_only(new);
         self.requested.retain(|(_, interval)| *interval == new);
@@ -506,12 +550,33 @@ impl<T: Transport + Clone, S: Subscriptions> State<T, S> {
                 }
             })
             .collect();
+        // The selected market's chart: the candles its tile was computed
+        // from, reaching back at least an hour so that a period of a few
+        // minutes still has a chart to read. A market that was unwatched has
+        // no chart.
+        let chart = self
+            .selected
+            .as_ref()
+            .filter(|market| self.watched.contains(market))
+            .and_then(|market| {
+                let series = self.series.get(&(market.clone(), interval))?;
+                if !series.is_loaded() {
+                    return None;
+                }
+                let last = self.ctx.get(market).map(|ctx| Live::from(ctx).last);
+                Some(Chart {
+                    market: market.clone(),
+                    interval,
+                    candles: chart(series.window(now, period.chart_millis()), last),
+                })
+            });
         MarketSnapshot {
             period,
             tiles,
             connection: self.connection,
             last_message: self.last_message,
             listing: self.listing.clone(),
+            chart,
         }
     }
 }
@@ -553,6 +618,7 @@ async fn run<T: Transport + Clone, S: Subscriptions>(
                     Some(Command::Watch(market)) => state.watch(market),
                     Some(Command::Unwatch(market)) => state.unwatch(&market),
                     Some(Command::SetPeriod(period)) => state.set_period(period),
+                    Some(Command::Select(market)) => state.select(market),
                     Some(Command::RefreshListing) => {
                         if state.listing_is_stale() {
                             if !matches!(state.listing, Listing::Ready(_)) {

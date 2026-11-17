@@ -48,6 +48,10 @@ struct AccountRecord {
 struct WatchlistRecord {
     v: u32,
     markets: Vec<WatchedMarket>,
+    /// The market the panel shows. Absent in files written before there was a
+    /// panel, which read as "the first market".
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    selected: Option<WatchedMarket>,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -117,28 +121,25 @@ impl Store {
     pub fn watchlist(&self) -> Option<Watchlist> {
         let text = std::fs::read_to_string(self.dir.join(WATCHLIST_FILE)).ok()?;
         let record: WatchlistRecord = serde_json::from_str(&text).ok()?;
+        let id = |m: &WatchedMarket| MarketId::from_parts(&m.dex, &m.ticker);
         (record.v == 1).then(|| {
-            Watchlist::from_markets(
-                record
-                    .markets
-                    .iter()
-                    .map(|m| MarketId::from_parts(&m.dex, &m.ticker)),
+            Watchlist::with_selection(
+                record.markets.iter().map(id),
+                record.selected.as_ref().map(id),
             )
         })
     }
 
     /// Remember the watchlist and its order.
     pub fn save_watchlist(&self, watchlist: &Watchlist) -> std::io::Result<()> {
+        let watched = |m: &MarketId| WatchedMarket {
+            dex: m.dex().to_string(),
+            ticker: m.ticker().to_string(),
+        };
         let record = WatchlistRecord {
             v: 1,
-            markets: watchlist
-                .markets()
-                .iter()
-                .map(|m| WatchedMarket {
-                    dex: m.dex().to_string(),
-                    ticker: m.ticker().to_string(),
-                })
-                .collect(),
+            markets: watchlist.markets().iter().map(watched).collect(),
+            selected: watchlist.selected().map(watched),
         };
         let text = serde_json::to_string_pretty(&record).expect("the record serialises");
         self.write_whole(WATCHLIST_FILE, &text)
@@ -309,8 +310,63 @@ mod tests {
         let value: serde_json::Value = serde_json::from_str(&text).unwrap();
         assert_eq!(
             value,
-            serde_json::json!({ "v": 1, "markets": [{ "dex": "xyz", "ticker": "NVDA" }] })
+            serde_json::json!({
+                "v": 1,
+                "markets": [{ "dex": "xyz", "ticker": "NVDA" }],
+                "selected": { "dex": "xyz", "ticker": "NVDA" },
+            })
         );
+    }
+
+    #[test]
+    fn the_selection_is_remembered_with_the_watchlist() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::at(dir.path());
+        let mut list = watchlist(&["ETH", "xyz:NVDA", "xyz:SILVER"]);
+        list.select(&MarketId::new("xyz:SILVER"));
+        store.save_watchlist(&list).unwrap();
+        let read = store.watchlist().unwrap();
+        assert_eq!(read.selected(), Some(&MarketId::new("xyz:SILVER")));
+        assert_eq!(read, list);
+    }
+
+    #[test]
+    fn a_watchlist_stored_before_selections_existed_selects_its_first_market() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::at(dir.path());
+        std::fs::write(
+            dir.path().join(WATCHLIST_FILE),
+            r#"{"v":1,"markets":[{"dex":"","ticker":"ETH"},{"dex":"xyz","ticker":"NVDA"}]}"#,
+        )
+        .unwrap();
+        let read = store.watchlist().unwrap();
+        assert_eq!(read.markets().len(), 2);
+        assert_eq!(read.selected(), Some(&MarketId::new("ETH")));
+    }
+
+    #[test]
+    fn a_stored_selection_that_is_not_watched_gives_way_to_the_first_market() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::at(dir.path());
+        std::fs::write(
+            dir.path().join(WATCHLIST_FILE),
+            r#"{"v":1,"markets":[{"dex":"","ticker":"ETH"}],"selected":{"dex":"","ticker":"DOGE"}}"#,
+        )
+        .unwrap();
+        assert_eq!(
+            store.watchlist().unwrap().selected(),
+            Some(&MarketId::new("ETH"))
+        );
+    }
+
+    #[test]
+    fn an_empty_watchlist_stores_no_selection() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::at(dir.path());
+        store.save_watchlist(&Watchlist::default()).unwrap();
+        let text = std::fs::read_to_string(dir.path().join(WATCHLIST_FILE)).unwrap();
+        let value: serde_json::Value = serde_json::from_str(&text).unwrap();
+        assert_eq!(value, serde_json::json!({ "v": 1, "markets": [] }));
     }
 
     #[test]

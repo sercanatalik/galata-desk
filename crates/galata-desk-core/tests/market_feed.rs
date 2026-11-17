@@ -669,3 +669,258 @@ async fn changing_the_period_drops_history_still_queued_for_the_old_one() {
         .count();
     assert_eq!(two_hour, 40);
 }
+
+// ---- The selected market's chart ------------------------------------------
+
+#[tokio::test(start_paused = true)]
+async fn the_selected_markets_candles_are_published_and_no_others() {
+    let mut r = rig(&["BTC", "ETH"]);
+    // Nothing selected: no chart.
+    assert_eq!(r.settle().await.chart, None);
+
+    r.feed.select(Some(id("ETH")));
+    let snapshot = r.settle().await;
+    let chart = snapshot
+        .chart
+        .expect("a market is selected and its history is loaded");
+    assert_eq!(chart.market, id("ETH"));
+    assert_eq!(chart.interval, Interval::M15);
+    // A day of 15-minute candles, plus the one forming.
+    assert!(
+        (96..=97).contains(&chart.candles.len()),
+        "{} candles",
+        chart.candles.len()
+    );
+    assert!(
+        chart
+            .candles
+            .windows(2)
+            .all(|w| w[0].open_ms < w[1].open_ms)
+    );
+}
+
+#[tokio::test(start_paused = true)]
+async fn the_chart_follows_a_change_of_selection_and_goes_when_nothing_is_selected() {
+    let mut r = rig(&["BTC", "ETH"]);
+    r.feed.select(Some(id("BTC")));
+    assert_eq!(r.settle().await.chart.unwrap().market, id("BTC"));
+    r.feed.select(Some(id("ETH")));
+    assert_eq!(r.settle().await.chart.unwrap().market, id("ETH"));
+    r.feed.select(None);
+    assert_eq!(r.settle().await.chart, None);
+    // Selecting cost no request: the candles were already loaded for the tiles.
+    assert_eq!(r.venue.count("candleSnapshot"), 2);
+}
+
+#[tokio::test(start_paused = true)]
+async fn the_chart_agrees_with_the_tiles_figures() {
+    let mut r = rig(&["BTC"]);
+    r.feed.select(Some(id("BTC")));
+    r.events
+        .send(Event::Ctx(id("BTC"), ctx("150", Some("150.5"))))
+        .unwrap();
+    let snapshot = r.settle().await;
+    let chart = snapshot.chart.unwrap();
+    let stats = snapshot.tiles[0].stats.as_ref().unwrap();
+    assert_eq!(chart.candles.first().unwrap().open, stats.start);
+    assert_eq!(
+        chart.candles.last().unwrap().close.to_string(),
+        "150.5",
+        "ends at the last price"
+    );
+    assert_eq!(chart.candles.iter().map(|c| c.low).min(), Some(stats.low));
+    assert_eq!(chart.candles.iter().map(|c| c.high).max(), Some(stats.high));
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_live_candle_updates_and_extends_the_chart() {
+    let mut r = rig(&["BTC"]);
+    r.feed.select(Some(id("BTC")));
+    let before = r.settle().await.chart.unwrap();
+    let newest = before.candles.last().unwrap().open_ms;
+
+    // The candle still forming gets a new high.
+    r.events
+        .send(Event::Candle(
+            id("BTC"),
+            Interval::M15,
+            Candle {
+                open_ms: newest,
+                open: "196".parse().unwrap(),
+                high: "260".parse().unwrap(),
+                low: "196".parse().unwrap(),
+                close: "250".parse().unwrap(),
+            },
+        ))
+        .unwrap();
+    let updated = r.settle().await.chart.unwrap();
+    assert_eq!(updated.candles.len(), before.candles.len());
+    assert_eq!(updated.candles.last().unwrap().high.to_string(), "260");
+
+    // Its interval ends and the next candle begins.
+    r.events
+        .send(Event::Candle(
+            id("BTC"),
+            Interval::M15,
+            Candle {
+                open_ms: newest + Interval::M15.millis(),
+                open: "250".parse().unwrap(),
+                high: "251".parse().unwrap(),
+                low: "249".parse().unwrap(),
+                close: "250".parse().unwrap(),
+            },
+        ))
+        .unwrap();
+    let extended = r.settle().await.chart.unwrap();
+    assert_eq!(extended.candles.len(), before.candles.len() + 1);
+}
+
+#[tokio::test(start_paused = true)]
+async fn the_chart_window_rolls_forward() {
+    let mut r = rig(&["BTC"]);
+    r.feed.select(Some(id("BTC")));
+    let before = r.settle().await.chart.unwrap();
+    // An hour on, with nothing new: the four oldest candles have left.
+    r.clock.fetch_add(3_600_000, Ordering::SeqCst);
+    tokio::time::sleep(Duration::from_secs(6)).await;
+    let after = r.settle().await.chart.unwrap();
+    assert_eq!(after.candles.len(), before.candles.len() - 4);
+    assert!(after.candles[0].open_ms > before.candles[0].open_ms);
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_period_change_redraws_the_chart_at_the_new_interval() {
+    let mut r = rig(&["BTC"]);
+    r.feed.select(Some(id("BTC")));
+    r.settle().await;
+    r.feed.set_period(MarketPeriod::Week);
+    let chart = r.settle().await.chart.unwrap();
+    assert_eq!(chart.interval, Interval::H2);
+    assert!(
+        (84..=85).contains(&chart.candles.len()),
+        "{} candles",
+        chart.candles.len()
+    );
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_market_that_is_unwatched_takes_its_chart_with_it() {
+    let mut r = rig(&["BTC", "ETH"]);
+    r.feed.select(Some(id("BTC")));
+    assert!(r.settle().await.chart.is_some());
+    r.feed.unwatch(id("BTC"));
+    assert_eq!(r.settle().await.chart, None);
+}
+
+#[tokio::test(start_paused = true)]
+async fn there_is_no_chart_until_the_selected_markets_history_has_loaded() {
+    let venue = Venue::new();
+    venue.hold.store(true, Ordering::SeqCst);
+    let mut r = rig_with(venue, &["BTC"]);
+    r.feed.select(Some(id("BTC")));
+    r.events
+        .send(Event::Ctx(id("BTC"), ctx("101", None)))
+        .unwrap();
+    let snapshot = r.settle().await;
+    assert!(snapshot.tiles[0].live.is_some());
+    assert_eq!(snapshot.chart, None);
+    r.venue.hold.store(false, Ordering::SeqCst);
+    assert!(r.settle().await.chart.is_some());
+}
+
+#[tokio::test(start_paused = true)]
+async fn the_selected_markets_history_is_loaded_next() {
+    let coins: Vec<String> = (0..40).map(|i| format!("M{i}")).collect();
+    let refs: Vec<&str> = coins.iter().map(String::as_str).collect();
+    let mut r = rig(&refs);
+    // The burst has loaded the first five; M39 is last in a queue of 35.
+    let snapshot = r.settle().await;
+    assert!(snapshot.tiles[39].stats.is_none());
+    r.feed.select(Some(id("M39")));
+    // Enough budget for one more request arrives within ten seconds.
+    tokio::time::sleep(Duration::from_secs(10)).await;
+    let snapshot = r.settle().await;
+    assert!(
+        snapshot.chart.is_some(),
+        "the selected market's chart has loaded"
+    );
+    assert!(snapshot.tiles[39].stats.is_some());
+    // And it jumped the queue: its neighbours are still waiting.
+    assert!(snapshot.tiles[38].stats.is_none());
+}
+
+// ---- Periods shorter than an hour -----------------------------------------
+
+#[tokio::test(start_paused = true)]
+async fn a_short_period_measures_minutes_and_charts_the_hour() {
+    let mut r = rig(&["BTC"]);
+    r.feed.select(Some(id("BTC")));
+    r.feed.set_period(MarketPeriod::Hour);
+    let hour = r.settle().await;
+    let hour_stats = hour.tiles[0].stats.clone().unwrap();
+
+    r.feed.set_period(MarketPeriod::Min5);
+    let snapshot = r.settle().await;
+    assert_eq!(snapshot.period, MarketPeriod::Min5);
+    let stats = snapshot.tiles[0].stats.clone().unwrap();
+    // The change is over five minutes, not the hour: a later, nearer start.
+    assert!(
+        stats.start > hour_stats.start,
+        "{} vs {}",
+        stats.start,
+        hour_stats.start
+    );
+    assert!(stats.change.abs() < hour_stats.change.abs());
+    // The chart still shows the hour, in 1-minute candles.
+    let chart = snapshot.chart.unwrap();
+    assert_eq!(chart.interval, Interval::M1);
+    assert!(
+        (60..=61).contains(&chart.candles.len()),
+        "{} candles",
+        chart.candles.len()
+    );
+    assert_eq!(chart.candles, hour.chart.unwrap().candles);
+}
+
+#[tokio::test(start_paused = true)]
+async fn periods_of_an_hour_and_less_share_one_load_and_one_stream() {
+    let mut r = rig(&["BTC"]);
+    r.feed.set_period(MarketPeriod::Hour);
+    r.settle().await;
+    let asked = r.venue.count("candleSnapshot");
+    let changes = r.subs.0.lock().unwrap().len();
+    for period in [
+        MarketPeriod::Min3,
+        MarketPeriod::Min15,
+        MarketPeriod::Min30,
+        MarketPeriod::Min5,
+        MarketPeriod::Hour,
+    ] {
+        r.feed.set_period(period);
+        let snapshot = r.settle().await;
+        assert_eq!(snapshot.period, period);
+        assert!(
+            snapshot.tiles[0].stats.is_some(),
+            "{period:?} has figures at once"
+        );
+    }
+    assert_eq!(
+        r.venue.count("candleSnapshot"),
+        asked,
+        "no history was asked for again"
+    );
+    assert_eq!(
+        r.subs.0.lock().unwrap().len(),
+        changes,
+        "no subscription changed"
+    );
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_short_period_chosen_first_still_loads_an_hour() {
+    let mut r = rig(&["BTC"]);
+    r.feed.select(Some(id("BTC")));
+    r.feed.set_period(MarketPeriod::Min3);
+    let snapshot = r.settle().await;
+    assert!((60..=61).contains(&snapshot.chart.unwrap().candles.len()));
+}

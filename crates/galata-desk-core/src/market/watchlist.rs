@@ -15,10 +15,14 @@ pub enum AddError {
     Full,
 }
 
-/// The watched markets, in the order they were added.
+/// The watched markets, in the order they were added, and which of them is
+/// selected: the one the market panel shows.
+///
+/// While the list holds any market exactly one is selected.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct Watchlist {
     markets: Vec<MarketId>,
+    selected: Option<MarketId>,
 }
 
 impl Watchlist {
@@ -30,6 +34,34 @@ impl Watchlist {
             let _ = list.add(market);
         }
         list
+    }
+
+    /// From a stored list and a stored selection. A selection that is not in
+    /// the list, or absent, gives way to the first market.
+    pub fn with_selection(
+        markets: impl IntoIterator<Item = MarketId>,
+        selected: Option<MarketId>,
+    ) -> Self {
+        let mut list = Self::from_markets(markets);
+        if let Some(selected) = selected {
+            list.select(&selected);
+        }
+        list
+    }
+
+    /// The market the panel shows. `None` only when nothing is watched.
+    pub fn selected(&self) -> Option<&MarketId> {
+        self.selected.as_ref()
+    }
+
+    /// Select a watched market. Returns whether it is watched; selecting one
+    /// that is not changes nothing.
+    pub fn select(&mut self, market: &MarketId) -> bool {
+        let watched = self.contains(market);
+        if watched {
+            self.selected = Some(market.clone());
+        }
+        watched
     }
 
     /// The list for someone who has never chosen one: the markets they hold
@@ -67,15 +99,32 @@ impl Watchlist {
         if self.is_full() {
             return Err(AddError::Full);
         }
+        // The selection stays where it is, unless there was nothing to select.
+        if self.selected.is_none() {
+            self.selected = Some(market.clone());
+        }
         self.markets.push(market);
         Ok(())
     }
 
     /// Remove a market. Returns whether it was watched.
+    ///
+    /// Removing the selected market selects the one that followed it, or the
+    /// one before it when it was last; removing the only market leaves
+    /// nothing selected.
     pub fn remove(&mut self, market: &MarketId) -> bool {
-        let before = self.markets.len();
-        self.markets.retain(|m| m != market);
-        self.markets.len() != before
+        let Some(at) = self.markets.iter().position(|m| m == market) else {
+            return false;
+        };
+        self.markets.remove(at);
+        if self.selected.as_ref() == Some(market) {
+            self.selected = self
+                .markets
+                .get(at)
+                .or_else(|| self.markets.last())
+                .cloned();
+        }
+        true
     }
 }
 
@@ -175,6 +224,80 @@ mod tests {
             list.markets(),
             [id("BTC"), id("ETH"), id("SOL"), id("HYPE")]
         );
+    }
+
+    #[test]
+    fn the_first_market_is_selected_by_default() {
+        let list = Watchlist::from_markets([id("ETH"), id("xyz:NVDA"), id("BTC")]);
+        assert_eq!(list.selected(), Some(&id("ETH")));
+        assert_eq!(Watchlist::default().selected(), None);
+    }
+
+    #[test]
+    fn adding_a_market_leaves_the_selection_alone() {
+        let mut list = Watchlist::from_markets([id("ETH"), id("xyz:NVDA")]);
+        list.select(&id("xyz:NVDA"));
+        list.add(id("xyz:TSLA")).unwrap();
+        assert_eq!(list.selected(), Some(&id("xyz:NVDA")));
+    }
+
+    #[test]
+    fn a_market_added_to_an_empty_list_is_selected() {
+        let mut list = Watchlist::default();
+        list.add(id("SOL")).unwrap();
+        assert_eq!(list.selected(), Some(&id("SOL")));
+    }
+
+    #[test]
+    fn only_a_watched_market_can_be_selected() {
+        let mut list = Watchlist::from_markets([id("ETH"), id("BTC")]);
+        assert!(list.select(&id("BTC")));
+        assert_eq!(list.selected(), Some(&id("BTC")));
+        assert!(!list.select(&id("DOGE")));
+        assert_eq!(list.selected(), Some(&id("BTC")));
+    }
+
+    #[test]
+    fn removing_the_selected_market_selects_the_one_after_it() {
+        let mut list = Watchlist::from_markets([id("ETH"), id("xyz:NVDA"), id("xyz:SILVER")]);
+        list.select(&id("xyz:NVDA"));
+        list.remove(&id("xyz:NVDA"));
+        assert_eq!(list.selected(), Some(&id("xyz:SILVER")));
+    }
+
+    #[test]
+    fn removing_the_selected_market_at_the_end_selects_the_one_before_it() {
+        let mut list = Watchlist::from_markets([id("ETH"), id("xyz:NVDA"), id("xyz:SILVER")]);
+        list.select(&id("xyz:SILVER"));
+        list.remove(&id("xyz:SILVER"));
+        assert_eq!(list.selected(), Some(&id("xyz:NVDA")));
+    }
+
+    #[test]
+    fn removing_another_market_leaves_the_selection_alone() {
+        let mut list = Watchlist::from_markets([id("ETH"), id("xyz:NVDA"), id("xyz:SILVER")]);
+        list.select(&id("xyz:NVDA"));
+        list.remove(&id("ETH"));
+        assert_eq!(list.selected(), Some(&id("xyz:NVDA")));
+    }
+
+    #[test]
+    fn removing_the_only_market_leaves_nothing_selected() {
+        let mut list = Watchlist::from_markets([id("ETH")]);
+        list.remove(&id("ETH"));
+        assert_eq!(list.selected(), None);
+        assert!(list.is_empty());
+    }
+
+    #[test]
+    fn a_stored_selection_is_kept_and_a_stale_one_gives_way_to_the_first() {
+        let markets = || [id("ETH"), id("xyz:NVDA"), id("BTC")];
+        let kept = Watchlist::with_selection(markets(), Some(id("BTC")));
+        assert_eq!(kept.selected(), Some(&id("BTC")));
+        let stale = Watchlist::with_selection(markets(), Some(id("DOGE")));
+        assert_eq!(stale.selected(), Some(&id("ETH")));
+        let none = Watchlist::with_selection(markets(), None);
+        assert_eq!(none.selected(), Some(&id("ETH")));
     }
 
     #[test]

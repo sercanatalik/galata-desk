@@ -7,7 +7,7 @@ use std::sync::Arc;
 
 use galata_desk_core::connect::Address;
 use galata_desk_core::store::{Account, Store};
-use gpui_kit::test::{TestQueryExt, TestWindowExt};
+use gpui_kit::test::{TestEventExt, TestQueryExt, TestWindowExt};
 use gpui_kit::{
     AppContext, Bounds, Entity, Point, TestAppContext, WindowBounds, WindowHandle, WindowOptions,
     base::Root, px, size,
@@ -183,6 +183,18 @@ fn open_with(
     (window, desk, dir)
 }
 
+/// Choose a period from the Markets period menu, by its name there.
+fn choose_period(window: &mut gpui_kit::Window, name: &str, cx: &mut gpui_kit::App) {
+    window.click("mperiod", cx);
+    window.render_frame(cx);
+    // The menu floats outside any element with an id: click where its item is.
+    let item = window.find_by_label(name).bounds().center();
+    window.pointer_move(item, None, cx);
+    window.pointer_down(item, gpui_kit::MouseButton::Left, cx);
+    window.pointer_up(item, gpui_kit::MouseButton::Left, cx);
+    window.render_frame(cx);
+}
+
 /// Click Markets in the section switch and return the view.
 fn go_to_markets(
     window: WindowHandle<Root>,
@@ -281,7 +293,7 @@ fn each_sections_selections_survive_a_round_trip(cx: &mut TestAppContext) {
     let markets = go_to_markets(window, &desk, cx);
     cx.update_window(window.into(), |_, window, cx| {
         assert_eq!(markets.read(cx).selections(), "period=24H colour=Change");
-        window.within("mperiod").click(2usize, cx);
+        choose_period(window, "7 days", cx);
         window.within("colour").click(2usize, cx);
         assert_eq!(markets.read(cx).selections(), "period=7D colour=Funding");
         // To Portfolio, change something there, and back.
@@ -312,16 +324,32 @@ fn each_sections_selections_survive_a_round_trip(cx: &mut TestAppContext) {
 fn the_period_and_colour_controls_each_select(cx: &mut TestAppContext) {
     let (window, desk, _dir) = open_with(cx, Some(&["BTC"]));
     let markets = go_to_markets(window, &desk, cx);
-    cx.update_window(window.into(), |_, window, cx| {
-        for (ix, period) in ["1H", "24H", "7D"].iter().enumerate() {
-            window.within("mperiod").click(ix, cx);
+    for (name, period) in [
+        ("3 minutes", "3m"),
+        ("5 minutes", "5m"),
+        ("15 minutes", "15m"),
+        ("30 minutes", "30m"),
+        ("1 hour", "1H"),
+        ("24 hours", "24H"),
+        ("7 days", "7D"),
+    ] {
+        cx.update_window(window.into(), |_, window, cx| {
+            window.render_frame(cx);
+            choose_period(window, name, cx);
             assert!(
                 markets
                     .read(cx)
                     .selections()
-                    .starts_with(&format!("period={period} "))
+                    .starts_with(&format!("period={period} ")),
+                "{name}"
             );
-        }
+        })
+        .unwrap();
+        // The menu closes on its own turn.
+        cx.run_until_parked();
+    }
+    cx.update_window(window.into(), |_, window, cx| {
+        window.render_frame(cx);
         for (ix, colour) in ["Change", "Volatility", "Funding"].iter().enumerate() {
             window.within("colour").click(ix, cx);
             assert!(
@@ -336,22 +364,110 @@ fn the_period_and_colour_controls_each_select(cx: &mut TestAppContext) {
 }
 
 #[gpui_kit::test]
-fn focusing_or_pointing_at_a_tile_opens_its_detail(cx: &mut TestAppContext) {
-    let (window, desk, _dir) = open_with(cx, Some(&["BTC", "ETH"]));
+fn clicking_a_tile_selects_its_market_and_pointing_does_not(cx: &mut TestAppContext) {
+    let (window, desk, dir) = open_with(cx, Some(&["BTC", "ETH", "SOL"]));
     let markets = go_to_markets(window, &desk, cx);
     cx.update_window(window.into(), |_, window, cx| {
-        assert_eq!(markets.read(cx).open_market(window), None);
+        // The first market is selected until another is chosen.
+        assert_eq!(markets.read(cx).selected_market().as_deref(), Some("BTC"));
+        assert!(window.try_find("market-panel").is_some());
 
-        // Keyboard focus.
+        // Pointing at tiles changes nothing but which one offers Remove.
+        window.hover(("tile", 1usize), cx);
+        window.render_frame(cx);
+        assert_eq!(markets.read(cx).hovered_market().as_deref(), Some("ETH"));
+        window.hover(("tile", 2usize), cx);
+        window.render_frame(cx);
+        assert_eq!(markets.read(cx).selected_market().as_deref(), Some("BTC"));
+
+        // A click selects.
+        window.click(("tile", 1usize), cx);
+        window.render_frame(cx);
+        assert_eq!(markets.read(cx).selected_market().as_deref(), Some("ETH"));
+
+        // Clicking the selected tile leaves it selected.
+        window.click(("tile", 1usize), cx);
+        window.render_frame(cx);
+        assert_eq!(markets.read(cx).selected_market().as_deref(), Some("ETH"));
+    })
+    .unwrap();
+    // Remembered at once, with the list unchanged.
+    let stored = Store::at(dir.path()).watchlist().unwrap();
+    assert_eq!(stored.selected(), Some(&MarketId::new("ETH")));
+    assert_eq!(stored.markets().len(), 3);
+}
+
+#[gpui_kit::test]
+fn enter_or_space_on_a_focused_tile_selects_it(cx: &mut TestAppContext) {
+    let (window, desk, _dir) = open_with(cx, Some(&["BTC", "ETH", "SOL"]));
+    let markets = go_to_markets(window, &desk, cx);
+    cx.update_window(window.into(), |_, window, cx| {
+        // Focus alone does not select.
         markets.update(cx, |view, cx| view.focus_market("ETH", window, cx));
         window.render_frame(cx);
-        assert_eq!(markets.read(cx).open_market(window).as_deref(), Some("ETH"));
-
-        // The pointer, on another tile: focus stays where it was, and the
-        // tile pointed at is open too.
-        window.hover(("tile", 0usize), cx);
+        assert_eq!(markets.read(cx).selected_market().as_deref(), Some("BTC"));
+        window.press("enter", cx);
         window.render_frame(cx);
-        assert!(markets.read(cx).open_market(window).is_some());
+        assert_eq!(markets.read(cx).selected_market().as_deref(), Some("ETH"));
+
+        markets.update(cx, |view, cx| view.focus_market("SOL", window, cx));
+        window.render_frame(cx);
+        window.press("space", cx);
+        window.render_frame(cx);
+        assert_eq!(markets.read(cx).selected_market().as_deref(), Some("SOL"));
+    })
+    .unwrap();
+}
+
+#[gpui_kit::test]
+fn removing_the_selected_tile_selects_its_neighbour(cx: &mut TestAppContext) {
+    let (window, desk, dir) = open_with(cx, Some(&["BTC", "ETH", "SOL"]));
+    let markets = go_to_markets(window, &desk, cx);
+    cx.update_window(window.into(), |_, window, cx| {
+        window.click(("tile", 1usize), cx);
+        window.render_frame(cx);
+        // Remove the selected tile with its button: the next one is selected.
+        window.hover(("tile", 1usize), cx);
+        window.render_frame(cx);
+        window.click(("remove", 1usize), cx);
+        window.render_frame(cx);
+        assert_eq!(markets.read(cx).watched(), ["BTC", "SOL"]);
+        assert_eq!(markets.read(cx).selected_market().as_deref(), Some("SOL"));
+
+        // Remove it again, now the last in the list: the one before it.
+        markets.update(cx, |view, cx| view.focus_market("SOL", window, cx));
+        window.render_frame(cx);
+        window.press("delete", cx);
+        window.render_frame(cx);
+        assert_eq!(markets.read(cx).selected_market().as_deref(), Some("BTC"));
+        assert!(window.try_find("market-panel").is_some());
+    })
+    .unwrap();
+    let stored = Store::at(dir.path()).watchlist().unwrap();
+    assert_eq!(stored.selected(), Some(&MarketId::new("BTC")));
+}
+
+#[gpui_kit::test]
+fn the_selection_is_restored_at_start(cx: &mut TestAppContext) {
+    let (window, desk, dir) = open(cx, true);
+    let mut list = watchlist(&["BTC", "ETH", "SOL"]);
+    list.select(&MarketId::new("SOL"));
+    Store::at(dir.path()).save_watchlist(&list).unwrap();
+    let markets = go_to_markets(window, &desk, cx);
+    cx.update_window(window.into(), |_, _, cx| {
+        assert_eq!(markets.read(cx).selected_market().as_deref(), Some("SOL"));
+    })
+    .unwrap();
+}
+
+#[gpui_kit::test]
+fn with_nothing_watched_there_is_no_panel(cx: &mut TestAppContext) {
+    let (window, desk, _dir) = open_with(cx, Some(&[]));
+    let markets = go_to_markets(window, &desk, cx);
+    cx.update_window(window.into(), |_, window, cx| {
+        assert_eq!(markets.read(cx).selected_market(), None);
+        assert!(window.try_find("market-panel").is_none());
+        assert!(window.try_find("add-first").is_some());
     })
     .unwrap();
 }
