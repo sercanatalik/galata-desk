@@ -1018,22 +1018,13 @@ fn history_chart(
     scope: Scope,
     period: Period,
 ) -> impl IntoElement {
-    let axis = match period {
-        Period::Day => "%H:%M",
-        Period::Week | Period::Month => "%b %-d",
-        Period::AllTime => "%b %Y",
-    };
     let mut points: Vec<Point> = Vec::with_capacity(history.len());
     for (ms, value) in history {
         let at = local(*ms);
-        let mut label = at.format(axis).to_string();
-        // Several points can fall on one day; an invisible suffix keeps their
-        // labels distinct without changing how they read.
-        while points.iter().any(|p| p.label.as_ref() == label) {
-            label.push('\u{200b}');
-        }
         points.push(Point {
-            label: label.into(),
+            // The chart places points by label; the time itself is unique.
+            // The labels people read are drawn below, by `time_ticks`.
+            label: ms.to_string().into(),
             title: at.format("%b %-d %Y, %H:%M").to_string().into(),
             value: value.to_f64().unwrap_or_default(),
         });
@@ -1061,7 +1052,7 @@ fn history_chart(
         .y_axis(true)
         .y_tick_count(4)
         .y_tick_format(move |v| axis_label(v, high - low))
-        .x_tick_count(6)
+        .x_axis(false)
         .tooltip_title(|p: &Point| p.title.clone())
         .tooltip_value(move |_, v| money(v).into());
     // Scale to the data, with a little air above and below: an account worth
@@ -1072,11 +1063,73 @@ fn history_chart(
         .max(0.01);
     let chart = chart.y_domain(low - air, high + air);
     // Mark zero where the series crosses it.
-    if low < 0. && high > 0. {
+    let chart = if low < 0. && high > 0. {
         chart.reference_line(0.)
     } else {
         chart
+    };
+    let times: Vec<u64> = history.iter().map(|(ms, _)| *ms).collect();
+    let ticks = time_ticks(&times, |ms, format| local(ms).format(format).to_string());
+    v_flex()
+        .size_full()
+        .gap_1()
+        .child(div().flex_1().min_h_0().child(chart))
+        .child(
+            h_flex()
+                .justify_between()
+                // The plot starts after the value axis's labels, on the left.
+                .pl(px(VALUE_AXIS_WIDTH))
+                .font_family(MONO)
+                .text_size(px(11.))
+                .text_color(Palette::muted())
+                .children(ticks),
+        )
+}
+
+/// The room the chart's value axis takes on its left.
+const VALUE_AXIS_WIDTH: f32 = 34.;
+
+/// How a time on the axis is written, by how much time the chart spans: the
+/// time of day for a day, the date with it for a week, the date alone for a
+/// month, and the month for longer.
+fn tick_format(span_ms: u64) -> &'static str {
+    const HOUR: u64 = 3_600_000;
+    const DAY: u64 = 24 * HOUR;
+    if span_ms <= 36 * HOUR {
+        "%H:%M"
+    } else if span_ms <= 10 * DAY {
+        "%b %-d %H:%M"
+    } else if span_ms <= 400 * DAY {
+        "%b %-d"
+    } else {
+        "%b %Y"
     }
+}
+
+/// The time axis's labels: up to five, evenly spaced from the first point to
+/// the last, no two alike. `write` formats one time; it is passed in so the
+/// rule can be tested without this machine's time zone.
+fn time_ticks(times: &[u64], write: impl Fn(u64, &str) -> String) -> Vec<String> {
+    const MOST: usize = 5;
+    let (Some(first), Some(last)) = (times.first(), times.last()) else {
+        return Vec::new();
+    };
+    let format = tick_format(last.saturating_sub(*first));
+    let count = times.len().min(MOST);
+    let mut labels: Vec<String> = Vec::with_capacity(count);
+    for i in 0..count {
+        let at = if count == 1 {
+            0
+        } else {
+            (times.len() - 1) * i / (count - 1)
+        };
+        let label = write(times[at], format);
+        // Two points close together can still read the same: say it once.
+        if labels.last() != Some(&label) {
+            labels.push(label);
+        }
+    }
+    labels
 }
 
 /// An axis tick: abbreviated like `$3.2M`, with as many decimals as it takes
@@ -1140,7 +1193,74 @@ impl Portfolio {
 
 #[cfg(test)]
 mod tests {
-    use super::axis_label;
+    use super::{axis_label, tick_format, time_ticks};
+
+    const HOUR: u64 = 3_600_000;
+    const DAY: u64 = 24 * HOUR;
+    /// 2026-11-10 11:00 UTC.
+    const T0: u64 = 1_794_308_400_000;
+
+    fn utc(ms: u64, format: &str) -> String {
+        chrono::DateTime::from_timestamp_millis(ms as i64)
+            .unwrap()
+            .format(format)
+            .to_string()
+    }
+
+    #[test]
+    fn the_time_axis_is_written_by_how_much_time_it_spans() {
+        assert_eq!(tick_format(DAY), "%H:%M");
+        assert_eq!(tick_format(7 * DAY), "%b %-d %H:%M");
+        assert_eq!(tick_format(30 * DAY), "%b %-d");
+        assert_eq!(tick_format(3 * 365 * DAY), "%b %Y");
+    }
+
+    #[test]
+    fn a_week_with_several_points_a_day_repeats_no_label() {
+        // A point every six hours for a week: four a day.
+        let times: Vec<u64> = (0..=28).map(|i| T0 + i * 6 * HOUR).collect();
+        let ticks = time_ticks(&times, utc);
+        assert_eq!(
+            ticks,
+            [
+                "Nov 10 11:00",
+                "Nov 12 05:00",
+                "Nov 13 23:00",
+                "Nov 15 17:00",
+                "Nov 17 11:00"
+            ]
+        );
+    }
+
+    #[test]
+    fn ticks_run_from_the_first_point_to_the_last() {
+        let times: Vec<u64> = (0..=96).map(|i| T0 + i * HOUR / 4).collect();
+        let ticks = time_ticks(&times, utc);
+        assert_eq!(ticks, ["11:00", "17:00", "23:00", "05:00", "11:00"]);
+        let times: Vec<u64> = (0..=30).map(|i| T0 + i * DAY).collect();
+        let ticks = time_ticks(&times, utc);
+        assert_eq!(ticks.first().unwrap(), "Nov 10");
+        assert_eq!(ticks.last().unwrap(), "Dec 10");
+    }
+
+    #[test]
+    fn neighbouring_labels_that_read_the_same_are_said_once() {
+        // Years of history with its newest points days apart: one month, once.
+        let mut times: Vec<u64> = (0..4).map(|i| T0 - (1000 - i * 300) * DAY).collect();
+        times.extend([T0 - DAY, T0]);
+        let ticks = time_ticks(&times, utc);
+        let mut once = ticks.clone();
+        once.dedup();
+        assert_eq!(ticks, once);
+        assert!(ticks.len() < 6);
+    }
+
+    #[test]
+    fn fewer_points_than_labels_are_each_labelled_once() {
+        assert_eq!(time_ticks(&[T0, T0 + HOUR], utc), ["11:00", "12:00"]);
+        assert_eq!(time_ticks(&[T0], utc), ["11:00"]);
+        assert!(time_ticks(&[], utc).is_empty());
+    }
 
     #[test]
     fn neighbouring_ticks_on_a_narrow_axis_differ() {
