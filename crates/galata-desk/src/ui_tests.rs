@@ -710,3 +710,207 @@ fn the_account_summary_waits_for_both_holdings_and_history(cx: &mut TestAppConte
     })
     .unwrap();
 }
+
+/// A snapshot whose tiles have a change over the period, in watchlist order.
+fn moving(changes: &[(&str, f64)]) -> MarketSnapshot {
+    use galata_desk_core::market::candles::Stats;
+    let coins: Vec<&str> = changes.iter().map(|(coin, _)| *coin).collect();
+    let mut snapshot = snapshot(&coins, &coins);
+    for (tile, (_, change)) in snapshot.tiles.iter_mut().zip(changes) {
+        tile.stats = Some(Stats {
+            start: Decimal::ONE,
+            change: *change,
+            low: Decimal::ONE,
+            high: Decimal::ONE,
+            marker: 0.5,
+            volatility: Some(1.0),
+        });
+    }
+    snapshot
+}
+
+/// Choose an order from the Markets sort menu, by its name there.
+fn choose_sort(window: &mut gpui_kit::Window, name: &str, cx: &mut gpui_kit::App) {
+    window.click("msort", cx);
+    window.render_frame(cx);
+    let item = window.find_by_label(name).bounds().center();
+    window.pointer_move(item, None, cx);
+    window.pointer_down(item, gpui_kit::MouseButton::Left, cx);
+    window.pointer_up(item, gpui_kit::MouseButton::Left, cx);
+    window.render_frame(cx);
+}
+
+#[gpui_kit::test]
+fn sorting_reorders_the_tiles_and_leaves_the_watchlist_and_selection_alone(
+    cx: &mut TestAppContext,
+) {
+    let (window, desk, dir) = open_with(cx, Some(&["BTC", "SOL", "ETH"]));
+    let markets = go_to_markets(window, &desk, cx);
+    cx.update_window(window.into(), |_, window, cx| {
+        markets.update(cx, |view, cx| {
+            view.set_snapshot(moving(&[("BTC", -0.7), ("SOL", 1.3), ("ETH", 0.2)]), cx)
+        });
+        window.render_frame(cx);
+        // The section opens in watchlist order.
+        assert_eq!(markets.read(cx).drawn(), ["BTC", "SOL", "ETH"]);
+
+        choose_sort(window, "Change, gainers first", cx);
+        assert_eq!(markets.read(cx).drawn(), ["SOL", "ETH", "BTC"]);
+        // Only the drawing order changed.
+        assert_eq!(markets.read(cx).watched(), ["BTC", "SOL", "ETH"]);
+        assert_eq!(markets.read(cx).selected_market().as_deref(), Some("BTC"));
+    })
+    .unwrap();
+    cx.run_until_parked();
+    cx.update_window(window.into(), |_, window, cx| {
+        window.render_frame(cx);
+        // A tile keeps its identity wherever it is drawn: this is ETH's.
+        window.click(("tile", 2usize), cx);
+        window.render_frame(cx);
+        assert_eq!(markets.read(cx).selected_market().as_deref(), Some("ETH"));
+        choose_sort(window, "Change, losers first", cx);
+        assert_eq!(markets.read(cx).drawn(), ["BTC", "ETH", "SOL"]);
+    })
+    .unwrap();
+    let stored = Store::at(dir.path()).watchlist().unwrap();
+    let stored: Vec<String> = stored.markets().iter().map(|m| m.to_string()).collect();
+    assert_eq!(stored, ["BTC", "SOL", "ETH"]);
+}
+
+#[gpui_kit::test]
+fn a_sorted_order_settles_instead_of_following_every_tick(cx: &mut TestAppContext) {
+    let (window, desk, _dir) = open_with(cx, Some(&["BTC", "SOL", "ETH"]));
+    let markets = go_to_markets(window, &desk, cx);
+    cx.update_window(window.into(), |_, window, cx| {
+        markets.update(cx, |view, cx| {
+            view.set_snapshot(moving(&[("BTC", -0.7), ("SOL", 1.3), ("ETH", 0.2)]), cx)
+        });
+        window.render_frame(cx);
+        choose_sort(window, "Change, gainers first", cx);
+        assert_eq!(markets.read(cx).drawn(), ["SOL", "ETH", "BTC"]);
+
+        // BTC overtakes: within the interval the tiles stay where they are.
+        markets.update(cx, |view, cx| {
+            view.set_snapshot(moving(&[("BTC", 2.0), ("SOL", 1.3), ("ETH", 0.2)]), cx)
+        });
+        window.render_frame(cx);
+        assert_eq!(markets.read(cx).drawn(), ["SOL", "ETH", "BTC"]);
+
+        // Once the interval has passed, the order catches up.
+        markets.update(cx, |view, cx| {
+            view.age_order();
+            cx.notify();
+        });
+        window.render_frame(cx);
+        assert_eq!(markets.read(cx).drawn(), ["BTC", "SOL", "ETH"]);
+
+        // A market removed is gone from the order at once.
+        markets.update(cx, |view, cx| view.focus_market("SOL", window, cx));
+        window.render_frame(cx);
+        window.press("delete", cx);
+        window.render_frame(cx);
+        assert_eq!(markets.read(cx).drawn(), ["BTC", "ETH"]);
+    })
+    .unwrap();
+}
+
+#[gpui_kit::test]
+fn changing_the_period_reorders_at_once(cx: &mut TestAppContext) {
+    let (window, desk, _dir) = open_with(cx, Some(&["BTC", "SOL"]));
+    let markets = go_to_markets(window, &desk, cx);
+    cx.update_window(window.into(), |_, window, cx| {
+        markets.update(cx, |view, cx| {
+            view.set_snapshot(moving(&[("BTC", -0.7), ("SOL", 1.3)]), cx)
+        });
+        window.render_frame(cx);
+        choose_sort(window, "Change, gainers first", cx);
+        assert_eq!(markets.read(cx).drawn(), ["SOL", "BTC"]);
+    })
+    .unwrap();
+    cx.run_until_parked();
+    cx.update_window(window.into(), |_, window, cx| {
+        window.render_frame(cx);
+        // The new period's figures arrive with the change of period.
+        markets.update(cx, |view, cx| {
+            view.set_snapshot(moving(&[("BTC", 3.0), ("SOL", 1.3)]), cx)
+        });
+        choose_period(window, "7 days", cx);
+        assert_eq!(markets.read(cx).drawn(), ["BTC", "SOL"]);
+    })
+    .unwrap();
+}
+
+#[gpui_kit::test]
+fn the_switch_shows_funding_with_the_footer_and_no_trading_control(cx: &mut TestAppContext) {
+    let (window, desk, _dir) = open(cx, true);
+    cx.update_window(window.into(), |_, window, cx| {
+        window.render_frame(cx);
+        // Not shown until chosen.
+        assert!(window.try_find("funding").is_none());
+        let portfolio = desk.read(cx).portfolio_view().unwrap();
+        portfolio.update(cx, |view, cx| {
+            view.set_positions(
+                vec![position("BTC", "", 50_000), position("NVDA", "xyz", 15_000)],
+                cx,
+            );
+            view.set_rates(&[("BTC", "0.00001"), ("xyz:NVDA", "-0.00002")], cx);
+        });
+        window.within("sections").click(2usize, cx);
+    })
+    .unwrap();
+    cx.run_until_parked();
+    cx.update_window(window.into(), |_, window, cx| {
+        window.render_frame(cx);
+        assert_eq!(desk.read(cx).section(), Some(Section::Funding));
+        assert!(window.try_find("funding").is_some());
+        assert!(window.try_find("funding-rows").is_some());
+        // The account footer is under this section too.
+        assert!(window.try_find("account-footer").is_some());
+        for forbidden in [
+            "Trade", "Buy", "Sell", "Close", "Cancel", "Deposit", "Withdraw", "Transfer",
+        ] {
+            assert!(
+                window.find_all_by_label(forbidden).is_empty(),
+                "a `{forbidden}` control is in a read-only section"
+            );
+        }
+        // And back to Portfolio.
+        window.within("sections").click(0usize, cx);
+    })
+    .unwrap();
+    cx.run_until_parked();
+    cx.update_window(window.into(), |_, window, cx| {
+        window.render_frame(cx);
+        assert_eq!(desk.read(cx).section(), Some(Section::Portfolio));
+        assert!(window.try_find("funding").is_none());
+    })
+    .unwrap();
+}
+
+#[gpui_kit::test]
+fn funding_with_no_positions_says_so_and_is_not_offered_before_connecting(cx: &mut TestAppContext) {
+    let (window, desk, _dir) = open(cx, false);
+    cx.update_window(window.into(), |_, window, cx| {
+        window.render_frame(cx);
+        assert_eq!(desk.read(cx).section(), None);
+        assert!(window.find_all_by_label("Funding").is_empty());
+    })
+    .unwrap();
+
+    let (window, desk, _dir) = open(cx, true);
+    cx.update_window(window.into(), |_, window, cx| {
+        window.render_frame(cx);
+        let portfolio = desk.read(cx).portfolio_view().unwrap();
+        portfolio.update(cx, |view, cx| view.set_positions(Vec::new(), cx));
+        window.within("sections").click(2usize, cx);
+    })
+    .unwrap();
+    cx.run_until_parked();
+    cx.update_window(window.into(), |_, window, cx| {
+        window.render_frame(cx);
+        assert!(window.try_find("funding").is_some());
+        // No rows to scroll: the section says there are no positions.
+        assert!(window.try_find("funding-rows").is_none());
+    })
+    .unwrap();
+}

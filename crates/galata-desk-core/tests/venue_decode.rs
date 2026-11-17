@@ -148,3 +148,21 @@ fn venue_precision_survives_decoding() {
         "17.308"
     );
 }
+
+#[test]
+fn funding_rates_pair_each_market_with_its_context() {
+    use galata_desk_core::venue::{AssetCtx, PerpMeta};
+    for (file, coin) in [
+        ("metaAndAssetCtxs", "BTC"),
+        ("metaAndAssetCtxs_xyz", "xyz:NVDA"),
+    ] {
+        let (meta, ctxs): (PerpMeta, Vec<AssetCtx>) =
+            decode("metaAndAssetCtxs", &fixture(file)).unwrap();
+        assert_eq!(meta.universe.len(), ctxs.len());
+        let at = meta.universe.iter().position(|m| m.name == coin).unwrap();
+        assert!(
+            ctxs[at].funding.abs() < "0.01".parse().unwrap(),
+            "an hourly rate is small"
+        );
+    }
+}

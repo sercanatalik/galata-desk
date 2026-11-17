@@ -19,6 +19,7 @@ use crate::theme::Palette;
 pub enum Section {
     Portfolio,
     Markets,
+    Funding,
 }
 
 enum Screen {
@@ -70,6 +71,14 @@ impl Desk {
             .any(|kv| kv == "section=markets")
         {
             Self::open_section(&mut screen, Section::Markets, window, cx);
+        }
+        #[cfg(feature = "shot")]
+        if std::env::var("GALATA_DESK_SHOT_STATE")
+            .unwrap_or_default()
+            .split(',')
+            .any(|kv| kv == "section=funding")
+        {
+            Self::open_section(&mut screen, Section::Funding, window, cx);
         }
         screen
     }
@@ -263,16 +272,17 @@ impl Render for Desk {
                     .selected_index(match section {
                         Section::Portfolio => 0,
                         Section::Markets => 1,
+                        Section::Funding => 2,
                     })
                     .on_click(cx.listener(|this, ix: &usize, window, cx| {
-                        let to = if *ix == 0 {
-                            Section::Portfolio
-                        } else {
-                            Section::Markets
+                        let to = match *ix {
+                            0 => Section::Portfolio,
+                            1 => Section::Markets,
+                            _ => Section::Funding,
                         };
                         this.show(to, window, cx);
                     }))
-                    .children(["Portfolio", "Markets"]);
+                    .children(["Portfolio", "Markets", "Funding"]);
                 let account = portfolio.update(cx, |view, cx| view.account_controls(cx));
                 // The current section says how fresh it is; the account is
                 // the same in both.
@@ -280,6 +290,11 @@ impl Render for Desk {
                     (Section::Markets, Some(markets)) => (
                         markets.update(cx, |view, cx| view.status(cx)),
                         markets.clone().into_any_element(),
+                    ),
+                    // Funding is drawn from what the Portfolio view holds.
+                    (Section::Funding, _) => (
+                        portfolio.update(cx, |view, cx| view.freshness(cx)),
+                        portfolio.read(cx).funding(),
                     ),
                     _ => (
                         portfolio.update(cx, |view, cx| view.freshness(cx)),

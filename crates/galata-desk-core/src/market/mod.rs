@@ -4,6 +4,7 @@
 pub mod candles;
 pub mod feed;
 pub mod history;
+pub mod sort;
 pub mod watchlist;
 pub mod ws;
 

@@ -62,6 +62,8 @@ impl Transport for Fake {
         // The account is on the main dex and on `xyz`; `flx` is empty.
         let file = match (kind, dex) {
             ("clearinghouseState", Some("xyz")) => "clearinghouseState_xyz".to_string(),
+            ("metaAndAssetCtxs", Some("xyz")) => "metaAndAssetCtxs_xyz".to_string(),
+            ("metaAndAssetCtxs", Some(_)) => "metaAndAssetCtxs".to_string(),
             ("clearinghouseState", Some(_)) => return Ok(EMPTY_DEX.as_bytes().to_vec()),
             ("frontendOpenOrders", Some(_)) => return Ok(b"[]".to_vec()),
             (kind, _) => kind.to_string(),
@@ -277,4 +279,45 @@ async fn a_separate_account_keeps_its_perps_balance() {
     let holdings = r.snapshot().holdings.data.as_ref().unwrap();
     assert_eq!(holdings.collateral, Collateral::Separate);
     assert!(holdings.balances.iter().any(|b| b.wallet == Wallet::Perps));
+}
+
+// ---- Funding rates --------------------------------------------------------
+
+#[tokio::test]
+async fn funding_rates_are_asked_for_the_dexes_with_positions() {
+    let fake = Fake::new();
+    let mut r = Refresher::new(fake.clone(), USER);
+    // Nothing is asked until the positions say which dexes matter.
+    r.refresh_rates().await;
+    assert!(r.snapshot().rates.is_loading());
+    assert_eq!(fake.count("metaAndAssetCtxs:"), 0);
+
+    r.refresh_holdings(true).await;
+    r.refresh_rates().await;
+    let rates = r.snapshot().rates.data.clone().expect("rates arrived");
+    // The account is on the main dex and on `xyz`; the empty `flx` is not asked.
+    assert_eq!(fake.count("metaAndAssetCtxs:"), 1);
+    assert_eq!(fake.count("metaAndAssetCtxs:xyz"), 1);
+    assert_eq!(fake.count("metaAndAssetCtxs:flx"), 0);
+    assert_eq!(rates["BTC"].to_string(), "0.0000125");
+    assert!(
+        rates.contains_key("xyz:NVDA"),
+        "builder-dex markets keep their prefix"
+    );
+}
+
+#[tokio::test]
+async fn a_failed_refresh_keeps_the_last_funding_rates() {
+    let fake = Fake::new();
+    let mut r = Refresher::new(fake.clone(), USER);
+    r.refresh_holdings(true).await;
+    r.refresh_rates().await;
+    let before = r.snapshot().rates.data.clone();
+    fake.set(Mood::Down);
+    r.refresh_rates().await;
+    assert!(r.snapshot().rates.is_stale());
+    assert_eq!(r.snapshot().rates.data, before);
+    fake.set(Mood::Fine);
+    r.refresh_rates().await;
+    assert!(!r.snapshot().rates.is_stale());
 }

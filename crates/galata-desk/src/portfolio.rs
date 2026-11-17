@@ -87,7 +87,18 @@ impl Portfolio {
             let _io = core.runtime.enter();
             Feed::start(Http::at(core.info_url.clone()), address.as_str())
         };
+        #[allow(unused_mut)]
         let mut snapshots = feed.snapshots();
+        // In the headless tests the view is given its snapshots directly. The
+        // feed still runs, on the I/O runtime's threads, and a wake-up from
+        // one of them is activity the deterministic test scheduler refuses:
+        // so there the view does not listen to it.
+        #[cfg(test)]
+        let watch = {
+            drop(snapshots);
+            Task::ready(())
+        };
+        #[cfg(not(test))]
         let watch = cx.spawn(async move |this, cx| {
             while snapshots.changed().await.is_ok() {
                 let snapshot = snapshots.borrow_and_update().clone();
@@ -478,6 +489,11 @@ impl Portfolio {
     /// section marks the markets among them.
     pub fn positions(&self) -> Option<&[PositionRow]> {
         self.holdings().map(|h| h.positions.as_slice())
+    }
+
+    /// The Funding section, drawn from the positions and rates held here.
+    pub fn funding(&self) -> AnyElement {
+        crate::funding::render(self.positions(), &self.snapshot.rates)
     }
 
     /// A section that never loaded: what went wrong, and a way to try again.
@@ -1168,6 +1184,17 @@ impl Portfolio {
         snapshot.holdings.data = Some(holdings);
         snapshot.holdings.error = None;
         self.apply(snapshot, cx);
+    }
+
+    /// Give the view funding rates, as if the venue had reported them.
+    pub fn set_rates(&mut self, rates: &[(&str, &str)], cx: &mut Context<Self>) {
+        self.snapshot.rates.data = Some(
+            rates
+                .iter()
+                .map(|(coin, rate)| (coin.to_string(), rate.parse().unwrap()))
+                .collect(),
+        );
+        cx.notify();
     }
 
     /// The current selections, as short words, for tests that click them.

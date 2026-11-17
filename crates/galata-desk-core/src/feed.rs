@@ -26,6 +26,7 @@ use tokio::sync::{mpsc, watch};
 use tokio::task::JoinHandle;
 use tokio::time::Instant;
 
+use crate::funding::FundingRates;
 use crate::model::{self, Collateral, DexState, Holdings, OrderRow};
 use crate::venue::{
     ClearinghouseState, Info, PortfolioHistory, SpotMeta, Transport, UserFees, VenueError,
@@ -89,6 +90,9 @@ pub struct Snapshot {
     pub holdings: Section<Holdings>,
     pub orders: Section<Vec<OrderRow>>,
     pub overview: Section<Overview>,
+    /// The current funding rate of every market on the dexes the account has
+    /// positions on.
+    pub rates: Section<FundingRates>,
     /// The venue has asked the app to slow down and it has not yet recovered.
     pub slowed: bool,
 }
@@ -355,6 +359,24 @@ impl<T: Transport> Refresher<T> {
         }
     }
 
+    /// The current funding rates on every dex the account has a position on.
+    /// Until the positions are known there is nothing to ask for.
+    pub async fn refresh_rates(&mut self) {
+        let Some(holdings) = &self.snapshot.holdings.data else {
+            return;
+        };
+        let dexes: BTreeSet<String> = holdings.positions.iter().map(|p| p.dex.clone()).collect();
+        let result = try_join_all(dexes.iter().map(|dex| self.info.funding_rates(dex))).await;
+        self.settle(&result);
+        match result {
+            Ok(per_dex) => self
+                .snapshot
+                .rates
+                .succeed(per_dex.into_iter().flatten().collect()),
+            Err(e) => self.snapshot.rates.fail(e),
+        }
+    }
+
     async fn fetch_overview(&mut self) -> Result<Overview, VenueError> {
         let (history, fees, vaults, staking) = try_join4(
             self.info.portfolio(&self.user),
@@ -466,9 +488,16 @@ async fn run<T: Transport>(
             }
             holdings_due = Instant::now() + refresher.cadence().interval(Tier::Holdings);
             publish(&refresher);
+            // The first positions say which dexes to ask for rates: do not
+            // leave the Funding section empty until the slow tier comes round.
+            if refresher.snapshot().rates.is_loading() {
+                refresher.refresh_rates().await;
+                publish(&refresher);
+            }
         }
         if now >= overview_due {
             refresher.refresh_overview().await;
+            refresher.refresh_rates().await;
             overview_due = Instant::now() + refresher.cadence().interval(Tier::Overview);
             publish(&refresher);
         }

@@ -7,6 +7,7 @@ pub mod connect;
 pub mod drawdown;
 pub mod feed;
 pub mod format;
+pub mod funding;
 pub mod market;
 pub mod model;
 pub mod store;

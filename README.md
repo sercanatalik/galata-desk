@@ -19,7 +19,7 @@ of the markets you choose to watch. It learns which account to show by having
 you prove, with a wallet in your browser, that you own the address. After
 that it only reads public data.
 
-> **Status: 0.x.** macOS only. The Portfolio and Markets sections, the account
+> **Status: 0.x.** macOS only. The Portfolio, Markets and Funding sections, the account
 > footer and the wallet connection are built. It places no orders, and is not
 > meant to yet.
 
@@ -117,6 +117,10 @@ volatility over the period.
 
 - **Period**: one menu for the whole section, tiles and chart alike: 3, 5,
   15 or 30 minutes, 1 hour, 24 hours or 7 days.
+- **Sort**: watchlist order, change (gainers or losers first), volatility,
+  funding, or name. Sorting only changes the order tiles are drawn in, and
+  the order is held for a few seconds at a time so tiles do not jump on every
+  tick. Markets without the figure yet go last.
 - **Colour by**: change, volatility, or funding (blue where longs pay, orange
   where shorts pay). A legend above the grid shows the scale.
 - **Watchlist**: **+ Add market** lists every perpetual market Hyperliquid
@@ -125,9 +129,26 @@ volatility over the period.
   holds up to 40 markets, is remembered between launches, and starts from the
   markets you hold positions in.
 
+### Funding
+
+What your open positions pay and earn in funding, the hourly charge for
+holding a perpetual position.
+
+- **Summary**: net funding per hour and per day at current rates, funding
+  since your open positions were opened, and how many positions earn and how
+  many pay.
+- **Table**: one row per position, largest flow first: size, position value,
+  the market's current hourly rate and that rate over a year, what the
+  position pays or earns per hour and per day, and its funding since it
+  opened.
+
+A plus is funding you receive and a minus funding you pay. The per-hour and
+per-day figures assume the current rate and position size hold. Rates are
+refreshed once a minute.
+
 ### The footer
 
-A line along the bottom of the window, under both sections: equity,
+A line along the bottom of the window, under every section: equity,
 unrealised PNL and its share of equity, PNL over 24 hours and all time, the
 number of open positions, the margin they use as a share of equity, and when
 the figures were last refreshed.
@@ -398,7 +419,7 @@ hidden:
 cargo build -p galata-desk --features shot
 GALATA_DESK_SHOT=/tmp/desk.png \
 GALATA_DESK_SHOT_AFTER_MS=5000 \
-GALATA_DESK_SHOT_STATE=section=markets,colour=funding,select=xyz:NVDA \
+GALATA_DESK_SHOT_STATE=section=markets,sort=gainers,select=xyz:NVDA \
   ./target/debug/galata-desk
 ```
 

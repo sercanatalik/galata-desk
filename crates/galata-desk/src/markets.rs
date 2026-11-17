@@ -10,6 +10,7 @@ use galata_desk_core::market::candles::Candle;
 use galata_desk_core::market::feed::{
     Connection, Listed, Listing, Live, MarketFeed, MarketSnapshot, Tile,
 };
+use galata_desk_core::market::sort::{self, SortBy};
 use galata_desk_core::market::watchlist::{AddError, LIMIT, Watchlist};
 use galata_desk_core::market::{Interval, MarketId, MarketPeriod};
 use galata_desk_core::model::PositionRow;
@@ -47,6 +48,9 @@ const PLOT_HEIGHT: f32 = 266.;
 const PRICE_AXIS_WIDTH: f32 = 74.;
 /// The component kit draws a chart's highest value this far below its top.
 const PLOT_TOP_INSET: f32 = 10.;
+/// How long a sorted order is held before it is worked out again.
+const SETTLE: Duration = Duration::from_secs(5);
+
 /// How long to wait for a first connection before saying it has not come.
 const PATIENCE: Duration = Duration::from_secs(5);
 
@@ -62,6 +66,15 @@ pub struct Markets {
     /// The tile the pointer rests on. It shows that tile's remove button and
     /// nothing else: only a click selects.
     hovered: Option<MarketId>,
+    /// What the tiles are ordered by. Only the drawing order: the watchlist
+    /// keeps its own.
+    sort: SortBy,
+    /// The order the tiles were last drawn in, and when it was worked out.
+    /// It is held for a few seconds so tiles do not jump on every tick.
+    order: Vec<MarketId>,
+    ordered_at: Option<Instant>,
+    /// Work the order out again at the next draw, whatever its age.
+    reorder: bool,
     /// One focus handle per tile, so the keyboard can reach each.
     focus: HashMap<MarketId, FocusHandle>,
     picker_open: bool,
@@ -91,7 +104,18 @@ impl Markets {
                 watched,
             )
         };
+        #[allow(unused_mut)]
         let mut snapshots = feed.snapshots();
+        // In the headless tests the view is given its snapshots directly. The
+        // feed still runs, on the I/O runtime's threads, and a wake-up from
+        // one of them is activity the deterministic test scheduler refuses:
+        // so there the view does not listen to it.
+        #[cfg(test)]
+        let watch = {
+            drop(snapshots);
+            Task::ready(())
+        };
+        #[cfg(not(test))]
         let watch = cx.spawn(async move |this, cx| {
             while snapshots.changed().await.is_ok() {
                 let snapshot = snapshots.borrow_and_update().clone();
@@ -138,6 +162,10 @@ impl Markets {
             period: MarketPeriod::default(),
             colour: ColourBy::default(),
             hovered: None,
+            sort: SortBy::default(),
+            order: Vec::new(),
+            ordered_at: None,
+            reorder: false,
             focus: HashMap::new(),
             picker_open: false,
             search,
@@ -172,6 +200,16 @@ impl Markets {
                     };
                     self.period = period;
                     self.feed.set_period(period);
+                }
+                "sort" => {
+                    self.sort = match value {
+                        "gainers" => SortBy::Gainers,
+                        "losers" => SortBy::Losers,
+                        "volatility" => SortBy::Volatility,
+                        "funding" => SortBy::Funding,
+                        "name" => SortBy::Name,
+                        _ => SortBy::Watchlist,
+                    };
                 }
                 "colour" => {
                     self.colour = match value {
@@ -276,7 +314,39 @@ impl Markets {
     fn set_period(&mut self, period: MarketPeriod, cx: &mut Context<Self>) {
         self.period = period;
         self.feed.set_period(period);
+        // Change and volatility are now another period's: order by them at once.
+        self.reorder = true;
         cx.notify();
+    }
+
+    fn set_sort(&mut self, sort: SortBy, cx: &mut Context<Self>) {
+        self.sort = sort;
+        self.reorder = true;
+        cx.notify();
+    }
+
+    /// The order to draw `tiles` in, as positions into them; they are in
+    /// watchlist order.
+    ///
+    /// A sort by a moving figure is settled: worked out again only every few
+    /// seconds, or at once when the sort, the period or the set of markets
+    /// changes.
+    fn settled_order(&mut self, tiles: &[Tile]) -> Vec<usize> {
+        let same_markets =
+            self.order.len() == tiles.len() && tiles.iter().all(|t| self.order.contains(&t.market));
+        let due = self.ordered_at.is_none_or(|at| at.elapsed() >= SETTLE);
+        if self.reorder || !same_markets || !self.sort.moves() || due {
+            self.order = sort::order(tiles, self.sort)
+                .into_iter()
+                .map(|i| tiles[i].market.clone())
+                .collect();
+            self.ordered_at = Some(Instant::now());
+            self.reorder = false;
+        }
+        self.order
+            .iter()
+            .filter_map(|market| tiles.iter().position(|t| &t.market == market))
+            .collect()
     }
 
     fn toggle_picker(&mut self, cx: &mut Context<Self>) {
@@ -348,6 +418,25 @@ impl Markets {
                 }
                 menu
             });
+        let sorted = self.sort;
+        let view = cx.entity().downgrade();
+        let sort_menu = Button::new("msort")
+            .small()
+            .outline()
+            .label(format!("{} \u{25be}", sorted.label()))
+            .dropdown_menu(move |mut menu, _, _| {
+                for choice in SortBy::ALL {
+                    let view = view.clone();
+                    menu = menu.item(
+                        PopupMenuItem::new(choice.words())
+                            .checked(choice == sorted)
+                            .on_click(move |_, _, cx| {
+                                let _ = view.update(cx, |this, cx| this.set_sort(choice, cx));
+                            }),
+                    );
+                }
+                menu
+            });
         let colour = TabBar::new("colour")
             .segmented()
             .xsmall()
@@ -382,6 +471,7 @@ impl Markets {
             )
             .child(div().flex_1())
             .child(h_flex().gap_2().child(ui::label("Period")).child(period))
+            .child(h_flex().gap_2().child(ui::label("Sort")).child(sort_menu))
             .child(h_flex().gap_2().child(ui::label("Colour by")).child(colour))
             .child(
                 div()
@@ -601,6 +691,7 @@ impl Markets {
         // Pointing at a tile, or focusing it, shows its remove button.
         let reachable = focused || self.hovered.as_ref() == Some(&market);
         let held = self.position(&market, cx).is_some();
+        let by_funding = self.sort == SortBy::Funding;
 
         let header = h_flex()
             .gap(px(6.))
@@ -657,13 +748,22 @@ impl Markets {
                         .justify_between()
                         .text_size(px(11.5))
                         .text_color(soft)
-                        .child("Volatility")
-                        .child(match stats {
-                            Some(s) => div()
+                        // Sorted by funding, the tile shows what it is sorted by.
+                        .child(if by_funding {
+                            "Funding (1h)"
+                        } else {
+                            "Volatility"
+                        })
+                        .child(match (by_funding, &tile.live, stats) {
+                            (true, Some(live), _) => div()
+                                .font_family(MONO)
+                                .child(f::funding_hourly(live.funding))
+                                .into_any_element(),
+                            (false, _, Some(s)) => div()
                                 .font_family(MONO)
                                 .child(f::volatility(s.volatility))
                                 .into_any_element(),
-                            None => pending(34., 12.),
+                            _ => pending(34., 12.),
                         }),
                 )
                 .into_any_element()
@@ -1095,8 +1195,10 @@ impl Render for Markets {
                     })
                     .collect();
                 let mut grid = div().grid().grid_cols(columns).gap(px(GAP));
-                for (ix, tile) in tiles.iter().enumerate() {
-                    grid = grid.child(self.tile(ix, tile, window, cx));
+                // Drawn in the sorted order; a tile's id stays its place in the
+                // watchlist, so focus and Remove follow the market.
+                for ix in self.settled_order(&tiles) {
+                    grid = grid.child(self.tile(ix, &tiles[ix], window, cx));
                 }
                 div()
                     .id("tiles")
@@ -1353,6 +1455,16 @@ impl Markets {
             self.period.label(),
             self.colour.label()
         )
+    }
+
+    /// The tiles in the order they were last drawn.
+    pub fn drawn(&self) -> Vec<String> {
+        self.order.iter().map(|m| m.to_string()).collect()
+    }
+
+    /// Pretend the settled order is old enough to be worked out again.
+    pub fn age_order(&mut self) {
+        self.ordered_at = Some(Instant::now() - SETTLE);
     }
 
     /// The market the panel shows.

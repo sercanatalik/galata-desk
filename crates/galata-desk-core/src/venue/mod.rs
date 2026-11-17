@@ -224,6 +224,24 @@ impl<T: Transport> Info<T> {
             .await
     }
 
+    /// The current hourly funding rate of every market on one dex, by the
+    /// venue's coin name. `dex` is empty for the main dex.
+    pub async fn funding_rates(&self, dex: &str) -> Result<HashMap<String, Decimal>, VenueError> {
+        let (meta, ctxs): (PerpMeta, Vec<AssetCtx>) = self
+            .ask(
+                "metaAndAssetCtxs",
+                json!({ "type": "metaAndAssetCtxs", "dex": dex }),
+            )
+            .await?;
+        // The two lists are in step: the nth context is the nth market's.
+        Ok(meta
+            .universe
+            .into_iter()
+            .zip(ctxs)
+            .map(|(market, ctx)| (market.name, ctx.funding))
+            .collect())
+    }
+
     /// One market's candles at one interval, oldest first, for the candles
     /// that open between `start_ms` and `end_ms`.
     pub async fn candle_snapshot(

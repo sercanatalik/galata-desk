@@ -2,6 +2,7 @@
 
 mod connect;
 mod desk;
+mod funding;
 mod grid;
 mod market_tile;
 mod markets;
