@@ -1,5 +1,6 @@
-//! The settings page: which network the app shows, and the API key kept for
-//! each. Nothing here uses a saved key; it is only stored.
+//! The settings page: which network the app shows, the API key kept for
+//! each, and whether that key may act on the main network. Nothing here uses
+//! a saved key; the Open orders tab does, through the gate in the core.
 
 use galata_desk_core::api_key::ApiKey;
 use galata_desk_core::connect::Address;
@@ -18,10 +19,18 @@ use crate::Core;
 use crate::theme::{MONO, Palette};
 use crate::ui;
 
+/// What the page says a saved key is used for.
+pub const KEY_USE: &str = "Mainnet and testnet each have their own key. A saved key is used to amend and cancel orders, close positions, and set take-profit and stop-loss, each time you confirm one, and for nothing else.";
+
+/// What the page says the mainnet switch allows.
+pub const MAINNET_SWITCH_NOTE: &str = "Lets the saved mainnet key amend and cancel real orders, close real positions and set their take-profit and stop-loss. Testnet needs no permission. This guards against slips, not against someone else at this Mac.";
+
 /// What the page asks of the window.
 pub enum SettingsEvent {
     /// Show this network from now on.
     Network(Network),
+    /// Allow, or stop allowing, order actions on the main network.
+    MainnetTrading(bool),
     /// Go back to where the user was.
     Done,
 }
@@ -201,6 +210,42 @@ impl Settings {
             .into_any_element()
     }
 
+    fn trading_panel(&self, cx: &mut Context<Self>) -> AnyElement {
+        let allowed = Core::get(cx).allow_mainnet_trading;
+        ui::panel()
+            .px_5()
+            .py_4()
+            .gap_3()
+            .child(Self::heading("TRADING"))
+            .child(
+                h_flex()
+                    .gap_4()
+                    .child(
+                        v_flex()
+                            .flex_1()
+                            .min_w_0()
+                            .gap(px(3.))
+                            .child(
+                                div()
+                                    .font_weight(gpui_kit::FontWeight::MEDIUM)
+                                    .child("Allow trading on mainnet"),
+                            )
+                            .child(ui::label(MAINNET_SWITCH_NOTE)),
+                    )
+                    .child(
+                        div().flex_shrink_0().child(
+                            Switch::new("mainnet-trading")
+                                .checked(allowed)
+                                .accessibility_label("Allow trading on mainnet")
+                                .on_click(cx.listener(|_, on: &bool, _, cx| {
+                                    cx.emit(SettingsEvent::MainnetTrading(*on));
+                                })),
+                        ),
+                    ),
+            )
+            .into_any_element()
+    }
+
     fn key_panel(&self, cx: &mut Context<Self>) -> AnyElement {
         let network = Core::get(cx).network;
         let body: AnyElement = match &self.saved {
@@ -285,7 +330,7 @@ impl Settings {
                     .child(text)
             }))
             .child(ui::label(
-                "Mainnet and testnet each have their own key. Trading is not enabled yet: a saved key is stored and nothing uses it.",
+                KEY_USE,
             ))
             .into_any_element()
     }
@@ -320,7 +365,8 @@ impl Render for Settings {
                             ),
                     )
                     .child(self.network_panel(cx))
-                    .child(self.key_panel(cx)),
+                    .child(self.key_panel(cx))
+                    .child(self.trading_panel(cx)),
             )
             .test_support()
     }

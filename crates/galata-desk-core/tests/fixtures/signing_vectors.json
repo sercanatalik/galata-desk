@@ -1,0 +1,487 @@
+{
+ "key": "0x0123456789012345678901234567890123456789012345678901234567890123",
+ "address": "0x14791697260e4c9a71f18484c9f997b308e59325",
+ "nonce": 1794900000000,
+ "vectors": [
+  {
+   "name": "cancel_one",
+   "mainnet": true,
+   "action": {
+    "type": "cancel",
+    "cancels": [
+     {
+      "a": 5,
+      "o": 607756224194
+     }
+    ]
+   },
+   "msgpack": "82a474797065a663616e63656ca763616e63656c739182a16105a16fcf0000008d811806c2",
+   "hash": "57868c5279135f4facc7289a5e066889251912cc9c211d9b88cd77fc7ae3a655",
+   "r": "0xe582c8e6bfc884da9faf761984c7b3a7ed7231037b615746286191111e0d8dea",
+   "s": "0x4ffe44127b35c16243df1d167ea9f7893df2ad7049f73d90209042b057707472",
+   "v": 28
+  },
+  {
+   "name": "cancel_one",
+   "mainnet": false,
+   "action": {
+    "type": "cancel",
+    "cancels": [
+     {
+      "a": 5,
+      "o": 607756224194
+     }
+    ]
+   },
+   "msgpack": "82a474797065a663616e63656ca763616e63656c739182a16105a16fcf0000008d811806c2",
+   "hash": "57868c5279135f4facc7289a5e066889251912cc9c211d9b88cd77fc7ae3a655",
+   "r": "0x7f104897772112930c717e64fc1c54bef7af554c4168a2d5aab4d8c244bfc1db",
+   "s": "0x7dbb5a1759fac6a42106ab2b2066b07623c30c78fe5d9508ee6c502adfb243a2",
+   "v": 28
+  },
+  {
+   "name": "cancel_many",
+   "mainnet": true,
+   "action": {
+    "type": "cancel",
+    "cancels": [
+     {
+      "a": 5,
+      "o": 607756224194
+     },
+     {
+      "a": 110003,
+      "o": 12
+     },
+     {
+      "a": 10107,
+      "o": 4294967296
+     }
+    ]
+   },
+   "msgpack": "82a474797065a663616e63656ca763616e63656c739382a16105a16fcf0000008d811806c282a161ce0001adb3a16f0c82a161cd277ba16fcf0000000100000000",
+   "hash": "e7a18de4180150b9ca45a0fce8d2c2dfe062c94647c4d324b0dd0ea4f9a8c8d2",
+   "r": "0x1ce6a938502cfd2a2c035326192cc6ec340dbaeafb9e21f5d6e321272db06497",
+   "s": "0x2ed50f2e4e989ccabfd85ed702fd10a4c15c9f8cca1082f666fdc9a4cf994558",
+   "v": 27
+  },
+  {
+   "name": "cancel_many",
+   "mainnet": false,
+   "action": {
+    "type": "cancel",
+    "cancels": [
+     {
+      "a": 5,
+      "o": 607756224194
+     },
+     {
+      "a": 110003,
+      "o": 12
+     },
+     {
+      "a": 10107,
+      "o": 4294967296
+     }
+    ]
+   },
+   "msgpack": "82a474797065a663616e63656ca763616e63656c739382a16105a16fcf0000008d811806c282a161ce0001adb3a16f0c82a161cd277ba16fcf0000000100000000",
+   "hash": "e7a18de4180150b9ca45a0fce8d2c2dfe062c94647c4d324b0dd0ea4f9a8c8d2",
+   "r": "0x4cd5570309b7fbc7450df9d290dad82df8f29db519de70c2c89599d32abafee1",
+   "s": "0x7d7d2c34ba575deac19f414097248e34f2779295ead070733348a03813fd5acb",
+   "v": 27
+  },
+  {
+   "name": "amend",
+   "mainnet": true,
+   "action": {
+    "type": "batchModify",
+    "modifies": [
+     {
+      "oid": 607756224194,
+      "order": {
+       "a": 5,
+       "b": false,
+       "p": "73.5",
+       "s": "9.57",
+       "r": false,
+       "t": {
+        "limit": {
+         "tif": "Alo"
+        }
+       }
+      }
+     }
+    ]
+   },
+   "msgpack": "82a474797065ab62617463684d6f64696679a86d6f6469666965739182a36f6964cf0000008d811806c2a56f7264657286a16105a162c2a170a437332e35a173a4392e3537a172c2a17481a56c696d697481a3746966a3416c6f",
+   "hash": "a80e05c7c2a4ece7d669a9d19601c94355b90b0ca8f2fbd6dfbd512d9b83df94",
+   "r": "0xef0817f1fdcf633413c89f848304a173dd69aa933207d5821a99dc02b37941d6",
+   "s": "0x5f09558867bc0e2ec1b851f22e987513959786ad50a70aabac153c8eb6b4930a",
+   "v": 27
+  },
+  {
+   "name": "amend",
+   "mainnet": false,
+   "action": {
+    "type": "batchModify",
+    "modifies": [
+     {
+      "oid": 607756224194,
+      "order": {
+       "a": 5,
+       "b": false,
+       "p": "73.5",
+       "s": "9.57",
+       "r": false,
+       "t": {
+        "limit": {
+         "tif": "Alo"
+        }
+       }
+      }
+     }
+    ]
+   },
+   "msgpack": "82a474797065ab62617463684d6f64696679a86d6f6469666965739182a36f6964cf0000008d811806c2a56f7264657286a16105a162c2a170a437332e35a173a4392e3537a172c2a17481a56c696d697481a3746966a3416c6f",
+   "hash": "a80e05c7c2a4ece7d669a9d19601c94355b90b0ca8f2fbd6dfbd512d9b83df94",
+   "r": "0xa0170fba93c06a5a2da3f9f9706ec1cbe8aa8f6f6d2dc778904a0f6aba269818",
+   "s": "0x154218fcb91476dfd2aee3c6081564cbb8020f7607975b72acc4f3d809c4ae62",
+   "v": 28
+  },
+  {
+   "name": "market_close",
+   "mainnet": true,
+   "action": {
+    "type": "order",
+    "orders": [
+     {
+      "a": 0,
+      "b": false,
+      "p": "87000",
+      "s": "0.00162",
+      "r": true,
+      "t": {
+       "limit": {
+        "tif": "Ioc"
+       }
+      }
+     }
+    ],
+    "grouping": "na"
+   },
+   "msgpack": "83a474797065a56f72646572a66f72646572739186a16100a162c2a170a53837303030a173a7302e3030313632a172c3a17481a56c696d697481a3746966a3496f63a867726f7570696e67a26e61",
+   "hash": "15ca5cffd3a0722f302adea46a2c02ea327e7d11a70486b1c388f4a2774b82cd",
+   "r": "0x8ff20d06eecb20db962cb3a16ecf8cc90a326cc56944b6c03957be6c5be35df2",
+   "s": "0x24de425d5fc3b1de5238ccd3e180d6983679d80ca656738ba78434ffd8a25c53",
+   "v": 27
+  },
+  {
+   "name": "market_close",
+   "mainnet": false,
+   "action": {
+    "type": "order",
+    "orders": [
+     {
+      "a": 0,
+      "b": false,
+      "p": "87000",
+      "s": "0.00162",
+      "r": true,
+      "t": {
+       "limit": {
+        "tif": "Ioc"
+       }
+      }
+     }
+    ],
+    "grouping": "na"
+   },
+   "msgpack": "83a474797065a56f72646572a66f72646572739186a16100a162c2a170a53837303030a173a7302e3030313632a172c3a17481a56c696d697481a3746966a3496f63a867726f7570696e67a26e61",
+   "hash": "15ca5cffd3a0722f302adea46a2c02ea327e7d11a70486b1c388f4a2774b82cd",
+   "r": "0xff6cff36d4f6904153c5eb97ac7676d158283812003d41932b8797a8d7d7d436",
+   "s": "0x56f05e53d13794850474d663b153cb4b60a40a9bcb9432f71cf85fa7e752e86a",
+   "v": 27
+  },
+  {
+   "name": "limit_close",
+   "mainnet": true,
+   "action": {
+    "type": "order",
+    "orders": [
+     {
+      "a": 110001,
+      "b": false,
+      "p": "158",
+      "s": "4",
+      "r": true,
+      "t": {
+       "limit": {
+        "tif": "Gtc"
+       }
+      }
+     }
+    ],
+    "grouping": "na"
+   },
+   "msgpack": "83a474797065a56f72646572a66f72646572739186a161ce0001adb1a162c2a170a3313538a173a134a172c3a17481a56c696d697481a3746966a3477463a867726f7570696e67a26e61",
+   "hash": "3aa68bd6247c54313bcacc209055f890fd955cefc6ce28da6f7e7a015cc11a32",
+   "r": "0x73954f8fa9947df4939e64909f04c555c2250e6792717ace2250f48412753b60",
+   "s": "0x4d53ee9d966a625d194765285d6211fd86f2310d931e820a8f351dd35f2a51dd",
+   "v": 27
+  },
+  {
+   "name": "limit_close",
+   "mainnet": false,
+   "action": {
+    "type": "order",
+    "orders": [
+     {
+      "a": 110001,
+      "b": false,
+      "p": "158",
+      "s": "4",
+      "r": true,
+      "t": {
+       "limit": {
+        "tif": "Gtc"
+       }
+      }
+     }
+    ],
+    "grouping": "na"
+   },
+   "msgpack": "83a474797065a56f72646572a66f72646572739186a161ce0001adb1a162c2a170a3313538a173a134a172c3a17481a56c696d697481a3746966a3477463a867726f7570696e67a26e61",
+   "hash": "3aa68bd6247c54313bcacc209055f890fd955cefc6ce28da6f7e7a015cc11a32",
+   "r": "0x6ceedea66c175c61fc6201f9a133f5132c832f2955b1515ada09cd39bb2e977f",
+   "s": "0x69c4306301c7bba526bbe3e2cd03a8e84d262c3a9bab4fcbbcf1249f7a8993c8",
+   "v": 27
+  },
+  {
+   "name": "close_two_dexes",
+   "mainnet": true,
+   "action": {
+    "type": "order",
+    "orders": [
+     {
+      "a": 0,
+      "b": false,
+      "p": "87000",
+      "s": "0.00162",
+      "r": true,
+      "t": {
+       "limit": {
+        "tif": "Ioc"
+       }
+      }
+     },
+     {
+      "a": 110001,
+      "b": true,
+      "p": "161.91",
+      "s": "2.5",
+      "r": true,
+      "t": {
+       "limit": {
+        "tif": "Ioc"
+       }
+      }
+     }
+    ],
+    "grouping": "na"
+   },
+   "msgpack": "83a474797065a56f72646572a66f72646572739286a16100a162c2a170a53837303030a173a7302e3030313632a172c3a17481a56c696d697481a3746966a3496f6386a161ce0001adb1a162c3a170a63136312e3931a173a3322e35a172c3a17481a56c696d697481a3746966a3496f63a867726f7570696e67a26e61",
+   "hash": "cd4d8e0331726d1f634e815bdf66bcfa5a8a6f058ba805915fe2214f0127d0f9",
+   "r": "0xe31f7549b77e23d7a5821cede6bc6736ab69f49e48887e791cb412d753d8a814",
+   "s": "0x7beabe2fa182f2aa7ce0a131cdaf8e11ce98b58d840e4d35d80ef884504753e",
+   "v": 27
+  },
+  {
+   "name": "close_two_dexes",
+   "mainnet": false,
+   "action": {
+    "type": "order",
+    "orders": [
+     {
+      "a": 0,
+      "b": false,
+      "p": "87000",
+      "s": "0.00162",
+      "r": true,
+      "t": {
+       "limit": {
+        "tif": "Ioc"
+       }
+      }
+     },
+     {
+      "a": 110001,
+      "b": true,
+      "p": "161.91",
+      "s": "2.5",
+      "r": true,
+      "t": {
+       "limit": {
+        "tif": "Ioc"
+       }
+      }
+     }
+    ],
+    "grouping": "na"
+   },
+   "msgpack": "83a474797065a56f72646572a66f72646572739286a16100a162c2a170a53837303030a173a7302e3030313632a172c3a17481a56c696d697481a3746966a3496f6386a161ce0001adb1a162c3a170a63136312e3931a173a3322e35a172c3a17481a56c696d697481a3746966a3496f63a867726f7570696e67a26e61",
+   "hash": "cd4d8e0331726d1f634e815bdf66bcfa5a8a6f058ba805915fe2214f0127d0f9",
+   "r": "0xb9d5a99308a2c7c499dc93de61e3609b10c3c5a65757596d2dea78f4c8a8c907",
+   "s": "0x29d9fb431aeda26d8348fe160cc42fb717c25e948f0b224747d122b450948b77",
+   "v": 28
+  },
+  {
+   "name": "position_tpsl",
+   "mainnet": true,
+   "action": {
+    "type": "order",
+    "orders": [
+     {
+      "a": 110001,
+      "b": false,
+      "p": "144",
+      "s": "10",
+      "r": true,
+      "t": {
+       "trigger": {
+        "isMarket": true,
+        "triggerPx": "160",
+        "tpsl": "tp"
+       }
+      }
+     },
+     {
+      "a": 110001,
+      "b": false,
+      "p": "133.2",
+      "s": "10",
+      "r": true,
+      "t": {
+       "trigger": {
+        "isMarket": true,
+        "triggerPx": "148",
+        "tpsl": "sl"
+       }
+      }
+     }
+    ],
+    "grouping": "positionTpsl"
+   },
+   "msgpack": "83a474797065a56f72646572a66f72646572739286a161ce0001adb1a162c2a170a3313434a173a23130a172c3a17481a77472696767657283a869734d61726b6574c3a9747269676765725078a3313630a47470736ca2747086a161ce0001adb1a162c2a170a53133332e32a173a23130a172c3a17481a77472696767657283a869734d61726b6574c3a9747269676765725078a3313438a47470736ca2736ca867726f7570696e67ac706f736974696f6e5470736c",
+   "hash": "b6a06f1122db3647214739a718b2d44c77deac6da03b144752656bb76344628c",
+   "r": "0x1541649175533045f8834255a9f6d13d0d4368a549123a60e934aa97d71219c8",
+   "s": "0x3bef5350459a1907fcd4323d3043acfad6c3ebfe956781f0678016a98cb9853b",
+   "v": 28
+  },
+  {
+   "name": "position_tpsl",
+   "mainnet": false,
+   "action": {
+    "type": "order",
+    "orders": [
+     {
+      "a": 110001,
+      "b": false,
+      "p": "144",
+      "s": "10",
+      "r": true,
+      "t": {
+       "trigger": {
+        "isMarket": true,
+        "triggerPx": "160",
+        "tpsl": "tp"
+       }
+      }
+     },
+     {
+      "a": 110001,
+      "b": false,
+      "p": "133.2",
+      "s": "10",
+      "r": true,
+      "t": {
+       "trigger": {
+        "isMarket": true,
+        "triggerPx": "148",
+        "tpsl": "sl"
+       }
+      }
+     }
+    ],
+    "grouping": "positionTpsl"
+   },
+   "msgpack": "83a474797065a56f72646572a66f72646572739286a161ce0001adb1a162c2a170a3313434a173a23130a172c3a17481a77472696767657283a869734d61726b6574c3a9747269676765725078a3313630a47470736ca2747086a161ce0001adb1a162c2a170a53133332e32a173a23130a172c3a17481a77472696767657283a869734d61726b6574c3a9747269676765725078a3313438a47470736ca2736ca867726f7570696e67ac706f736974696f6e5470736c",
+   "hash": "b6a06f1122db3647214739a718b2d44c77deac6da03b144752656bb76344628c",
+   "r": "0x4836a99357483ad726b75f438a926500cd10d096c80ee7374eddb380d5f9ff5b",
+   "s": "0x118337194e7010ed2e9fa631897787352f35c799997c0029474393a6703f9e3a",
+   "v": 28
+  },
+  {
+   "name": "modify_trigger",
+   "mainnet": true,
+   "action": {
+    "type": "batchModify",
+    "modifies": [
+     {
+      "oid": 607756224300,
+      "order": {
+       "a": 110001,
+       "b": false,
+       "p": "135",
+       "s": "10",
+       "r": true,
+       "t": {
+        "trigger": {
+         "isMarket": true,
+         "triggerPx": "150",
+         "tpsl": "sl"
+        }
+       }
+      }
+     }
+    ]
+   },
+   "msgpack": "82a474797065ab62617463684d6f64696679a86d6f6469666965739182a36f6964cf0000008d8118072ca56f7264657286a161ce0001adb1a162c2a170a3313335a173a23130a172c3a17481a77472696767657283a869734d61726b6574c3a9747269676765725078a3313530a47470736ca2736c",
+   "hash": "ad537d7b4ca08013538ee39ccd1d41009fe040859e04e0c6c555761870c3eab2",
+   "r": "0xb0531d65b4aa73d56d89955d85f5bc029745baea77e673ecc6c5241a1ae3c54b",
+   "s": "0x21496829fe4e18fdcf89d010087cfb8a9fad98813f0f994beb8027e70d258620",
+   "v": 28
+  },
+  {
+   "name": "modify_trigger",
+   "mainnet": false,
+   "action": {
+    "type": "batchModify",
+    "modifies": [
+     {
+      "oid": 607756224300,
+      "order": {
+       "a": 110001,
+       "b": false,
+       "p": "135",
+       "s": "10",
+       "r": true,
+       "t": {
+        "trigger": {
+         "isMarket": true,
+         "triggerPx": "150",
+         "tpsl": "sl"
+        }
+       }
+      }
+     }
+    ]
+   },
+   "msgpack": "82a474797065ab62617463684d6f64696679a86d6f6469666965739182a36f6964cf0000008d8118072ca56f7264657286a161ce0001adb1a162c2a170a3313335a173a23130a172c3a17481a77472696767657283a869734d61726b6574c3a9747269676765725078a3313530a47470736ca2736c",
+   "hash": "ad537d7b4ca08013538ee39ccd1d41009fe040859e04e0c6c555761870c3eab2",
+   "r": "0xb78535c0673ca2dfcba507ed90a0486250b450477fbe636e68f958e5e3e445fd",
+   "s": "0xf8ddfeab54fd7979676d924aceb5c2c8cf4d9812755e626cb2ff739195f16ef",
+   "v": 27
+  }
+ ]
+}

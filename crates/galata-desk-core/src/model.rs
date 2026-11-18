@@ -7,9 +7,11 @@ use std::collections::HashMap;
 use rust_decimal::Decimal;
 
 use crate::drawdown::max_drawdown;
+use crate::trade::assets::{self, Asset};
+use crate::trade::sign::Tpsl;
 use crate::venue::{
-    ClearinghouseState, DelegatorSummary, MarginMode, OpenOrder, PortfolioHistory, Side, SpotMeta,
-    SpotState, UserFees, VaultEquity,
+    ClearinghouseState, DelegatorSummary, MarginMode, OpenOrder, PerpMeta, PortfolioHistory, Side,
+    SpotMeta, SpotState, UserFees, VaultEquity,
 };
 
 /// One open perpetual position.
@@ -34,6 +36,9 @@ pub struct PositionRow {
     pub margin: Decimal,
     /// Funding since the position opened: positive was received.
     pub funding: Decimal,
+    /// The market as an action names it. `None` until the venue's list of
+    /// the dex's markets is known; the position cannot be acted on then.
+    pub asset: Option<Asset>,
 }
 
 impl PositionRow {
@@ -80,6 +85,20 @@ pub struct OrderRow {
     /// The trigger condition, for trigger orders.
     pub trigger: Option<String>,
     pub oid: u64,
+    /// Time in force as the venue spells it. Absent for trigger orders.
+    pub tif: Option<String>,
+    /// A plain resting limit order: its price and size can be amended.
+    pub amendable: bool,
+    /// The market as an action names it. `None` until the venue's list of
+    /// markets is known, or when the market is no longer in it; the order
+    /// cannot be acted on then.
+    pub asset: Option<Asset>,
+    /// The trigger price, for trigger orders.
+    pub trigger_px: Option<Decimal>,
+    /// Set when the order is a position's take-profit or stop-loss, which
+    /// covers the whole position. A trigger order with a fixed size is not
+    /// one, and has `None`.
+    pub tpsl: Option<Tpsl>,
 }
 
 /// Where the account's collateral is held, which decides how its parts add up.
@@ -157,6 +176,10 @@ pub struct Holdings {
 pub struct DexState<'a> {
     pub dex: &'a str,
     pub state: &'a ClearinghouseState,
+    /// Every dex's name, main dex first, and this dex's markets once known:
+    /// together they number a market for an action.
+    pub dexes: &'a [String],
+    pub perp: Option<&'a PerpMeta>,
 }
 
 /// Strip a builder dex's prefix: `xyz:NVDA` on dex `xyz` is `NVDA`.
@@ -188,6 +211,9 @@ pub fn positions(dexes: &[DexState<'_>]) -> Vec<PositionRow> {
                     liquidation: p.liquidation_px,
                     margin: p.margin_used,
                     funding: -p.cum_funding.since_open,
+                    asset: d
+                        .perp
+                        .and_then(|perp| assets::perp(d.dexes, d.dex, perp, &p.coin)),
                 }
             })
         })
@@ -265,7 +291,15 @@ pub fn holdings(
 }
 
 /// Resting orders of one dex as rows. Spot pairs are named by their tokens.
-pub fn orders(dex: &str, orders: &[OpenOrder], meta: &SpotMeta) -> Vec<OrderRow> {
+/// `dexes` is the venue's list of dexes and `perp` this dex's markets, when
+/// known: together they give each order's asset number.
+pub fn orders(
+    dex: &str,
+    orders: &[OpenOrder],
+    meta: &SpotMeta,
+    dexes: &[String],
+    perp: Option<&PerpMeta>,
+) -> Vec<OrderRow> {
     orders
         .iter()
         .map(|o| OrderRow {
@@ -280,8 +314,30 @@ pub fn orders(dex: &str, orders: &[OpenOrder], meta: &SpotMeta) -> Vec<OrderRow>
             reduce_only: o.reduce_only,
             trigger: o.is_trigger.then(|| o.trigger_condition.clone()),
             oid: o.oid,
+            tif: o.tif.clone(),
+            amendable: o.order_type == "Limit" && !o.is_trigger && o.tif.is_some(),
+            asset: assets::spot(meta, &o.coin)
+                .or_else(|| perp.and_then(|perp| assets::perp(dexes, dex, perp, &o.coin))),
+            trigger_px: o.is_trigger.then_some(o.trigger_px),
+            tpsl: position_tpsl(o),
         })
         .collect()
+}
+
+/// Whether an order is a position's take-profit or stop-loss, and which.
+/// The venue names them `Take Profit Market` and `Stop Market` (and, for a
+/// limit trigger, `Take Profit Limit` and `Stop Limit`).
+fn position_tpsl(o: &OpenOrder) -> Option<Tpsl> {
+    if !(o.is_trigger && o.is_position_tpsl) {
+        return None;
+    }
+    if o.order_type.starts_with("Take Profit") {
+        Some(Tpsl::Tp)
+    } else if o.order_type.starts_with("Stop") {
+        Some(Tpsl::Sl)
+    } else {
+        None
+    }
 }
 
 /// Newest first; ties broken by order id so the order is stable.

@@ -3,7 +3,8 @@
 //! Hyperliquid lets an account approve a separate wallet that can place and
 //! cancel orders for it and cannot withdraw. Its private key is the "API
 //! key". This type exists to check one, reduce it to the address to show, and
-//! hand its text to the keychain; nothing here signs anything.
+//! hand its text to the keychain. Signing with it happens in `trade::sign`,
+//! and only the gate in `trade` asks for that.
 
 use std::fmt;
 
@@ -47,6 +48,11 @@ impl ApiKey {
     /// for the API wallet.
     pub fn address(&self) -> Address {
         Address::from_key(self.0.verifying_key())
+    }
+
+    /// The key itself, for signing an action and nothing else.
+    pub(crate) fn signing_key(&self) -> &SigningKey {
+        &self.0
     }
 
     /// The key as text, for the keychain and nowhere else.

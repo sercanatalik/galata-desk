@@ -7,10 +7,12 @@ use std::time::{Duration, Instant, SystemTime};
 use chrono::{DateTime, Local};
 use galata_desk_core::format as f;
 use galata_desk_core::market::candles::Candle;
+use galata_desk_core::market::candles::Placement;
 use galata_desk_core::market::feed::{
     Connection, Listed, Listing, Live, MarketFeed, MarketSnapshot, Tile,
 };
 use galata_desk_core::market::fills::{self, CandleFills, FillSide, SideFills};
+use galata_desk_core::market::pnl::{self, MarketPnl, WindowPnl};
 use galata_desk_core::market::sort::{self, SortBy};
 use galata_desk_core::market::watchlist::{AddError, LIMIT, Watchlist};
 use galata_desk_core::market::{Interval, MarketId, MarketPeriod};
@@ -40,7 +42,11 @@ use crate::ui;
 
 /// A tile is at least this wide; the grid fits as many columns as that allows.
 const TILE_MIN: f32 = 196.;
-const TILE_HEIGHT: f32 = 96.;
+/// Tall enough for the price, the range bar and the account's strip.
+const TILE_HEIGHT: f32 = 136.;
+/// The lighter grey of a tile's secondary figures. Readable on the strongest
+/// tile colour (see `market_tile`'s contrast test).
+const SOFT: u32 = 0xd8d3c8;
 const GAP: f32 = 8.;
 /// The market panel: a fixed height above the tiles, its detail column on
 /// the left and the chart taking the rest.
@@ -90,6 +96,32 @@ pub struct Markets {
     opened_at: Instant,
     _watch: Task<()>,
     _subscriptions: Vec<Subscription>,
+}
+
+/// What the account holds and has made, as the tiles show it.
+struct Account {
+    /// `None` until the positions have first arrived.
+    positions: Option<Vec<PositionRow>>,
+    /// Each market's PNL. `None` until the walk through the account's fills
+    /// has finished.
+    pnl: Option<HashMap<MarketId, MarketPnl>>,
+    /// When older fills may exist, the earliest one counted.
+    reaches_from: Option<u64>,
+}
+
+impl Account {
+    fn position(&self, market: &MarketId) -> Option<Option<&PositionRow>> {
+        self.positions.as_ref().map(|all| {
+            all.iter()
+                .find(|p| p.dex == market.dex() && p.market == market.ticker() && !p.size.is_zero())
+        })
+    }
+
+    fn pnl(&self, market: &MarketId) -> Option<MarketPnl> {
+        self.pnl
+            .as_ref()
+            .map(|all| all.get(market).copied().unwrap_or_default())
+    }
 }
 
 impl Markets {
@@ -375,6 +407,25 @@ impl Markets {
             .cloned()
     }
 
+    /// The account's positions and per-market PNL, for the tiles.
+    fn account(&self, cx: &Context<Self>) -> Account {
+        let portfolio = self.portfolio.read(cx);
+        let positions = portfolio.positions().map(<[PositionRow]>::to_vec);
+        let walked = portfolio.fills().filter(|f| f.walked);
+        let now_ms = SystemTime::now()
+            .duration_since(SystemTime::UNIX_EPOCH)
+            .map(|d| d.as_millis() as u64)
+            .unwrap_or(0);
+        Account {
+            pnl: match (walked, &positions) {
+                (Some(fills), Some(positions)) => Some(pnl::market_pnl(fills, positions, now_ms)),
+                _ => None,
+            },
+            reaches_from: walked.and_then(|f| f.reaches_from()),
+            positions,
+        }
+    }
+
     /// Whether the feed has failed to connect for long enough to say so.
     fn unreachable(&self) -> bool {
         self.snapshot.connection == Connection::Connecting && self.opened_at.elapsed() >= PATIENCE
@@ -496,7 +547,7 @@ impl Markets {
             .into_any_element()
     }
 
-    fn legend(&self) -> AnyElement {
+    fn legend(&self, account: &Account) -> AnyElement {
         let (low, steps, high) = market_tile::legend(self.colour, self.period);
         h_flex()
             .flex_wrap()
@@ -524,6 +575,23 @@ impl Markets {
                     .child("You hold a position"),
             )
             .child("Click a tile to chart it")
+            .child(legend_line(
+                "legend-bar",
+                "Bar: period low to high; band: average \u{b1}1\u{3c3}; tick: last price",
+                Palette::muted(),
+            ))
+            .child(legend_line(
+                "legend-strip",
+                "Position and PNL: yours in that market, in US dollars",
+                Palette::muted(),
+            ))
+            .children(account.reaches_from.map(|from| {
+                legend_line(
+                    "pnl-since",
+                    format!("* PNL counts trades since {}", day(from)),
+                    Palette::amber_text(),
+                )
+            }))
             .into_any_element()
     }
 
@@ -684,6 +752,7 @@ impl Markets {
         &mut self,
         ix: usize,
         tile: &Tile,
+        account: &Account,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> AnyElement {
@@ -697,7 +766,8 @@ impl Markets {
         let selected = self.selected() == Some(&market);
         // Pointing at a tile, or focusing it, shows its remove button.
         let reachable = focused || self.hovered.as_ref() == Some(&market);
-        let held = self.position(&market, cx).is_some();
+        let position = account.position(&market);
+        let held = position.flatten().is_some();
         let by_funding = self.sort == SortBy::Funding;
 
         let header = h_flex()
@@ -713,7 +783,8 @@ impl Markets {
             })
             .child(div().flex_1());
 
-        let soft = gpui_kit::rgb(0xd8d3c8);
+        let soft = gpui_kit::rgb(SOFT);
+        let mut name = market.ticker().to_string();
         let body: AnyElement = if tile.unavailable {
             v_flex()
                 .flex_1()
@@ -730,6 +801,69 @@ impl Markets {
         } else {
             let pending = |w: f32, h: f32| ui::placeholder(px(w), px(h)).into_any_element();
             let stats = tile.stats.as_ref();
+            let last = tile.live.as_ref().map(|l| l.last);
+            let placement = stats.zip(last).map(|(s, last)| s.placement(last));
+            let pnl = account.pnl(&market);
+            let position_text = position.map(|p| match p {
+                Some(p) => f::usd_k_signed(signed_value(p)),
+                None => DASH.to_string(),
+            });
+            let window_text = |w: fn(&MarketPnl) -> Option<WindowPnl>| {
+                pnl.as_ref().map(|p| match w(p) {
+                    Some(w) if w.partial => format!("{}*", f::pnl_rounded(w.usd)),
+                    Some(w) => f::pnl_rounded(w.usd),
+                    None => DASH.to_string(),
+                })
+            };
+            let d30 = window_text(|p| p.d30);
+            let ytd = window_text(|p| p.ytd);
+            let all = window_text(|p| p.all);
+
+            // What a screen reader says for the tile.
+            if let Some(live) = &tile.live {
+                name.push_str(&format!(", last {}", f::price(live.last)));
+            }
+            if let Some(s) = stats {
+                name.push_str(&format!(", {}", f::pct_signed_f(s.change, 2)));
+            }
+            if let Some(z) = placement.and_then(|p| p.z) {
+                name.push_str(&format!(
+                    ", {} standard deviations from the period average",
+                    f::sigma(z).trim_end_matches('\u{3c3}')
+                ));
+            }
+            let spoken = |t: &Option<String>| match t.as_deref() {
+                Some(DASH) => "none".to_string(),
+                Some(t) => t.trim_end_matches('*').to_string(),
+                None => "loading".to_string(),
+            };
+            name.push_str(&format!(
+                ", position {}, 30-day PNL {}, year-to-date PNL {}, all-time PNL {}",
+                spoken(&position_text),
+                spoken(&d30),
+                spoken(&ytd),
+                spoken(&all),
+            ));
+
+            let cell = |id: &'static str, label: &'static str, value: Option<String>| {
+                h_flex()
+                    .justify_between()
+                    .gap_1()
+                    .child(div().text_size(px(10.)).text_color(soft).child(label))
+                    .child(match value {
+                        Some(text) => div()
+                            .id((id, ix))
+                            .aria_label(text.clone())
+                            .font_family(MONO)
+                            .text_size(px(11.))
+                            .when(text == DASH, |d| d.text_color(soft))
+                            .child(text)
+                            .test_support()
+                            .into_any_element(),
+                        None => pending(40., 11.),
+                    })
+            };
+
             v_flex()
                 .flex_1()
                 .justify_between()
@@ -746,32 +880,63 @@ impl Markets {
                         })
                         .when(reachable, |d| d.child(remove_button(ix, &market, cx))),
                 )
-                .child(match &tile.live {
-                    Some(live) => ui::figure(f::price(live.last), px(19.)).into_any_element(),
-                    None => pending(110., 22.),
-                })
                 .child(
                     h_flex()
-                        .justify_between()
-                        .text_size(px(11.5))
-                        .text_color(soft)
-                        // Sorted by funding, the tile shows what it is sorted by.
-                        .child(if by_funding {
-                            "Funding (1h)"
-                        } else {
-                            "Volatility"
+                        .items_baseline()
+                        .gap(px(6.))
+                        .child(match &tile.live {
+                            Some(live) => {
+                                ui::figure(f::price(live.last), px(19.)).into_any_element()
+                            }
+                            None => pending(110., 22.),
                         })
+                        .child(div().flex_1())
+                        // Sorted by funding, the tile shows what it is sorted by.
+                        .child(
+                            div()
+                                .text_size(px(10.))
+                                .text_color(soft)
+                                .child(if by_funding { "Funding (1h)" } else { "Vol" }),
+                        )
                         .child(match (by_funding, &tile.live, stats) {
                             (true, Some(live), _) => div()
+                                .id(("tile-vol", ix))
+                                .aria_label(f::funding_hourly(live.funding))
                                 .font_family(MONO)
+                                .text_size(px(10.5))
+                                .text_color(soft)
                                 .child(f::funding_hourly(live.funding))
+                                .test_support()
                                 .into_any_element(),
                             (false, _, Some(s)) => div()
+                                .id(("tile-vol", ix))
+                                .aria_label(f::volatility(s.volatility))
                                 .font_family(MONO)
+                                .text_size(px(10.5))
+                                .text_color(soft)
                                 .child(f::volatility(s.volatility))
+                                .test_support()
                                 .into_any_element(),
-                            _ => pending(34., 12.),
+                            _ => pending(30., 11.),
                         }),
+                )
+                .child(match placement {
+                    Some(at) => range_bar(ix, &at),
+                    None => pending(TILE_MIN - 40., 10.),
+                })
+                .child(
+                    div()
+                        .grid()
+                        .grid_cols(2)
+                        .gap_x_3()
+                        .gap_y(px(2.))
+                        .pt(px(5.))
+                        .border_t_1()
+                        .border_color(Palette::text().opacity(0.13))
+                        .child(cell("tile-pos", "Position", position_text.clone()))
+                        .child(cell("tile-30d", "30D PNL", d30.clone()))
+                        .child(cell("tile-ytd", "YTD PNL", ytd.clone()))
+                        .child(cell("tile-all", "All-time", all.clone())),
                 )
                 .into_any_element()
         };
@@ -793,6 +958,7 @@ impl Markets {
                 }
                 cx.notify();
             }))
+            .aria_label(name)
             .on_click(cx.listener(move |this, _, _, cx| this.select(&click_market, cx)))
             .on_key_down(cx.listener(move |this, event: &KeyDownEvent, _, cx| {
                 match event.keystroke.key.as_str() {
@@ -1287,17 +1453,19 @@ impl Render for Markets {
                             })
                     })
                     .collect();
+                let account = self.account(cx);
                 let mut grid = div().grid().grid_cols(columns).gap(px(GAP));
                 // Drawn in the sorted order; a tile's id stays its place in the
                 // watchlist, so focus and Remove follow the market.
                 for ix in self.settled_order(&tiles) {
-                    grid = grid.child(self.tile(ix, &tiles[ix], window, cx));
+                    grid = grid.child(self.tile(ix, &tiles[ix], &account, window, cx));
                 }
                 div()
                     .id("tiles")
                     .size_full()
                     .overflow_y_scroll()
                     .child(grid)
+                    .test_support()
                     .into_any_element()
             }
         };
@@ -1307,12 +1475,107 @@ impl Render for Markets {
             .p(px(padding))
             .gap_3()
             .child(self.toolbar(cx))
-            .child(self.legend())
+            .child(self.legend(&self.account(cx)))
             .children(self.notices())
             // The selected market, above the tiles and always in view.
             .children(self.panel(cx))
             .child(div().flex_1().min_h_0().child(body))
     }
+}
+
+const DASH: &str = "\u{2014}";
+
+/// A position's value, signed by its side: negative for a short.
+fn signed_value(position: &PositionRow) -> Decimal {
+    if position.size < Decimal::ZERO {
+        -position.value.abs()
+    } else {
+        position.value.abs()
+    }
+}
+
+/// The tile's range bar: the period's low to high, the usual band, a tick at
+/// the last price, and how far that is from the average.
+fn range_bar(ix: usize, at: &Placement) -> AnyElement {
+    let stretched = at.stretched();
+    let soft = gpui_kit::rgb(SOFT);
+    let tick_height = if stretched { 12. } else { 10. };
+    h_flex()
+        .items_center()
+        .gap_2()
+        .h(px(12.))
+        .child(
+            div()
+                .id(("tile-bar", ix))
+                .relative()
+                .flex_1()
+                .h(px(4.))
+                .rounded(px(2.))
+                .bg(Palette::ground().opacity(0.5))
+                .children(at.band.map(|(from, to)| {
+                    div()
+                        .absolute()
+                        .top_0()
+                        .left(gpui_kit::relative(from as f32))
+                        .w(gpui_kit::relative((to - from) as f32))
+                        .h(px(4.))
+                        .rounded(px(2.))
+                        .bg(Palette::text().opacity(0.24))
+                }))
+                .child(
+                    div()
+                        .absolute()
+                        .top(px((4. - tick_height) / 2.))
+                        .left(gpui_kit::relative(at.tick as f32))
+                        .ml(px(-1.))
+                        .w(px(2.))
+                        .h(px(tick_height))
+                        .rounded(px(1.))
+                        .bg(Palette::text()),
+                )
+                .test_support(),
+        )
+        .children(at.z.map(|z| {
+            div()
+                .id(("tile-sigma", ix))
+                .aria_label(f::sigma(z))
+                .min_w(px(40.))
+                .text_right()
+                .font_family(MONO)
+                .text_size(px(10.5))
+                .when(stretched, |d| {
+                    d.font_weight(gpui_kit::FontWeight::SEMIBOLD)
+                        .text_color(Palette::text())
+                })
+                .when(!stretched, |d| d.text_color(soft))
+                .child(f::sigma(z))
+                .test_support()
+        }))
+        .into_any_element()
+}
+
+/// One line of the legend, named for tests and screen readers.
+fn legend_line(
+    id: &'static str,
+    text: impl Into<SharedString>,
+    colour: gpui_kit::Hsla,
+) -> AnyElement {
+    let text = text.into();
+    div()
+        .id(id)
+        .aria_label(text.clone())
+        .text_color(colour)
+        .child(text)
+        .test_support()
+        .into_any_element()
+}
+
+/// A day on this machine's calendar: `2 Feb 2026`.
+fn day(ms: u64) -> String {
+    let at = DateTime::from_timestamp_millis(ms as i64)
+        .map(|t| t.with_timezone(&Local))
+        .unwrap_or_default();
+    at.format("%-d %b %Y").to_string()
 }
 
 fn sign(value: Decimal) -> i32 {

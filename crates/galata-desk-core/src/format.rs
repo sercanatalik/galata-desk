@@ -215,6 +215,69 @@ pub fn usd_abbrev(value: Decimal) -> String {
     format!("{sign}${:.1}{unit}", round(scaled, 1))
 }
 
+/// `+` or `-` by the sign of `value`; nothing for zero.
+fn sign_of(value: Decimal) -> &'static str {
+    if value > Decimal::ZERO {
+        "+"
+    } else if value < Decimal::ZERO {
+        "-"
+    } else {
+        ""
+    }
+}
+
+/// An unsigned amount in millions with one decimal: `1.2M`.
+fn millions(abs: Decimal) -> String {
+    format!("{:.1}M", round(abs / Decimal::from(1_000_000u64), 1))
+}
+
+/// A position's value on a tile, in thousands and always signed: `+$3.4k`
+/// below $10k, `+$57k` from there, `-$1.2M` from a million. The sign is the
+/// side, so a long too small to show still reads `+$0.0k`.
+pub fn usd_k_signed(value: Decimal) -> String {
+    let sign = if value < Decimal::ZERO { "-" } else { "+" };
+    let k = value.abs() / Decimal::from(1_000u64);
+    let tenths = round(k, 1);
+    let body = if tenths < Decimal::from(10) {
+        format!("{tenths:.1}k")
+    } else if round(k, 0) < Decimal::from(1_000) {
+        format!("{}k", group(&round(k, 0).to_string()))
+    } else {
+        millions(value.abs())
+    };
+    format!("{sign}${body}")
+}
+
+/// PNL, rounded to read at a glance: whole dollars (`-$1,538`), whole
+/// thousands from $100k (`+$148k`), millions with one decimal from a million
+/// (`+$4.4M`). Zero reads `$0`.
+pub fn pnl_rounded(value: Decimal) -> String {
+    let dollars = round(value, 0);
+    let abs = dollars.abs();
+    let body = if abs < Decimal::from(100_000u64) {
+        group(&abs.to_string())
+    } else if round(abs / Decimal::from(1_000u64), 0) < Decimal::from(1_000) {
+        format!("{}k", round(abs / Decimal::from(1_000u64), 0))
+    } else {
+        millions(abs)
+    };
+    format!("{}${body}", sign_of(dollars))
+}
+
+/// A distance in standard deviations, signed, one decimal: `-2.5σ`. Zero
+/// reads `0.0σ`.
+pub fn sigma(z: f64) -> String {
+    let tenths = (z * 10.0).round() / 10.0;
+    let sign = if tenths > 0.0 {
+        "+"
+    } else if tenths < 0.0 {
+        "-"
+    } else {
+        ""
+    };
+    format!("{sign}{:.1}\u{3c3}", tenths.abs())
+}
+
 /// `0x12ab…9f3c`. Anything too short to shorten is returned whole.
 pub fn short_address(address: &str) -> String {
     if address.len() <= 12 || !address.is_ascii() {
@@ -229,6 +292,49 @@ mod tests {
 
     fn d(s: &str) -> Decimal {
         s.parse().unwrap()
+    }
+
+    #[test]
+    fn standard_deviations() {
+        assert_eq!(sigma(-2.5), "-2.5\u{3c3}");
+        assert_eq!(sigma(1.26), "+1.3\u{3c3}");
+        assert_eq!(sigma(0.0), "0.0\u{3c3}");
+        assert_eq!(sigma(-0.04), "0.0\u{3c3}");
+    }
+
+    #[test]
+    fn position_values_in_thousands() {
+        assert_eq!(usd_k_signed(d("57007.14")), "+$57k");
+        assert_eq!(usd_k_signed(d("3412.60")), "+$3.4k");
+        assert_eq!(usd_k_signed(d("-18700")), "-$19k");
+        assert_eq!(usd_k_signed(d("1240000")), "+$1.2M");
+        assert_eq!(usd_k_signed(d("412300")), "+$412k");
+        // At the edges: a tenth that rounds up to ten, and a thousand.
+        assert_eq!(usd_k_signed(d("9960")), "+$10k");
+        assert_eq!(usd_k_signed(d("9940")), "+$9.9k");
+        assert_eq!(usd_k_signed(d("999600")), "+$1.0M");
+        // The sign is the side, even for a sliver.
+        assert_eq!(usd_k_signed(d("-12")), "-$0.0k");
+        // Halves round away from zero.
+        assert_eq!(usd_k_signed(d("3450")), "+$3.5k");
+        assert_eq!(usd_k_signed(d("-3450")), "-$3.5k");
+    }
+
+    #[test]
+    fn pnl_rounded_to_read_at_a_glance() {
+        assert_eq!(pnl_rounded(d("-1538.42")), "-$1,538");
+        assert_eq!(pnl_rounded(d("64120")), "+$64,120");
+        assert_eq!(pnl_rounded(d("148210.07")), "+$148k");
+        assert_eq!(pnl_rounded(d("4417712.27")), "+$4.4M");
+        assert_eq!(pnl_rounded(d("-99999.4")), "-$99,999");
+        assert_eq!(pnl_rounded(d("-99999.5")), "-$100k");
+        assert_eq!(pnl_rounded(d("999600")), "+$1.0M");
+        assert_eq!(pnl_rounded(Decimal::ZERO), "$0");
+        assert_eq!(pnl_rounded(d("0.4")), "$0");
+        assert_eq!(pnl_rounded(d("-0.4")), "$0");
+        // Halves round away from zero.
+        assert_eq!(pnl_rounded(d("2.5")), "+$3");
+        assert_eq!(pnl_rounded(d("-2.5")), "-$3");
     }
 
     #[test]

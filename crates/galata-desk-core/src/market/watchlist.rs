@@ -140,6 +140,7 @@ mod tests {
 
     fn position(market: &str, dex: &str, value: i64) -> PositionRow {
         PositionRow {
+            asset: None,
             market: market.into(),
             dex: dex.into(),
             leverage: 10,

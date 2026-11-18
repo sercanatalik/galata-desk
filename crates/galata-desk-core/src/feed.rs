@@ -27,10 +27,12 @@ use tokio::task::JoinHandle;
 use tokio::time::Instant;
 
 use crate::funding::FundingRates;
-use crate::market::fills::{Fill, FillSide, Fills};
+use crate::market::fill_history::{self, FillHistory};
+use crate::market::fills::Fill;
+use crate::market::history::Budget;
 use crate::model::{self, Collateral, DexState, Holdings, OrderRow};
 use crate::venue::{
-    ClearinghouseState, Info, PortfolioHistory, SpotMeta, Transport, UserFees, VenueError,
+    ClearinghouseState, Info, PerpMeta, PortfolioHistory, SpotMeta, Transport, UserFees, VenueError,
 };
 
 /// One part of the screen: what was last fetched, when, and whether the most
@@ -92,10 +94,11 @@ pub struct Snapshot {
     pub orders: Section<Vec<OrderRow>>,
     pub overview: Section<Overview>,
     /// The current funding rate of every market on the dexes the account has
-    /// positions on.
+    /// positions on, and on the dexes of the markets it watches.
     pub rates: Section<FundingRates>,
-    /// The account's latest fills, across all markets.
-    pub fills: Section<Fills>,
+    /// The account's fills across all markets: the walk back through its
+    /// history once it has finished, and the latest fills on top.
+    pub fills: Section<crate::market::fills::Fills>,
     /// The venue has asked the app to slow down and it has not yet recovered.
     pub slowed: bool,
 }
@@ -192,14 +195,22 @@ pub struct Refresher<T> {
     collateral: Option<Collateral>,
     /// The last state seen on each dex.
     states: HashMap<String, ClearinghouseState>,
+    /// The markets of each dex a position or an order was seen on. Asked
+    /// once: a market's place in its dex's list does not change.
+    perp_metas: HashMap<String, PerpMeta>,
     /// The last orders seen on each dex.
     orders: HashMap<String, Vec<OrderRow>>,
     /// Dexes worth asking every few seconds.
     active: BTreeSet<String>,
     /// Dexes that had resting orders at the last full sweep.
     with_orders: BTreeSet<String>,
+    /// Dexes whose funding rates are wanted though the account may hold
+    /// nothing there: those of the markets it watches.
+    watched_dexes: BTreeSet<String>,
     snapshot: Snapshot,
     cadence: Cadence,
+    /// Every fill seen: the walk's and the top-ups'.
+    history: FillHistory,
 }
 
 /// How often the orders tier asks every dex instead of only the active ones.
@@ -225,12 +236,15 @@ impl<T: Transport> Refresher<T> {
             meta: None,
             collateral: None,
             states: HashMap::new(),
+            perp_metas: HashMap::new(),
             orders: HashMap::new(),
             // The main dex is always asked.
             active: BTreeSet::from([String::new()]),
             with_orders: BTreeSet::new(),
+            watched_dexes: BTreeSet::new(),
             snapshot: Snapshot::default(),
             cadence: Cadence::default(),
+            history: FillHistory::default(),
         }
     }
 
@@ -339,13 +353,45 @@ impl<T: Transport> Refresher<T> {
             HashMap::new()
         };
 
+        // Closing a position needs its market's number, as acting on an
+        // order does: the dex's list of markets is asked once, the first
+        // time the account holds something there. Until it is had, the
+        // positions show and cannot be acted on.
+        self.learn_markets(
+            self.states
+                .iter()
+                .filter(|(_, state)| !state.asset_positions.is_empty())
+                .map(|(dex, _)| dex.clone())
+                .collect(),
+        )
+        .await;
+
         let meta = self.meta.as_ref().expect("reference() set it");
         let dexes: Vec<DexState<'_>> = self
             .dexes
             .iter()
-            .filter_map(|dex| self.states.get(dex).map(|state| DexState { dex, state }))
+            .filter_map(|dex| {
+                self.states.get(dex).map(|state| DexState {
+                    dex,
+                    state,
+                    dexes: &self.dexes,
+                    perp: self.perp_metas.get(dex),
+                })
+            })
             .collect();
         Ok(model::holdings(&dexes, &spot, meta, &mids, collateral))
+    }
+
+    /// Ask for the markets of each of `dexes` not yet known. A list that
+    /// cannot be had now is asked for again next time.
+    async fn learn_markets(&mut self, dexes: Vec<String>) {
+        for dex in dexes {
+            if !self.perp_metas.contains_key(&dex)
+                && let Ok(perp) = self.info.perp_meta(&dex).await
+            {
+                self.perp_metas.insert(dex, perp);
+            }
+        }
     }
 
     /// Resting orders. `sweep` asks every dex instead of the active ones.
@@ -375,9 +421,21 @@ impl<T: Transport> Refresher<T> {
                 .map(|dex| self.info.open_orders(&self.user, dex)),
         )
         .await?;
+        // Acting on an order needs its market's number, which is its place
+        // in the dex's list. Until the list is had the orders show and
+        // cannot be acted on.
+        self.learn_markets(
+            asked
+                .iter()
+                .zip(&answers)
+                .filter(|(_, raw)| !raw.is_empty())
+                .map(|(dex, _)| dex.clone())
+                .collect(),
+        )
+        .await;
         let meta = self.meta.as_ref().expect("reference() set it");
         for (dex, raw) in asked.into_iter().zip(answers) {
-            let rows = model::orders(&dex, &raw, meta);
+            let rows = model::orders(&dex, &raw, meta, &self.dexes, self.perp_metas.get(&dex));
             if rows.is_empty() {
                 self.with_orders.remove(&dex);
             } else {
@@ -400,39 +458,66 @@ impl<T: Transport> Refresher<T> {
         }
     }
 
-    /// The account's latest fills, for marking on the chart.
+    /// The account's latest fills, folded into what is already held.
     pub async fn refresh_fills(&mut self) {
         let result = self.info.user_fills(&self.user).await;
         self.settle(&result);
         match result {
             Ok(raw) => {
-                let rows = raw
-                    .into_iter()
-                    .map(|f| Fill {
-                        coin: f.coin,
-                        side: match f.side {
-                            crate::venue::Side::Buy => FillSide::Bought,
-                            crate::venue::Side::Sell => FillSide::Sold,
-                        },
-                        price: f.px,
-                        size: f.sz,
-                        time_ms: f.time,
-                        realised: f.closed_pnl,
-                    })
-                    .collect();
-                self.snapshot.fills.succeed(Fills::new(rows));
+                self.history
+                    .top_up(raw.into_iter().map(Fill::from).collect());
+                self.snapshot.fills.succeed(self.history.to_fills());
             }
             Err(e) => self.snapshot.fills.fail(e),
         }
     }
 
-    /// The current funding rates on every dex the account has a position on.
-    /// Until the positions are known there is nothing to ask for.
+    /// Fold in the walk back through the account's fills. Returns whether it
+    /// succeeded: a failed walk is tried again later, and the latest fills
+    /// stay shown meanwhile.
+    pub fn finish_fill_walk(&mut self, walked: Result<Vec<Fill>, VenueError>) -> bool {
+        match walked {
+            Ok(fills) => {
+                self.history.finish_walk(fills);
+                self.snapshot.fills.succeed(self.history.to_fills());
+                true
+            }
+            Err(_) => false,
+        }
+    }
+
+    /// Walk the account's fills on a request client of its own, so the walk's
+    /// pacing does not hold up the tiers.
+    pub fn fill_walk(&self) -> impl Future<Output = Result<Vec<Fill>, VenueError>> + Send + 'static
+    where
+        T: Clone,
+    {
+        let info = self.info.clone();
+        let user = self.user.clone();
+        async move {
+            let mut budget = Budget::for_fill_history();
+            fill_history::walk(&info, &user, &mut budget).await
+        }
+    }
+
+    /// Also keep the funding rates of these dexes current: the ones the
+    /// watched markets are on. Returns whether that changed what is asked.
+    pub fn watch_dexes(&mut self, dexes: BTreeSet<String>) -> bool {
+        let changed = self.watched_dexes != dexes;
+        self.watched_dexes = dexes;
+        changed
+    }
+
+    /// The current funding rates on every dex the account has a position on
+    /// or watches a market on, each asked once. Until the positions are
+    /// known nothing is asked: the first answer should cover them.
     pub async fn refresh_rates(&mut self) {
         let Some(holdings) = &self.snapshot.holdings.data else {
             return;
         };
-        let dexes: BTreeSet<String> = holdings.positions.iter().map(|p| p.dex.clone()).collect();
+        let mut dexes: BTreeSet<String> =
+            holdings.positions.iter().map(|p| p.dex.clone()).collect();
+        dexes.extend(self.watched_dexes.iter().cloned());
         let result = try_join_all(dexes.iter().map(|dex| self.info.funding_rates(dex))).await;
         self.settle(&result);
         match result {
@@ -464,6 +549,8 @@ impl<T: Transport> Refresher<T> {
 
 enum Command {
     RefreshNow,
+    AfterAction,
+    WatchDexes(BTreeSet<String>),
 }
 
 /// A running refresher. Dropping it stops the refreshing.
@@ -475,7 +562,7 @@ pub struct Feed {
 
 impl Feed {
     /// Start refreshing `user`'s portfolio on the current Tokio runtime.
-    pub fn start<T: Transport>(transport: T, user: impl Into<String>) -> Self {
+    pub fn start<T: Transport + Clone>(transport: T, user: impl Into<String>) -> Self {
         let (tx, snapshots) = watch::channel(Snapshot::default());
         let (commands, rx) = mpsc::unbounded_channel();
         let refresher = Refresher::new(transport, user);
@@ -496,6 +583,20 @@ impl Feed {
     pub fn refresh_now(&self) {
         let _ = self.commands.send(Command::RefreshNow);
     }
+
+    /// Fetch the positions and the open orders again at once, without
+    /// waiting for their turn: an action on either may have changed both
+    /// (a close removes a position's take-profit and stop-loss; a limit
+    /// close adds an order).
+    pub fn refresh_after_action(&self) {
+        let _ = self.commands.send(Command::AfterAction);
+    }
+
+    /// Keep the funding rates of these dexes current too: the ones the
+    /// watched markets are on. A change is fetched at once.
+    pub fn watch_dexes(&self, dexes: BTreeSet<String>) {
+        let _ = self.commands.send(Command::WatchDexes(dexes));
+    }
 }
 
 impl Drop for Feed {
@@ -504,7 +605,19 @@ impl Drop for Feed {
     }
 }
 
-async fn run<T: Transport>(
+/// How long to wait before walking the fills again after a walk failed.
+const WALK_AGAIN: Duration = Duration::from_secs(60);
+
+/// A spawned task that stops when this is dropped, with the feed.
+struct Owned(JoinHandle<()>);
+
+impl Drop for Owned {
+    fn drop(&mut self) {
+        self.0.abort();
+    }
+}
+
+async fn run<T: Transport + Clone>(
     mut refresher: Refresher<T>,
     tx: watch::Sender<Snapshot>,
     mut commands: mpsc::UnboundedReceiver<Command>,
@@ -527,12 +640,43 @@ async fn run<T: Transport>(
     // The first pass of each tier sweeps every dex.
     let mut holdings_sweep_due = start;
     let mut orders_sweep_due = start;
+    // The watched dexes changed: their rates are wanted now.
+    let mut rates_wanted = false;
+
+    // The walk back through the account's fills runs beside the tiers, at
+    // its own pace, and reports here when it is done.
+    let (walked_tx, mut walked) = mpsc::unbounded_channel();
+    let spawn_walk = |refresher: &Refresher<T>, after: Duration| {
+        let walk = refresher.fill_walk();
+        let tx = walked_tx.clone();
+        Owned(tokio::spawn(async move {
+            tokio::time::sleep(after).await;
+            let _ = tx.send(walk.await);
+        }))
+    };
+    let mut _walk = spawn_walk(&refresher, Duration::ZERO);
 
     loop {
         let next = holdings_due.min(orders_due).min(overview_due);
         tokio::select! {
             _ = tokio::time::sleep_until(next) => {}
+            Some(result) = walked.recv() => {
+                if !refresher.finish_fill_walk(result) {
+                    _walk = spawn_walk(&refresher, WALK_AGAIN);
+                }
+                publish(&refresher);
+            }
             command = commands.recv() => match command {
+                // After an action: the positions and the orders, on the
+                // dexes already known, without a sweep.
+                Some(Command::AfterAction) => {
+                    let now = Instant::now();
+                    holdings_due = now;
+                    orders_due = now;
+                }
+                Some(Command::WatchDexes(dexes)) => {
+                    rates_wanted |= refresher.watch_dexes(dexes);
+                }
                 Some(Command::RefreshNow) => {
                     let now = Instant::now();
                     holdings_due = now;
@@ -558,6 +702,15 @@ async fn run<T: Transport>(
             // The first positions say which dexes to ask for rates: do not
             // leave the Funding section empty until the slow tier comes round.
             if refresher.snapshot().rates.is_loading() {
+                refresher.refresh_rates().await;
+                publish(&refresher);
+            }
+        }
+        // Rates for newly watched dexes, once there are positions to go with
+        // them; before that the first holdings pass asks for both.
+        if rates_wanted && refresher.snapshot().holdings.data.is_some() {
+            rates_wanted = false;
+            if now < overview_due {
                 refresher.refresh_rates().await;
                 publish(&refresher);
             }

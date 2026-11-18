@@ -1,5 +1,7 @@
 //! The portfolio screen: what the account is worth, how it has performed,
-//! what it holds and what orders it has resting. Read-only.
+//! what it holds and what orders it has resting. It shows; its actions are
+//! amending and cancelling those orders (`orders`), and closing positions
+//! and setting their take-profit and stop-loss (`positions`).
 
 use std::time::{Duration, SystemTime};
 
@@ -22,8 +24,14 @@ use gpui_kit::component::{Sizable, h_flex, v_flex};
 use gpui_kit::prelude::*;
 use gpui_kit::{
     AnyElement, ClipboardItem, Context, Entity, EventEmitter, SharedString, Task, TestSupportExt,
-    Window, div, px,
+    Window, deferred, div, px,
 };
+
+mod orders;
+mod positions;
+
+#[cfg(test)]
+pub use orders::Staged;
 
 use crate::Core;
 use crate::grid::{Cell, Col, Grid, Tone};
@@ -33,6 +41,8 @@ use crate::ui;
 pub enum PortfolioEvent {
     /// The user asked to forget this account.
     Disconnect,
+    /// The user asked for the settings page, from a notice that names it.
+    OpenSettings,
 }
 
 #[derive(Clone, Copy, PartialEq)]
@@ -65,6 +75,8 @@ pub struct Portfolio {
     /// Something the user should know that is not about the venue.
     warning: Option<SharedString>,
     copied: bool,
+    /// Amending and cancelling orders.
+    actions: orders::Actions,
 }
 
 impl EventEmitter<PortfolioEvent> for Portfolio {}
@@ -122,9 +134,20 @@ impl Portfolio {
                 Col::number("Liq. price", 110.),
                 Col::number("Margin", 170.),
                 Col::number("Funding", 110.),
+                // Close at a limit, close at market. The buttons name
+                // themselves. Pinned with TP/SL, so a narrow window scrolls
+                // the figures and keeps the controls in view.
+                Col::number("Close", 150.).pinned(),
+                Col::number("TP/SL", 180.).pinned(),
             ],
             "No open positions",
-        );
+        )
+        .on_press({
+            let this = cx.weak_entity();
+            std::rc::Rc::new(move |id, key, window, cx| {
+                let _ = this.update(cx, |this, cx| this.press_position(id, key, window, cx));
+            })
+        });
         let balances = Grid::new(
             vec![
                 Col::text("Asset", 170.),
@@ -144,9 +167,18 @@ impl Portfolio {
                 Col::number("Size (left / original)", 220.),
                 Col::number("Price", 130.),
                 Col::text("Conditions", 260.),
+                // Amend and Cancel. The buttons name themselves.
+                Col::number(" ", 84.),
             ],
             "No open orders",
-        );
+        )
+        .on_press({
+            let this = cx.weak_entity();
+            std::rc::Rc::new(move |id, oid, window, cx| {
+                let _ = this.update(cx, |this, cx| this.press(id, oid, window, cx));
+            })
+        });
+        let actions = orders::Actions::new(&address, cx);
 
         #[allow(unused_mut)]
         let mut this = Self {
@@ -165,6 +197,7 @@ impl Portfolio {
             orders: table(orders, window, cx),
             warning: None,
             copied: false,
+            actions,
         };
         #[cfg(feature = "shot")]
         this.preselect();
@@ -215,6 +248,14 @@ impl Portfolio {
                         _ => Tab::Positions,
                     }
                 }
+                "orders" => {
+                    self.tab = Tab::Orders;
+                    self.stage_for_shot(value);
+                }
+                "positions" => {
+                    self.tab = Tab::Positions;
+                    self.actions.position_shot = Some(value.to_string());
+                }
                 _ => {}
             }
         }
@@ -226,31 +267,41 @@ impl Portfolio {
     }
 
     fn apply(&mut self, snapshot: Snapshot, cx: &mut Context<Self>) {
-        if snapshot.holdings.data != self.snapshot.holdings.data
-            && let Some(holdings) = &snapshot.holdings.data
-        {
-            let rows = holdings.positions.iter().map(position_row).collect();
-            self.positions.update(cx, |t, cx| {
-                t.delegate_mut().set_rows(rows);
-                t.refresh(cx);
-            });
+        let holdings_changed = snapshot.holdings.data != self.snapshot.holdings.data;
+        if holdings_changed && let Some(holdings) = &snapshot.holdings.data {
             let rows = holdings.balances.iter().map(balance_row).collect();
             self.balances.update(cx, |t, cx| {
                 t.delegate_mut().set_rows(rows);
                 t.refresh(cx);
             });
         }
-        if snapshot.orders.data != self.snapshot.orders.data
-            && let Some(orders) = &snapshot.orders.data
-        {
-            let rows = orders.iter().map(order_row).collect();
-            self.orders.update(cx, |t, cx| {
-                t.delegate_mut().set_rows(rows);
-                t.refresh(cx);
-            });
-        }
+        let orders_changed = snapshot.orders.data != self.snapshot.orders.data;
         self.snapshot = snapshot;
+        if orders_changed {
+            // Rebuilds the positions too: their TP/SL come from the orders.
+            self.rebuild_orders(cx);
+        } else if holdings_changed {
+            self.rebuild_positions(cx);
+        }
         cx.notify();
+    }
+
+    /// Draw the orders and positions tables' rows again: the orders changed
+    /// (and with them the positions' take-profits and stop-losses), or what
+    /// can be done with either did.
+    fn rebuild_orders(&mut self, cx: &mut Context<Self>) {
+        self.rebuild_positions(cx);
+        let Some(orders) = &self.snapshot.orders.data else {
+            return;
+        };
+        let rows = orders
+            .iter()
+            .map(|o| order_row(o, self.order_buttons(o)))
+            .collect();
+        self.orders.update(cx, |t, cx| {
+            t.delegate_mut().set_rows(rows);
+            t.refresh(cx);
+        });
     }
 
     fn holdings(&self) -> Option<&Holdings> {
@@ -497,9 +548,18 @@ impl Portfolio {
         self.holdings().map(|h| h.positions.as_slice())
     }
 
-    /// The Funding section, drawn from the positions and rates held here.
-    pub fn funding(&self) -> AnyElement {
-        crate::funding::render(self.positions(), &self.snapshot.rates)
+    /// The current funding rates, as last refreshed. The Funding section
+    /// draws from them.
+    pub fn rates(
+        &self,
+    ) -> &galata_desk_core::feed::Section<galata_desk_core::funding::FundingRates> {
+        &self.snapshot.rates
+    }
+
+    /// Keep the funding rates of these dexes current too: the ones the
+    /// watched markets are on.
+    pub fn watch_dexes(&self, dexes: std::collections::BTreeSet<String>) {
+        self.feed.watch_dexes(dexes);
     }
 
     /// A section that never loaded: what went wrong, and a way to try again.
@@ -885,17 +945,42 @@ impl Portfolio {
                 .into_any_element()
         };
 
+        let on_orders = self.tab == Tab::Orders;
+        let on_positions = self.tab == Tab::Positions;
         ui::panel()
             .flex_1()
             .min_h_0()
-            .child(div().px_2().pt_1().flex_shrink_0().child(tabs))
+            .child(
+                h_flex()
+                    .px_2()
+                    .pt_1()
+                    .flex_shrink_0()
+                    .child(div().flex_1().min_w_0().child(tabs))
+                    .when(on_orders, |d| d.child(self.cancel_all_button(cx)))
+                    .when(on_positions, |d| d.child(self.close_all_button(cx))),
+            )
+            .when(on_orders, |d| {
+                d.children(self.trading_notice(orders::Acting::Orders, cx))
+            })
+            .when(on_positions, |d| {
+                d.children(self.trading_notice(orders::Acting::Positions, cx))
+            })
+            // The last action's result, on either tab: an action on one
+            // changes the other too.
+            .when(on_orders || on_positions, |d| {
+                d.children(self.orders_report(cx))
+            })
             .child(div().flex_1().min_h_0().child(body))
             .into_any_element()
     }
 }
 
 impl Render for Portfolio {
-    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        #[cfg(feature = "shot")]
+        self.show_shot_state(_window, cx);
+        #[cfg(feature = "shot")]
+        self.show_position_shot_state(_window, cx);
         // The top row never loaded and never will without a retry: say so once,
         // across the row, instead of three sets of placeholders.
         let top_failed = self.overview().is_none() && self.snapshot.overview.error.is_some();
@@ -916,12 +1001,18 @@ impl Render for Portfolio {
         };
 
         v_flex()
+            .relative()
             .size_full()
             .p_3()
             .gap_3()
             .children(self.banners())
             .child(div().h(px(324.)).flex_shrink_0().child(top))
             .child(self.tables(cx))
+            // A confirmation or the amend form, over everything else here.
+            .children(
+                self.order_dialog(cx)
+                    .map(|dialog| deferred(dialog).with_priority(3)),
+            )
     }
 }
 
@@ -946,7 +1037,7 @@ fn clock(at: SystemTime) -> String {
     DateTime::<Local>::from(at).format("%H:%M:%S").to_string()
 }
 
-fn position_row(p: &PositionRow) -> Vec<Cell> {
+fn position_row(p: &PositionRow, buttons: Cell, tpsl: Cell) -> Vec<Cell> {
     let side = if p.is_long() { Tone::Gain } else { Tone::Loss };
     let mut market = Cell::text(p.market.clone()).and(format!("{}x", p.leverage), Tone::Muted);
     if !p.dex.is_empty() {
@@ -976,6 +1067,8 @@ fn position_row(p: &PositionRow) -> Vec<Cell> {
             Tone::Muted,
         ),
         Cell::new(f::usd_signed(p.funding), Tone::signed(sign(p.funding))),
+        buttons,
+        tpsl,
     ]
 }
 
@@ -998,7 +1091,7 @@ fn balance_row(b: &BalanceRow) -> Vec<Cell> {
     ]
 }
 
-fn order_row(o: &OrderRow) -> Vec<Cell> {
+fn order_row(o: &OrderRow, buttons: Cell) -> Vec<Cell> {
     let (side, tone) = match o.side {
         Side::Buy => ("Buy", Tone::Gain),
         Side::Sell => ("Sell", Tone::Loss),
@@ -1022,6 +1115,7 @@ fn order_row(o: &OrderRow) -> Vec<Cell> {
         Cell::text(f::amount(o.remaining)).and(format!("/ {}", f::amount(o.original)), Tone::Muted),
         Cell::text(f::price(o.price)),
         conditions,
+        buttons,
     ]
 }
 
@@ -1189,6 +1283,14 @@ impl Portfolio {
         };
         snapshot.holdings.data = Some(holdings);
         snapshot.holdings.error = None;
+        self.apply(snapshot, cx);
+    }
+
+    /// Give the view resting orders, as if the venue had reported them.
+    pub fn set_orders(&mut self, orders: Vec<OrderRow>, cx: &mut Context<Self>) {
+        let mut snapshot = self.snapshot.clone();
+        snapshot.orders.data = Some(orders);
+        snapshot.orders.error = None;
         self.apply(snapshot, cx);
     }
 

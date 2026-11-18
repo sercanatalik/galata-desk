@@ -3,10 +3,14 @@
 //! Everything here is from the account's side: a plus is funding received.
 //! The venue's rate keeps its own sign: positive means longs pay shorts.
 
+pub mod feed;
+pub mod history;
+
 use std::collections::HashMap;
 
 use rust_decimal::Decimal;
 
+use crate::market::MarketId;
 use crate::model::PositionRow;
 
 /// Hourly funding rates by the venue's coin name (`BTC`, `xyz:NVDA`), as
@@ -88,6 +92,43 @@ pub fn rows(positions: &[PositionRow], rates: &FundingRates) -> Vec<FundingRow> 
     rows
 }
 
+/// A watched market the account holds no position in.
+#[derive(Debug, Clone, PartialEq)]
+pub struct WatchedRow {
+    pub market: MarketId,
+    /// The market's current hourly rate; `None` when the venue's rates do not
+    /// include the market.
+    pub rate: Option<Decimal>,
+}
+
+impl WatchedRow {
+    /// The rate over a year, as a fraction.
+    pub fn yearly_rate(&self) -> Option<Decimal> {
+        self.rate.map(|r| r * Decimal::from(24 * 365))
+    }
+}
+
+/// One row per watched market without a position, in the watchlist's order.
+/// A market that is held is a position's row and is left out here.
+pub fn watched(
+    watchlist: &[MarketId],
+    positions: &[PositionRow],
+    rates: &FundingRates,
+) -> Vec<WatchedRow> {
+    watchlist
+        .iter()
+        .filter(|market| {
+            !positions
+                .iter()
+                .any(|p| p.market == market.ticker() && p.dex == market.dex())
+        })
+        .map(|market| WatchedRow {
+            market: market.clone(),
+            rate: rates.get(market.coin()).copied(),
+        })
+        .collect()
+}
+
 /// The account's funding in one line.
 #[derive(Debug, Clone, PartialEq, Default)]
 pub struct FundingSummary {
@@ -143,6 +184,7 @@ mod tests {
 
     fn position(market: &str, dex: &str, size: &str, value: &str, funding: &str) -> PositionRow {
         PositionRow {
+            asset: None,
             market: market.into(),
             dex: dex.into(),
             leverage: 20,
@@ -267,6 +309,62 @@ mod tests {
         let s = summary(&rows);
         assert_eq!((s.earning, s.paying, s.without_rate), (0, 0, 0));
         assert_eq!(s.per_hour, Decimal::ZERO);
+    }
+
+    fn markets(coins: &[&str]) -> Vec<MarketId> {
+        coins.iter().map(|c| MarketId::new(*c)).collect()
+    }
+
+    #[test]
+    fn watched_rows_keep_the_watchlists_order_and_leave_out_what_is_held() {
+        let positions = [
+            position("NVDA", "xyz", "100", "15000", "0"),
+            position("BTC", "", "1", "50000", "0"),
+        ];
+        let all = rates(&[
+            ("DOGE", "-0.000005"),
+            ("XRP", "0.000019"),
+            ("xyz:TSLA", "0.000012"),
+            ("xyz:NVDA", "0.00002"),
+            ("BTC", "0.00001"),
+        ]);
+        let rows = watched(
+            &markets(&["DOGE", "xyz:NVDA", "XRP", "BTC", "xyz:TSLA"]),
+            &positions,
+            &all,
+        );
+        // XRP has the highest rate and still comes second: no sorting.
+        let names: Vec<&str> = rows.iter().map(|r| r.market.coin()).collect();
+        assert_eq!(names, ["DOGE", "XRP", "xyz:TSLA"]);
+        assert_eq!(rows[1].rate, Some(d("0.000019")));
+        // 0.0019% x 8,760 hours.
+        assert_eq!(rows[1].yearly_rate(), Some(d("0.16644")));
+        // A builder-dex market keeps its dex.
+        assert_eq!(
+            (rows[2].market.dex(), rows[2].market.ticker()),
+            ("xyz", "TSLA")
+        );
+        assert_eq!(rows[2].rate, Some(d("0.000012")));
+    }
+
+    #[test]
+    fn a_main_dex_position_does_not_hide_a_builder_dex_market_of_the_same_name() {
+        let positions = [position("NVDA", "", "1", "100", "0")];
+        let rows = watched(&markets(&["xyz:NVDA"]), &positions, &FundingRates::new());
+        assert_eq!(rows.len(), 1);
+    }
+
+    #[test]
+    fn a_watched_market_the_rates_do_not_include_has_no_rate() {
+        let rows = watched(&markets(&["GONE"]), &[], &rates(&[("BTC", "0.00001")]));
+        assert_eq!(rows[0].rate, None);
+        assert_eq!(rows[0].yearly_rate(), None);
+    }
+
+    #[test]
+    fn an_empty_watchlist_has_no_watched_rows() {
+        let positions = [position("BTC", "", "1", "50000", "0")];
+        assert!(watched(&[], &positions, &FundingRates::new()).is_empty());
     }
 
     #[test]

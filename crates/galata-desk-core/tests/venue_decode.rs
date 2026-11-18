@@ -69,6 +69,16 @@ async fn every_query_decodes_its_recorded_answer() {
     assert_eq!(orders.len(), 6);
     assert_eq!(orders[0].side, Side::Sell);
     assert_eq!(orders[0].order_type, "Limit");
+    assert_eq!(orders[0].tif.as_deref(), Some("Alo"));
+    assert_eq!(orders[0].oid, 607756224194);
+
+    // Size steps, and the numbers a spot pair is acted on by.
+    let meta = info.perp_meta("").await.unwrap();
+    assert_eq!(meta.universe[0].name, "BTC");
+    assert_eq!(meta.universe[0].sz_decimals, 5);
+    let spot = info.spot_meta().await.unwrap();
+    assert_eq!(spot.universe[1].index, 107);
+    assert_eq!(spot.tokens[1].sz_decimals, 0);
 
     let history = info.portfolio(USER).await.unwrap();
     for key in [
@@ -110,6 +120,21 @@ async fn the_main_dex_is_asked_without_a_dex_key() {
     let asked = transport.asked.lock().unwrap();
     assert!(asked[0].get("dex").is_none());
     assert_eq!(asked[1]["dex"], "xyz");
+}
+
+#[tokio::test]
+async fn a_builder_dex_mid_is_asked_of_that_dex_and_found_by_its_prefixed_name() {
+    let transport = Recorded::default();
+    let info = Info::new(transport.clone());
+    // `allMids_xyz.json` was recorded from the live venue: its keys carry the
+    // dex's prefix.
+    assert_eq!(info.mid("xyz", "NVDA").await.unwrap(), Some(dec("151.165")));
+    assert_eq!(info.mid("xyz", "NOPE").await.unwrap(), None);
+    // The main dex is asked without a dex, and named without a prefix.
+    assert_eq!(info.mid("", "@107").await.unwrap(), Some(dec("70.0585")));
+    let asked = transport.asked.lock().unwrap();
+    assert_eq!(asked[0]["dex"], "xyz");
+    assert!(asked[2].get("dex").is_none());
 }
 
 #[test]
@@ -182,4 +207,58 @@ fn user_fills_decode_with_side_price_size_time_and_realised_pnl() {
     assert_eq!(nvda.px.to_string(), "155.42");
     assert_eq!(nvda.sz.to_string(), "12.5");
     assert!(nvda.closed_pnl.is_zero());
+    assert_eq!(nvda.fee.to_string(), "0.006392");
+    assert_eq!(nvda.tid, 1);
+    let pnut = fills.iter().find(|f| f.coin == "PNUT").unwrap();
+    assert_eq!(pnut.tid, 327_364_237_134_565);
+    assert_eq!(pnut.closed_pnl.to_string(), "0.22899");
+    // A maker fill with no fee decodes as zero, not as missing.
+    let snx = fills.iter().find(|f| f.coin == "SNX").unwrap();
+    assert!(snx.fee.is_zero());
+    // Every trade id differs.
+    let mut ids: Vec<u64> = fills.iter().map(|f| f.tid).collect();
+    ids.sort();
+    ids.dedup();
+    assert_eq!(ids.len(), fills.len());
+}
+
+#[test]
+fn a_fill_without_a_fee_is_an_error_not_a_free_fill() {
+    use galata_desk_core::venue::UserFill;
+    let result: Result<Vec<UserFill>, _> = decode(
+        "userFills",
+        br#"[{"coin":"BTC","px":"64000","sz":"0.1","side":"A","time":1794930208267,"closedPnl":"12.5","tid":7}]"#,
+    );
+    let message = result.unwrap_err().to_string();
+    assert!(message.contains("fee"), "{message}");
+}
+
+#[test]
+fn fills_by_time_decode_like_the_latest_fills() {
+    use galata_desk_core::venue::UserFill;
+    let fills: Vec<UserFill> = decode("userFillsByTime", &fixture("userFillsByTime")).unwrap();
+    assert_eq!(fills.len(), 3);
+    assert!(fills.windows(2).all(|w| w[0].time <= w[1].time));
+    assert!(fills.iter().all(|f| f.tid > 0));
+    let empty: Vec<UserFill> = decode("userFillsByTime", b"[]").unwrap();
+    assert!(empty.is_empty());
+}
+
+#[test]
+fn a_role_answer_says_whose_api_wallet_an_address_is() {
+    let agent: UserRole = decode(
+        "userRole",
+        br#"{"role":"agent","data":{"user":"0x010461c14e146ac35fe42271bdc1134ee31c703a"}}"#,
+    )
+    .unwrap();
+    assert_eq!(agent.role, "agent");
+    assert_eq!(
+        agent.data.unwrap().user.as_deref(),
+        Some("0x010461c14e146ac35fe42271bdc1134ee31c703a")
+    );
+    // Recorded 2026-11-17 for an ordinary address: no data at all.
+    let user: UserRole = decode("userRole", br#"{"role":"user"}"#).unwrap();
+    assert_eq!((user.role.as_str(), user.data), ("user", None));
+    let missing: UserRole = decode("userRole", br#"{"role":"missing"}"#).unwrap();
+    assert_eq!(missing.role, "missing");
 }

@@ -1,0 +1,53 @@
+[
+ {
+  "coin": "ALGO",
+  "px": "0.078271",
+  "sz": "202.0",
+  "side": "B",
+  "time": 1794930205813,
+  "startPosition": "26374.0",
+  "dir": "Open Long",
+  "closedPnl": "0.0",
+  "hash": "0x66a7e6e384e271a668210449005db302139700c91fe590780a70923643e64b91",
+  "oid": 608255575985,
+  "crossed": true,
+  "fee": "0.002276",
+  "tid": 247483406031345,
+  "feeToken": "USDC",
+  "twapId": null
+ },
+ {
+  "coin": "SNX",
+  "px": "0.15252",
+  "sz": "1060.3",
+  "side": "A",
+  "time": 1794930207027,
+  "startPosition": "13187.7",
+  "dir": "Close Long",
+  "closedPnl": "1.007285",
+  "hash": "0x9ec6701181c4d2cca0400449005dc4021b7301011cc7f19e428f1b6440c8acb7",
+  "oid": 608255590188,
+  "crossed": false,
+  "fee": "0.0",
+  "tid": 819944188953057,
+  "feeToken": "USDC",
+  "twapId": null
+ },
+ {
+  "coin": "PNUT",
+  "px": "0.02908",
+  "sz": "1526.6",
+  "side": "B",
+  "time": 1794930208267,
+  "startPosition": "-1016167.5",
+  "dir": "Close Short",
+  "closedPnl": "0.22899",
+  "hash": "0x4e5ba955773feaf34fd50449005dd6020715003b123309c5f22454a83633c4dd",
+  "oid": 608255639822,
+  "crossed": true,
+  "fee": "0.006392",
+  "tid": 327364237134565,
+  "feeToken": "USDC",
+  "twapId": null
+ }
+]

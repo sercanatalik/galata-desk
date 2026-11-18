@@ -26,6 +26,8 @@ struct Fake {
     /// When set, the venue lists this many builder dexes, as the test
     /// network does, in place of the fixture's two.
     dexes: Arc<Mutex<Option<usize>>>,
+    /// Queries answered with a failure, by name (`meta:xyz`).
+    refused: Arc<Mutex<Vec<String>>>,
 }
 
 impl Fake {
@@ -35,6 +37,7 @@ impl Fake {
             asked: Arc::default(),
             asked_at: Arc::default(),
             dexes: Arc::default(),
+            refused: Arc::default(),
         }
     }
     fn set(&self, mood: Mood) {
@@ -57,10 +60,15 @@ impl Transport for Fake {
     async fn post(&self, body: Value) -> Result<Vec<u8>, VenueError> {
         let kind = body["type"].as_str().unwrap();
         let dex = body.get("dex").and_then(Value::as_str);
-        self.asked.lock().unwrap().push(match dex {
+        let name = match dex {
             Some(dex) => format!("{kind}:{dex}"),
             None => kind.to_string(),
-        });
+        };
+        let refused = self.refused.lock().unwrap().contains(&name);
+        self.asked.lock().unwrap().push(name);
+        if refused {
+            return Err(VenueError::Unreachable("refused for the test".into()));
+        }
         self.asked_at
             .lock()
             .unwrap()
@@ -82,6 +90,7 @@ impl Transport for Fake {
         let file = match (kind, dex) {
             ("clearinghouseState", Some("xyz")) => "clearinghouseState_xyz".to_string(),
             ("metaAndAssetCtxs", Some("xyz")) => "metaAndAssetCtxs_xyz".to_string(),
+            ("meta", Some("xyz")) => "meta_xyz".to_string(),
             ("metaAndAssetCtxs", Some(_)) => "metaAndAssetCtxs".to_string(),
             ("clearinghouseState", Some(_)) => return Ok(EMPTY_DEX.as_bytes().to_vec()),
             ("frontendOpenOrders", Some(_)) => return Ok(b"[]".to_vec()),
@@ -192,6 +201,55 @@ async fn orders_come_from_every_dex_on_a_sweep() {
 }
 
 #[tokio::test]
+async fn orders_learn_their_markets_numbers_from_one_question_per_dex() {
+    let fake = Fake::new();
+    let mut r = Refresher::new(fake.clone(), USER);
+    r.refresh_orders(true).await;
+    // Every order is a plain SOL limit order: the third market on the main dex.
+    for order in r.snapshot().orders.data.as_ref().unwrap() {
+        assert_eq!(order.asset.map(|a| a.number), Some(2));
+        assert!(order.amendable);
+    }
+    // Only the dex with orders was asked for its markets, and only once.
+    r.refresh_orders(true).await;
+    assert_eq!(fake.count("meta"), 1);
+    assert_eq!(fake.count("meta:xyz"), 0);
+    assert_eq!(fake.count("meta:flx"), 0);
+}
+
+#[tokio::test]
+async fn positions_learn_their_markets_numbers_from_one_question_per_dex() {
+    let fake = Fake::new();
+    fake.refused.lock().unwrap().push("meta:xyz".into());
+    let mut r = Refresher::new(fake.clone(), USER);
+    r.refresh_holdings(true).await;
+    let nvda = |r: &Refresher<Fake>| {
+        r.snapshot()
+            .holdings
+            .data
+            .as_ref()
+            .unwrap()
+            .positions
+            .iter()
+            .find(|p| p.market == "NVDA")
+            .unwrap()
+            .asset
+    };
+    // The `xyz` list could not be had: its position shows with no number.
+    assert_eq!(nvda(&r), None);
+
+    fake.refused.lock().unwrap().clear();
+    r.refresh_holdings(false).await;
+    assert_eq!(nvda(&r).map(|a| a.number), Some(110_000));
+
+    // Each dex with a position was asked once; `flx`, empty, never.
+    r.refresh_holdings(true).await;
+    assert_eq!(fake.count("meta"), 1);
+    assert_eq!(fake.count("meta:xyz"), 2);
+    assert_eq!(fake.count("meta:flx"), 0);
+}
+
+#[tokio::test]
 async fn the_overview_carries_history_fees_vaults_and_staking() {
     let fake = Fake::new();
     let mut r = Refresher::new(fake.clone(), USER);
@@ -242,6 +300,22 @@ async fn a_manual_refresh_fetches_every_section_at_once() {
     assert_eq!(fake.count("portfolio"), 1);
     // A manual refresh sweeps every dex.
     assert_eq!(fake.count("clearinghouseState:flx"), 1);
+}
+
+#[tokio::test(start_paused = true)]
+async fn after_an_action_positions_and_orders_are_fetched_at_once() {
+    let fake = Fake::new();
+    let feed = Feed::start(fake.clone(), USER);
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    fake.clear();
+
+    feed.refresh_after_action();
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    assert_eq!(fake.count("clearinghouseState"), 1);
+    assert_eq!(fake.count("frontendOpenOrders"), 1);
+    // Not the slower sections, and not a sweep of every dex.
+    assert_eq!(fake.count("portfolio"), 0);
+    assert_eq!(fake.count("clearinghouseState:flx"), 0);
 }
 
 #[tokio::test(start_paused = true)]
@@ -339,6 +413,51 @@ async fn a_failed_refresh_keeps_the_last_funding_rates() {
     fake.set(Mood::Fine);
     r.refresh_rates().await;
     assert!(!r.snapshot().rates.is_stale());
+}
+
+#[tokio::test]
+async fn a_watched_market_on_a_dex_with_no_position_gets_a_rate() {
+    use std::collections::BTreeSet;
+    let fake = Fake::new();
+    let mut r = Refresher::new(fake.clone(), USER);
+    r.refresh_holdings(true).await;
+    // Watching `flx`, where the account holds nothing, and `xyz`, where it does.
+    assert!(r.watch_dexes(BTreeSet::from(["flx".to_string(), "xyz".to_string()])));
+    r.refresh_rates().await;
+    // The watched-only dex is asked, and a dex both held and watched once.
+    assert_eq!(fake.count("metaAndAssetCtxs:flx"), 1);
+    assert_eq!(fake.count("metaAndAssetCtxs:xyz"), 1);
+    assert_eq!(fake.count("metaAndAssetCtxs:"), 1);
+    assert!(
+        r.snapshot()
+            .rates
+            .data
+            .as_ref()
+            .unwrap()
+            .contains_key("xyz:NVDA")
+    );
+    // Saying the same again changes nothing.
+    assert!(!r.watch_dexes(BTreeSet::from(["flx".to_string(), "xyz".to_string()])));
+}
+
+#[tokio::test(start_paused = true)]
+async fn the_feed_fetches_rates_at_once_when_the_watched_dexes_change() {
+    use std::collections::BTreeSet;
+    let fake = Fake::new();
+    let feed = Feed::start(fake.clone(), USER);
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    assert_eq!(fake.count("metaAndAssetCtxs:flx"), 0);
+
+    feed.watch_dexes(BTreeSet::from(["flx".to_string()]));
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    assert_eq!(fake.count("metaAndAssetCtxs:flx"), 1);
+    // The same list again asks nothing more.
+    feed.watch_dexes(BTreeSet::from(["flx".to_string()]));
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    assert_eq!(fake.count("metaAndAssetCtxs:flx"), 1);
+    // And it stays in the regular refresh.
+    tokio::time::sleep(Duration::from_secs(61)).await;
+    assert_eq!(fake.count("metaAndAssetCtxs:flx"), 2);
 }
 
 // ---- A network with hundreds of dexes -------------------------------------
@@ -439,4 +558,73 @@ async fn the_accounts_fills_arrive_and_a_failed_refresh_keeps_them() {
     fake.set(Mood::Fine);
     r.refresh_fills().await;
     assert!(!r.snapshot().fills.is_stale());
+}
+
+#[tokio::test(start_paused = true)]
+async fn the_walk_and_the_latest_fills_merge_without_repeats() {
+    let fake = Fake::new();
+    let mut r = Refresher::new(fake.clone(), USER);
+    r.refresh_fills().await;
+    let before = r.snapshot().fills.data.clone().unwrap();
+    assert!(!before.walked, "the latest fills alone are not the history");
+
+    // The walk's page holds three of the same six fills.
+    let walked = r.fill_walk().await;
+    assert!(r.finish_fill_walk(walked));
+    assert_eq!(fake.count("userFillsByTime"), 1);
+    let fills = r.snapshot().fills.data.clone().unwrap();
+    assert!(fills.walked);
+    assert_eq!(fills.rows.len(), 6);
+    assert!(fills.rows.windows(2).all(|w| w[0].time_ms <= w[1].time_ms));
+    assert_eq!(fills.reaches_from(), None);
+
+    // A later top-up adds nothing it already holds.
+    r.refresh_fills().await;
+    assert_eq!(r.snapshot().fills.data.as_ref().unwrap().rows.len(), 6);
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_failed_walk_keeps_the_latest_fills_and_a_failed_top_up_keeps_the_history() {
+    let fake = Fake::new();
+    let mut r = Refresher::new(fake.clone(), USER);
+    r.refresh_fills().await;
+    fake.set(Mood::Down);
+    let walked = r.fill_walk().await;
+    assert!(!r.finish_fill_walk(walked));
+    let fills = r.snapshot().fills.data.clone().unwrap();
+    assert_eq!(fills.rows.len(), 6);
+    assert!(!fills.walked);
+
+    fake.set(Mood::Fine);
+    let walked = r.fill_walk().await;
+    assert!(r.finish_fill_walk(walked));
+    let history = r.snapshot().fills.data.clone().unwrap();
+    fake.set(Mood::Down);
+    r.refresh_fills().await;
+    assert!(r.snapshot().fills.is_stale());
+    assert_eq!(r.snapshot().fills.data.as_ref(), Some(&history));
+}
+
+#[tokio::test(start_paused = true)]
+async fn the_feed_walks_the_fills_once_at_start_and_again_after_a_failure() {
+    let fake = Fake::new();
+    fake.set(Mood::Down);
+    let feed = Feed::start(fake.clone(), USER);
+    tokio::time::sleep(Duration::from_secs(1)).await;
+    assert_eq!(fake.count("userFillsByTime"), 1);
+    fake.set(Mood::Fine);
+    // Tried again a minute after failing, and not again once it succeeds.
+    tokio::time::sleep(Duration::from_secs(61)).await;
+    assert_eq!(fake.count("userFillsByTime"), 2);
+    let snapshots = feed.snapshots();
+    assert!(
+        snapshots
+            .borrow()
+            .fills
+            .data
+            .as_ref()
+            .is_some_and(|f| f.walked)
+    );
+    tokio::time::sleep(Duration::from_secs(300)).await;
+    assert_eq!(fake.count("userFillsByTime"), 2);
 }

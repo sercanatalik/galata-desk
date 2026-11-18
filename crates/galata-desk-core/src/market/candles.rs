@@ -101,6 +101,68 @@ pub struct Stats {
     /// Realised volatility over the period, as a fraction. `None` with fewer
     /// than two returns.
     pub volatility: Option<f64>,
+    /// The average close over the period and the closes' sample standard
+    /// deviation, in price. `None` with fewer than [`MIN_CLOSES`] closes, or
+    /// when every close is the same.
+    pub mean: Option<f64>,
+    pub sd: Option<f64>,
+}
+
+/// The fewest closes a period needs before its average and spread mean
+/// anything.
+pub const MIN_CLOSES: usize = 10;
+
+/// How far from its usual level a price must be, in standard deviations,
+/// before it is called stretched.
+pub const STRETCHED: f64 = 2.0;
+
+/// Where the last price sits on a tile's bar, each place from the low (0) to
+/// the high (1).
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Placement {
+    /// The last price.
+    pub tick: f64,
+    /// The average ±1 standard deviation, clipped to the bar. `None` when the
+    /// period has too few closes or no spread.
+    pub band: Option<(f64, f64)>,
+    /// The last price's distance from the average, in standard deviations.
+    pub z: Option<f64>,
+}
+
+impl Placement {
+    /// The price is far enough from its usual level to stand out.
+    pub fn stretched(&self) -> bool {
+        self.z.is_some_and(|z| z.abs() >= STRETCHED)
+    }
+}
+
+impl Stats {
+    /// Where `last` sits on the period's bar.
+    pub fn placement(&self, last: Decimal) -> Placement {
+        let low = self.low.to_f64().unwrap_or(0.0);
+        let high = self.high.to_f64().unwrap_or(0.0);
+        let last = last.to_f64().unwrap_or(low);
+        let span = high - low;
+        let place = |price: f64| {
+            if span > 0.0 {
+                ((price - low) / span).clamp(0.0, 1.0)
+            } else {
+                0.5
+            }
+        };
+        let (band, z) = match (self.mean, self.sd) {
+            (Some(mean), Some(sd)) if sd > 0.0 => (
+                Some((place(mean - sd), place(mean + sd))),
+                Some((last - mean) / sd),
+            ),
+            _ => (None, None),
+        };
+        Placement {
+            tick: place(last),
+            band,
+            z,
+        }
+    }
 }
 
 /// The statistics of one window of candles. `last` is the live last price;
@@ -131,6 +193,16 @@ pub fn stats(window: &[Candle], last: Option<Decimal>) -> Option<Stats> {
     };
 
     let closes: Vec<f64> = window.iter().filter_map(|c| c.close.to_f64()).collect();
+    // For the average and spread the newest candle closes at the live price,
+    // as the chart draws it.
+    let mut settled = closes.clone();
+    if let (Some(newest), Some(last)) = (settled.last_mut(), last.to_f64()) {
+        *newest = last;
+    }
+    let (mean, sd) = match spread(&settled) {
+        Some((mean, sd)) => (Some(mean), Some(sd)),
+        None => (None, None),
+    };
 
     Some(Stats {
         start,
@@ -139,7 +211,22 @@ pub fn stats(window: &[Candle], last: Option<Decimal>) -> Option<Stats> {
         high,
         marker,
         volatility: volatility(&closes),
+        mean,
+        sd,
     })
+}
+
+/// The average of the closes and their sample standard deviation. `None`
+/// with fewer than [`MIN_CLOSES`], or when they are all the same.
+pub fn spread(closes: &[f64]) -> Option<(f64, f64)> {
+    let n = closes.len();
+    if n < MIN_CLOSES {
+        return None;
+    }
+    let mean = closes.iter().sum::<f64>() / n as f64;
+    let variance = closes.iter().map(|c| (c - mean).powi(2)).sum::<f64>() / (n - 1) as f64;
+    let sd = variance.sqrt();
+    (sd > 0.0).then_some((mean, sd))
 }
 
 /// A window of candles as a chart shows it: the newest candle ends at the
@@ -372,5 +459,102 @@ mod tests {
         assert_eq!(volatility(&[100.0]), None);
         assert_eq!(volatility(&[100.0, 101.0]), None);
         assert!(volatility(&[100.0, 101.0, 102.0]).is_some());
+    }
+
+    /// Ten one-minute candles closing at the given prices.
+    fn closing(prices: &[u32]) -> Vec<Candle> {
+        prices
+            .iter()
+            .enumerate()
+            .map(|(t, p)| flat(t as u64, &p.to_string()))
+            .collect()
+    }
+
+    #[test]
+    fn the_average_and_spread_of_a_known_series() {
+        let s = stats(
+            &closing(&[100, 101, 102, 103, 104, 105, 106, 107, 108, 109]),
+            None,
+        )
+        .unwrap();
+        assert!((s.mean.unwrap() - 104.5).abs() < 1e-9);
+        // Sample standard deviation: the sum of squares 82.5 over 9.
+        assert!((s.sd.unwrap() - (82.5f64 / 9.0).sqrt()).abs() < 1e-9);
+    }
+
+    #[test]
+    fn the_newest_close_is_the_live_price() {
+        let candles = closing(&[100, 100, 100, 100, 100, 100, 100, 100, 100, 100]);
+        // Without a live price the market is flat: no spread.
+        assert_eq!(stats(&candles, None).unwrap().sd, None);
+        // A live price of 110 is the tenth close.
+        let s = stats(&candles, Some(d("110"))).unwrap();
+        assert!((s.mean.unwrap() - 101.0).abs() < 1e-9);
+        assert!(s.sd.unwrap() > 0.0);
+    }
+
+    #[test]
+    fn a_short_period_has_no_average_or_spread() {
+        let s = stats(&closing(&[100, 103, 101]), None).unwrap();
+        assert_eq!((s.mean, s.sd), (None, None));
+        assert_eq!(spread(&[1.0; 9]), None);
+        assert!(spread(&[1.0, 2.0, 1.0, 2.0, 1.0, 2.0, 1.0, 2.0, 1.0, 2.0]).is_some());
+    }
+
+    #[test]
+    fn a_steady_market_has_no_spread() {
+        let s = stats(&closing(&[100; 12]), None).unwrap();
+        assert_eq!((s.mean, s.sd), (None, None));
+    }
+
+    fn ranged(low: &str, high: &str, mean: Option<f64>, sd: Option<f64>) -> Stats {
+        Stats {
+            start: d(low),
+            change: 0.0,
+            low: d(low),
+            high: d(high),
+            marker: 0.5,
+            volatility: None,
+            mean,
+            sd,
+        }
+    }
+
+    #[test]
+    fn two_and_a_half_deviations_below_the_average() {
+        let s = ranged("100", "110", Some(105.0), Some(2.0));
+        let at = s.placement(d("100"));
+        assert_eq!(at.tick, 0.0);
+        let (from, to) = at.band.unwrap();
+        assert!((from - 0.3).abs() < 1e-9 && (to - 0.7).abs() < 1e-9);
+        assert_eq!(at.z, Some(-2.5));
+        assert!(at.stretched());
+    }
+
+    #[test]
+    fn at_the_average_is_zero_and_not_stretched() {
+        let at = ranged("100", "110", Some(105.0), Some(2.0)).placement(d("105"));
+        assert_eq!(at.z, Some(0.0));
+        assert_eq!(at.tick, 0.5);
+        assert!(!at.stretched());
+        // 1.9 deviations is not yet stretched; 2.0 is.
+        let s = ranged("100", "110", Some(105.0), Some(1.0));
+        assert!(!s.placement(d("106.9")).stretched());
+        assert!(s.placement(d("107")).stretched());
+    }
+
+    #[test]
+    fn a_band_past_the_high_is_clipped_to_the_bar() {
+        let at = ranged("100", "110", Some(108.0), Some(4.0)).placement(d("109"));
+        assert_eq!(at.band, Some((0.4, 1.0)));
+        assert_eq!(at.z, Some(0.25));
+    }
+
+    #[test]
+    fn a_flat_range_puts_the_tick_in_the_middle() {
+        let at = ranged("100", "100", None, None).placement(d("100"));
+        assert_eq!(at.tick, 0.5);
+        assert_eq!((at.band, at.z), (None, None));
+        assert!(!at.stretched());
     }
 }

@@ -136,6 +136,8 @@ mod tests {
                 high: Decimal::ONE,
                 marker: 0.5,
                 volatility: vol,
+                mean: None,
+                sd: None,
             }),
             max_leverage: None,
             unavailable: false,

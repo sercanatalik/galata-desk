@@ -92,7 +92,7 @@ impl Transport for Venue {
                 }
                 // The main dex lists four majors, forty numbered markets and
                 // one delisted one; the `xyz` dex lists two.
-                let market = |name: String, lev: u32| json!({ "name": name, "maxLeverage": lev });
+                let market = |name: String, lev: u32| json!({ "name": name, "szDecimals": 2, "maxLeverage": lev });
                 let mut main = vec![
                     market("BTC".into(), 40),
                     market("ETH".into(), 25),
@@ -100,7 +100,7 @@ impl Transport for Venue {
                     market("HYPE".into(), 10),
                 ];
                 main.extend((0..40).map(|i| market(format!("M{i}"), 5)));
-                main.push(json!({ "name": "MATIC", "maxLeverage": 20, "isDelisted": true }));
+                main.push(json!({ "name": "MATIC", "szDecimals": 1, "maxLeverage": 20, "isDelisted": true }));
                 let xyz = vec![
                     market("xyz:NVDA".into(), 10),
                     market("xyz:SILVER".into(), 20),

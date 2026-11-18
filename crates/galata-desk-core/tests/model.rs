@@ -21,6 +21,9 @@ struct World {
     spot: SpotState,
     meta: SpotMeta,
     mids: HashMap<String, Decimal>,
+    dexes: Vec<String>,
+    perp_main: PerpMeta,
+    perp_xyz: PerpMeta,
 }
 
 fn world() -> World {
@@ -30,6 +33,10 @@ fn world() -> World {
         spot: load("spotClearinghouseState"),
         meta: load("spotMeta"),
         mids: load("allMids"),
+        // As `perpDexs.json` lists them: main, `xyz`, `flx`.
+        dexes: vec!["".into(), "xyz".into(), "flx".into()],
+        perp_main: load("meta"),
+        perp_xyz: load("meta_xyz"),
     }
 }
 
@@ -39,14 +46,23 @@ impl World {
     }
 
     fn holdings_with(&self, collateral: Collateral) -> Holdings {
+        self.holdings_knowing(collateral, true)
+    }
+
+    /// With the dexes' lists of markets known, or not yet.
+    fn holdings_knowing(&self, collateral: Collateral, markets: bool) -> Holdings {
         let dexes = [
             DexState {
                 dex: "",
                 state: &self.main,
+                dexes: &self.dexes,
+                perp: markets.then_some(&self.perp_main),
             },
             DexState {
                 dex: "xyz",
                 state: &self.xyz,
+                dexes: &self.dexes,
+                perp: markets.then_some(&self.perp_xyz),
             },
         ];
         holdings(&dexes, &self.spot, &self.meta, &self.mids, collateral)
@@ -66,6 +82,22 @@ fn positions_span_dexes_largest_first() {
     let btc = h.positions.iter().find(|p| p.market == "BTC").unwrap();
     assert_eq!(btc.dex, "");
     assert!(!btc.is_long());
+}
+
+#[test]
+fn a_position_is_numbered_for_actions_once_its_dexs_markets_are_known() {
+    let w = world();
+    let h = w.holdings();
+    // `xyz` is the second dex, and NVDA the first of its markets.
+    let nvda = h.positions.iter().find(|p| p.market == "NVDA").unwrap();
+    let asset = nvda.asset.unwrap();
+    assert_eq!(asset.number, 110_000);
+    assert!(!asset.spot);
+    let btc = h.positions.iter().find(|p| p.market == "BTC").unwrap();
+    assert_eq!(btc.asset.map(|a| a.number), Some(0));
+
+    let unknown = w.holdings_knowing(Collateral::Separate, false);
+    assert!(unknown.positions.iter().all(|p| p.asset.is_none()));
 }
 
 #[test]
@@ -155,12 +187,53 @@ fn a_token_without_a_price_has_no_usd_value_and_adds_no_equity() {
 fn orders_are_named_and_sorted_newest_first() {
     let w = world();
     let raw: Vec<OpenOrder> = load("frontendOpenOrders");
-    let mut rows = orders("", &raw, &w.meta);
+    let mut rows = orders("", &raw, &w.meta, &[], None);
     sort_orders(&mut rows);
     assert_eq!(rows.len(), 6);
     assert!(rows.windows(2).all(|x| x[0].placed_ms >= x[1].placed_ms));
     assert_eq!(rows[0].kind, "Limit");
     assert_eq!(rows[0].trigger, None);
+}
+
+#[test]
+fn an_order_knows_whether_it_can_be_amended_and_what_its_market_is_called() {
+    let w = world();
+    let dexes = vec![String::new(), "xyz".to_string()];
+    let main: PerpMeta = load("meta");
+    let mut raw: Vec<OpenOrder> = load("frontendOpenOrders");
+    // A stop order: no time in force, and not a plain limit order.
+    raw[1].is_trigger = true;
+    raw[1].order_type = "Stop Market".into();
+    raw[1].tif = None;
+    // A spot order comes with the main dex.
+    raw[2].coin = "@107".into();
+    raw[3].coin = "DELISTED".into();
+    let rows = orders("", &raw, &w.meta, &dexes, Some(&main));
+
+    // SOL is the third market in the list, sized to two places.
+    assert_eq!(rows[0].tif.as_deref(), Some("Alo"));
+    assert!(rows[0].amendable);
+    let sol = rows[0].asset.unwrap();
+    assert_eq!((sol.number, sol.sz_decimals, sol.spot), (2, 2, false));
+
+    assert!(!rows[1].amendable);
+    assert!(rows[1].asset.is_some());
+
+    let spot = rows[2].asset.unwrap();
+    assert_eq!((spot.number, spot.spot), (10_107, true));
+
+    // A market that is not in the venue's list cannot be acted on.
+    assert_eq!(rows[3].asset, None);
+    // Nor can any perpetual before the list is known; spot still can.
+    let early = orders("", &raw, &w.meta, &dexes, None);
+    assert_eq!(early[0].asset, None);
+    assert!(early[2].asset.is_some());
+
+    // A builder-dex market is numbered from its dex's offset.
+    let xyz: PerpMeta = load("meta_xyz");
+    raw[0].coin = "xyz:GOLD".into();
+    let on_xyz = orders("xyz", &raw, &w.meta, &dexes, Some(&xyz));
+    assert_eq!(on_xyz[0].asset.unwrap().number, 110_001);
 }
 
 #[test]
@@ -170,13 +243,13 @@ fn spot_pairs_and_builder_coins_get_readable_names() {
     raw[0].coin = "@107".into();
     raw[1].is_trigger = true;
     raw[1].trigger_condition = "Price above 80".into();
-    assert_eq!(orders("", &raw, &w.meta)[0].market, "HYPE/USDC");
+    assert_eq!(orders("", &raw, &w.meta, &[], None)[0].market, "HYPE/USDC");
     assert_eq!(
-        orders("", &raw, &w.meta)[1].trigger.as_deref(),
+        orders("", &raw, &w.meta, &[], None)[1].trigger.as_deref(),
         Some("Price above 80")
     );
     raw[0].coin = "xyz:NVDA".into();
-    assert_eq!(orders("xyz", &raw, &w.meta)[0].market, "NVDA");
+    assert_eq!(orders("xyz", &raw, &w.meta, &[], None)[0].market, "NVDA");
 }
 
 #[test]
@@ -379,4 +452,44 @@ fn with_collateral_in_spot_the_summary_uses_the_single_pot() {
     };
     let s = account_summary(&h, &equity, &history());
     assert_eq!(s.equity, d("18244.29"));
+}
+
+#[test]
+fn a_positions_take_profit_and_stop_loss_are_told_from_fixed_size_triggers() {
+    use galata_desk_core::trade::sign::Tpsl;
+    let w = world();
+    // Recorded on testnet: a fixed-size TP and SL, then a position-wide pair.
+    let raw: Vec<OpenOrder> = load("frontendOpenOrders_tpsl");
+    let rows = orders("xyz", &raw, &w.meta, &[], None);
+    assert_eq!(rows.len(), 4);
+    let by_oid = |oid: u64| rows.iter().find(|r| r.oid == oid).unwrap();
+
+    // Fixed size: trigger orders, but not the position's TP/SL.
+    let fixed_sl = by_oid(65559626178);
+    assert_eq!(fixed_sl.tpsl, None);
+    assert_eq!(fixed_sl.trigger_px, Some(d("240.16")));
+    assert_eq!(fixed_sl.remaining, d("0.046"));
+    assert_eq!(by_oid(65559626177).tpsl, None);
+
+    // Position-wide: listed with no size of their own.
+    let sl = by_oid(65559727016);
+    assert_eq!(sl.tpsl, Some(Tpsl::Sl));
+    assert_eq!(sl.trigger_px, Some(d("224.15")));
+    assert_eq!(sl.remaining, Decimal::ZERO);
+    assert!(sl.reduce_only);
+    assert!(!sl.amendable);
+    assert_eq!(sl.market, "AMZN");
+    let tp = by_oid(65559726352);
+    assert_eq!(tp.tpsl, Some(Tpsl::Tp));
+    assert_eq!(tp.trigger_px, Some(d("400.28")));
+}
+
+#[test]
+fn a_plain_order_has_no_trigger_price() {
+    let w = world();
+    let raw: Vec<OpenOrder> = load("frontendOpenOrders");
+    for row in orders("", &raw, &w.meta, &[], None) {
+        assert_eq!(row.trigger_px, None);
+        assert_eq!(row.tpsl, None);
+    }
 }

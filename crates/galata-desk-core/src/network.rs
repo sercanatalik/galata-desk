@@ -34,6 +34,11 @@ impl Network {
         format!("https://{}/info", self.host())
     }
 
+    /// The exchange endpoint: signed actions that change an account.
+    pub fn exchange_url(self) -> String {
+        format!("https://{}/exchange", self.host())
+    }
+
     /// The market data stream.
     pub fn ws_url(self) -> String {
         format!("wss://{}/ws", self.host())
@@ -79,6 +84,14 @@ mod tests {
         assert_eq!(
             Network::Testnet.ws_url(),
             "wss://api.hyperliquid-testnet.xyz/ws"
+        );
+        assert_eq!(
+            Network::Mainnet.exchange_url(),
+            "https://api.hyperliquid.xyz/exchange"
+        );
+        assert_eq!(
+            Network::Testnet.exchange_url(),
+            "https://api.hyperliquid-testnet.xyz/exchange"
         );
         assert_eq!(Network::default(), Network::Mainnet);
     }

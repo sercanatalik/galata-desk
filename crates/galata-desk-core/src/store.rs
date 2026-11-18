@@ -71,12 +71,18 @@ struct ConfigFile {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct Settings {
     pub network: Network,
+    /// Order actions are allowed on the main network. Off unless the user
+    /// turns it on; the test network needs no such permission.
+    pub allow_mainnet_trading: bool,
 }
 
 #[derive(Serialize, Deserialize)]
 struct SettingsRecord {
     v: u32,
     network: Network,
+    /// Absent in files written before the switch existed: off.
+    #[serde(default)]
+    mainnet_trading: bool,
 }
 
 /// The app's directory on disk.
@@ -168,6 +174,7 @@ impl Store {
             .filter(|record| record.v == 1)
             .map(|record| Settings {
                 network: record.network,
+                allow_mainnet_trading: record.mainnet_trading,
             })
             .unwrap_or_default()
     }
@@ -176,6 +183,7 @@ impl Store {
         let record = SettingsRecord {
             v: 1,
             network: settings.network,
+            mainnet_trading: settings.allow_mainnet_trading,
         };
         let text = serde_json::to_string_pretty(&record).expect("the record serialises");
         self.write_whole(SETTINGS_FILE, &text)
@@ -363,12 +371,42 @@ mod tests {
         store
             .save_settings(&Settings {
                 network: Network::Testnet,
+                allow_mainnet_trading: false,
             })
             .unwrap();
         assert_eq!(store.settings().network, Network::Testnet);
         let text = std::fs::read_to_string(dir.path().join(SETTINGS_FILE)).unwrap();
         let value: serde_json::Value = serde_json::from_str(&text).unwrap();
-        assert_eq!(value, serde_json::json!({ "v": 1, "network": "testnet" }));
+        assert_eq!(
+            value,
+            serde_json::json!({ "v": 1, "network": "testnet", "mainnet_trading": false })
+        );
+    }
+
+    #[test]
+    fn mainnet_trading_is_off_until_switched_on_and_is_remembered() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::at(dir.path());
+        assert!(!store.settings().allow_mainnet_trading);
+        // A file from before the switch existed: off, and the network kept.
+        std::fs::write(
+            dir.path().join(SETTINGS_FILE),
+            r#"{"v":1,"network":"testnet"}"#,
+        )
+        .unwrap();
+        assert_eq!(
+            store.settings(),
+            Settings {
+                network: Network::Testnet,
+                allow_mainnet_trading: false,
+            }
+        );
+        let on = Settings {
+            network: Network::Mainnet,
+            allow_mainnet_trading: true,
+        };
+        store.save_settings(&on).unwrap();
+        assert_eq!(store.settings(), on);
     }
 
     #[test]

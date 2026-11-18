@@ -11,17 +11,20 @@
 [![macOS](https://img.shields.io/badge/platform-macOS-lightgrey.svg)](#quick-start)
 
 **A native desktop view of a Hyperliquid account and the markets it trades.
-Read-only, and it never holds a key.**
+It shows; the one thing it can change is an order that is already resting.**
 
 galata-desk shows what one Hyperliquid account is worth, how it has
 performed, what it holds and what orders it has resting, beside a live heatmap
 of the markets you choose to watch. It learns which account to show by having
 you prove, with a wallet in your browser, that you own the address. After
-that it only reads public data.
+that it reads public data, and sends nothing signed unless you save an API key
+and confirm an action: amending or cancelling an order, closing a position,
+or setting a position's take-profit and stop-loss.
 
 > **Status: 0.x.** macOS only. The Portfolio, Markets and Funding sections, the account
-> footer and the wallet connection are built. It places no orders, and is not
-> meant to yet.
+> footer and the wallet connection are built. It can amend and cancel resting
+> orders, close positions, and set their take-profit and stop-loss. It opens
+> no new positions and adds to none, and is not meant to yet.
 
 ---
 
@@ -75,7 +78,7 @@ flowchart LR
 
 | It talks to | For | Never |
 |---|---|---|
-| Hyperliquid's info API | the account's state and history, candle history | sends a signed request |
+| Hyperliquid's info API | the account's state and history, candle history, funding rate history | sends a signed request |
 | Hyperliquid's WebSocket | live market figures and candles | sends anything but subscribe, unsubscribe and ping |
 | your wallet, through a local page | one signature proving you own the address | sees a key, or asks for a transaction |
 
@@ -93,6 +96,70 @@ flowchart LR
 - **A history chart** of account value or PNL.
 - **Positions** on every perpetuals dex, including builder-deployed ones such
   as `xyz`; **balances**; and **open orders**.
+
+#### Amending and cancelling orders
+
+The Open orders tab is one of the two places the app acts (the Positions tab,
+below, is the other). Each order has a cross to
+**cancel** it; a plain limit order also has a pencil to **amend** its price
+and size; and the tab has **Cancel all**. They are icons: point at one for its
+name.
+
+- **Nothing is sent until you confirm.** Each control opens a dialog that
+  shows the order, the network and the API wallet that will sign. Escape, or
+  the Keep button, backs out.
+- **Amend** checks what you type against Hyperliquid's rules for that market
+  before sending: price precision, size step and the $10 minimum. What the
+  form shows is what is sent. Hyperliquid replaces an amended order, so it
+  loses its place in the queue. Amending can make an order larger, or move it
+  to a price where it fills at once; the form shows the new value and leaves
+  that to you.
+- **Cancel all** cancels the orders listed at that moment, in every market, in
+  one request, and names any Hyperliquid did not cancel.
+- **The answer is Hyperliquid's.** The app shows what was done, or
+  Hyperliquid's own reason for refusing. If no answer comes back, it says the
+  outcome is unknown and reloads the orders; it never retries on its own.
+
+To use them you need an API key saved in [Settings](#settings) for the network
+in use. On mainnet you must also turn on **Allow trading on mainnet**. The
+first time a key is used, the app asks Hyperliquid whether it is an approved
+API wallet for the connected account, and sends nothing if it is not. When
+the controls cannot be used, the tab says why.
+
+Trigger orders (stop and take-profit) can be cancelled and not amended here; a
+position's take-profit and stop-loss are changed from the Positions tab.
+
+#### Closing positions, take-profit and stop-loss
+
+Each position has **Limit** and **Market** to close it, and a pencil beside
+its **TP/SL** to set its take-profit and stop-loss; the tab has **Close all**.
+Every order sent from here is reduce-only: none can add to a position or turn
+it around, and Hyperliquid refuses any that would.
+
+- **Market** closes at once, at a price no worse than 5% from the market's
+  mid. The dialog reads the mid when it opens and shows that worst price,
+  which is the price sent. What cannot fill within it is not filled and
+  nothing is left resting; the result says how much closed and at what
+  average price.
+- **Limit** places a resting order at your price, listed in Open orders until
+  it fills. The dialog says when the price is already through the market and
+  will fill at once.
+- **How much**: type a size or pick 25, 50, 75 or 100% (rounded down to the
+  market's size step). A close that leaves part of the position must be worth
+  at least $10, as Hyperliquid requires; closing all of it is allowed at any
+  value.
+- **Close all** closes every listed position at market in one request, each
+  within its own worst price, and names any that did not close.
+- **TP/SL** sets one take-profit and one stop-loss per position. Each covers
+  the whole position, whatever its size when it triggers, and closes it at
+  market. A take-profit must be on the profitable side of the mark and a
+  stop-loss on the losing side; the dialog shows the rough profit or loss at
+  each. Clear a price to remove that level. Moving a level amends
+  Hyperliquid's order in place, so a position is never left without its stop
+  while it moves. Hyperliquid removes both when the position closes.
+
+The same confirmation, API key, mainnet switch and key check apply as for
+orders, and after any action both positions and orders are reloaded at once.
 
 ### Markets
 
@@ -139,19 +206,37 @@ volatility over the period.
 ### Funding
 
 What your open positions pay and earn in funding, the hourly charge for
-holding a perpetual position.
+holding a perpetual position; the current rate of each market you watch
+without holding; and how any of those markets' rates have run.
 
 - **Summary**: net funding per hour and per day at current rates, funding
   since your open positions were opened, and how many positions earn and how
-  many pay.
+  many pay. Positions only.
 - **Table**: one row per position, largest flow first: size, position value,
   the market's current hourly rate and that rate over a year, what the
   position pays or earns per hour and per day, and its funding since it
-  opened.
+  opened. Beneath them, the markets on your Markets watchlist that you hold
+  no position in, in the order you added them, with their rate and yearly
+  rate.
+- **Chart**: click a row, or press Enter or Space on it, to chart that
+  market's funding rate. The line is the rate per bucket, against the left
+  axis; the lighter line is its running total, against the right. **1h**
+  shows hourly rates over 7 days, **8h** 8-hour sums over 30 days, **D**
+  daily sums over 90 days. Above it: the average rate, that average over a
+  year, how many buckets were positive, and the cumulative rate.
+  - With a position, the line is blue where your side received funding and
+    orange where it paid, and the panel adds what a position of today's size
+    and side would have received or paid over the window. That is a what-if,
+    not what you were paid: the table's "Since open" is the real figure.
+  - Without one, the line is amber: above zero longs pay shorts, below zero
+    shorts pay longs.
 
 A plus is funding you receive and a minus funding you pay. The per-hour and
 per-day figures assume the current rate and position size hold. Rates are
-refreshed once a minute.
+refreshed once a minute. Funding history is loaded for the chosen market
+only, newest first, so the daily chart fills in backwards over a few
+seconds; a market chosen again is shown at once, and each new hour's rate is
+added while a market stays chosen.
 
 ### Settings
 
@@ -166,8 +251,14 @@ connected account.
   derived from the key, so you can check it against the one Hyperliquid
   shows. The key itself is not shown again, and **Remove** deletes it.
 
-A saved key is only stored. Nothing uses it yet, and the app still places no
-orders.
+- **Allow trading on mainnet**, off by default and remembered. Without it a
+  saved mainnet key is not used. Testnet needs no such permission. It guards
+  against slips; anyone using your unlocked Mac can turn it on.
+
+A saved key is used for one thing: to sign the action you have just confirmed
+on the Open orders or Positions tab (an amend, a cancel, a close, or a
+take-profit and stop-loss change). It is read from the Keychain for that one
+action and not kept in memory. Saving a key sends nothing.
 
 
 A line along the bottom of the window, under every section: equity,
@@ -271,6 +362,10 @@ where a choice was made.
 | **Change** (markets) | Last price against the price at the start of a rolling window ending now. The venue's own page measures from the previous day's price, so its 24-hour percentage differs. |
 | **Volatility** (markets) | The sample standard deviation of the returns between consecutive candle closes in the period, scaled to the whole period. Not annualised: `3.0%` over 24 hours reads as "it typically moved about 3% in a day". |
 | **Funding (yearly)** | The hourly rate times 24 × 365. |
+| **Funding chart bucket** | The sum of the hourly rates in the bucket. Buckets end at the latest funding hour and run backwards, so each is whole: a "day" is 24 hours ending then, not a calendar day. |
+| **Cumulative rate** (funding chart) | The sum of the buckets shown. |
+| **Yearly at that average** (funding chart) | The cumulative rate, divided by the hours shown, times 24 × 365. |
+| **Would have received or paid** (funding chart) | The cumulative rate times the position's current value: received by a short and paid by a long when the rate is positive. It supposes the position was today's size for the whole window. |
 
 A period is built from candles: 1-minute for 1 hour, 15-minute for 24 hours,
 2-hour for 7 days.
@@ -287,8 +382,10 @@ See [Settings](#settings). The network choice is in `settings.json`; API keys
 are in the macOS Keychain under `dev.galata.desk`.
 
 A development build is unsigned, so after rebuilding it macOS may ask for
-your login password before the app can read a key an earlier build saved.
-The packaged app does not have this.
+your login password before the app can read a key an earlier build saved:
+when the Open orders tab is first shown, and again for each action. Choose
+**Always Allow** to be asked once per build. The packaged app does not have
+this.
 
 ### Phone wallets: the relay project id
 
@@ -320,7 +417,7 @@ Everything is in `~/Library/Application Support/galata-desk/`:
 |---|---|
 | `account.json` | The connected address and when it was proven. Readable only by you. **Disconnect** deletes it. |
 | `watchlist.json` | The watched markets, in order, and which is selected: tickers and dex names. |
-| `settings.json` | The network in use: mainnet or testnet. |
+| `settings.json` | The network in use, and whether trading on mainnet is allowed. |
 | `config.toml` | Optional. The relay project id. |
 
 No key, seed phrase or wallet session is ever written to these files. An API
@@ -342,7 +439,8 @@ connect/                   the connect page (TypeScript, built to connect/dist)
 
 Everything that can be tested without a window lives in `galata-desk-core`:
 decoding the venue's answers, every figure's arithmetic, the refresh
-schedules, the connection bridge and the signature check. It runs on a Tokio
+schedules, the connection bridge, the signature check, and signing and
+sending order actions. It runs on a Tokio
 runtime the app owns, and hands the window snapshots over channels. A GPUI
 upgrade or compile failure cannot block its tests.
 
@@ -395,12 +493,38 @@ every interval, and each later success halves it back.
   history. The feed measures silence from the last message it received and
   reloads history when that is too long.
 
+### Order actions: one gate
+
+Amending and cancelling orders, closing positions and changing their
+take-profit and stop-loss are the only requests the app signs. They leave
+through one place, `trade::gate` in the core, which checks in order: no
+development endpoint override, mainnet trading allowed, a key saved, and that
+key an approved API wallet of the connected account. Only then is the key
+read from the Keychain, used to sign one action, and dropped. The window's
+disabled buttons repeat those checks for convenience; the gate is what
+enforces them.
+
+Hyperliquid authorises an action by recovering the signer from a signature
+over a hash of the action's bytes, so a wrong byte does not fail loudly: the
+venue just sees a wallet it does not know. The signing code is therefore
+pinned to vectors made with Hyperliquid's own Python SDK, and the `signing`
+example checks it against the live venue with a throwaway key that no account
+has approved.
+
 ### Staying inside the venue's limits
 
 Hyperliquid allows 1,200 request-weight a minute per IP address, shared with
 anything else on that address, such as galata-datawatch. Measured with a full
 40-market watchlist: 840 in the app's first minute, about 280 a minute once
 history has loaded, and no rate-limit answers.
+
+Funding history is on its own allowance. By the venue's documentation a
+request costs 20 plus 1 for every 20 rows, so a full page of 500 hours costs
+45 and the daily chart's five requests about 210. The allowance is three
+pages at once and then 120 a minute, which can add up to 255 to a first
+minute in which the Funding section is opened at once. That figure is
+worked out from the documented weights; it has not been measured in the
+running app.
 
 The test network lists hundreds of dexes where the main network has about a
 dozen. There the app looks for positions on every dex in batches, every ten
@@ -413,7 +537,7 @@ has a position or balance. The first load takes about ten seconds.
 
 ```sh
 cargo run -p galata-desk                 # the app
-cargo test --workspace                   # 183 tests, none needs a network
+cargo test --workspace                   # 332 tests, none needs a network
 cargo clippy --workspace --all-targets -- -D warnings
 
 # One account's portfolio from the live venue, in the terminal:
@@ -421,6 +545,9 @@ cargo run -p galata-desk-core --example portfolio -- 0x<address>
 
 # Live market tiles in the terminal (1h, 24h or 7d; default 24h):
 cargo run -p galata-desk-core --example markets -- --period 7d BTC xyz:NVDA
+
+# Check signing against the live venue. Uses a throwaway key; needs no account:
+cargo run -p galata-desk-core --example signing
 
 # One connection attempt, without the app:
 cargo run -p galata-desk-core --example connect
@@ -443,8 +570,8 @@ All are environment variables, and none is needed in normal use.
 | Variable | Effect |
 |---|---|
 | `GALATA_DESK_DIR` | Use this directory instead of the application data directory. |
-| `GALATA_DESK_INFO_URL` | Ask this info endpoint instead of Hyperliquid's. |
-| `GALATA_DESK_WS_URL` | Use this WebSocket endpoint for market data. |
+| `GALATA_DESK_INFO_URL` | Ask this info endpoint instead of Hyperliquid's. Makes the app read-only. |
+| `GALATA_DESK_WS_URL` | Use this WebSocket endpoint for market data. Makes the app read-only. |
 | `GALATA_DESK_SIZE` | Open the window at this size, for example `1100x700`. |
 
 ### Rendering the window to a file
@@ -461,8 +588,18 @@ GALATA_DESK_SHOT_STATE=section=markets,sort=gainers,select=xyz:NVDA \
   ./target/debug/galata-desk
 ```
 
-`GALATA_DESK_SHOT_STATE` sets the selections to open with. A plain
-`cargo run` afterwards rebuilds the binary without the feature.
+`GALATA_DESK_SHOT_STATE` sets the selections to open with. `funding=` shows a
+state of the Funding section with made-up positions, rates and history
+(`positions`, `watched`, `none`, `loading`, `part`, `failed`, `young`,
+`empty`), and `fres=` its chart's resolution (`1h`, `8h`, `D`). `orders=` shows a
+state of the Open orders tab (`confirm`, `amend`, `all`, `pending`, `partial`,
+`nokey` and others), and `positions=` one of the Positions tab (`market`,
+`limit`, `limit-bad`, `all`, `tpsl`, `tpsl-bad`, `pending`, `done`, `partial`,
+`unfilled`, `all-partial`, `tpsl-partial`, `unknown`, `nokey` and others) for
+the account's first position; a run with either uses a stand-in in place of the venue's
+exchange endpoint, and a `shot` build keeps its secrets in memory, so it can
+send nothing. A plain `cargo run` afterwards rebuilds the binary without the
+feature.
 
 ---
 
@@ -486,9 +623,14 @@ built it. Distributing it would need a real signing identity.
 
 ## Not built
 
-- **Trading.** No order entry and no transfers. An API key can be saved in
-  Settings, and nothing uses it yet.
-- **History tabs**: trade history, funding history, TWAP.
+- **Opening or adding to positions.** Resting orders can be amended and
+  cancelled, and positions closed and given a take-profit and stop-loss, all
+  reduce-only; there is no order entry, no reverse, no trailing stop and no
+  transfers.
+- **History tabs**: trade history, the account's own funding payments, TWAP.
+  The Funding chart is a market's rate, not what the account was paid.
+- **On the funding chart**: a readout under the pointer, zooming, and
+  charting a market that is neither held nor watched.
 - **Spot markets** in the Markets section, tiles sized by volume, and alerts.
 - **Windows and Linux.** GPUI runs there; this app has only been built and
   run on macOS.

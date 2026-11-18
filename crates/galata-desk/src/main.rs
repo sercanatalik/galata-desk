@@ -24,6 +24,11 @@ use gpui_kit::component::TitleBar;
 use gpui_kit::prelude::*;
 use gpui_kit::{App, Bounds, Global, WindowBounds, WindowOptions, px, size};
 
+/// The smallest the window may be, in points. Tall enough that the Markets
+/// panel and one whole row of tiles both fit beneath the toolbar and legend.
+pub const MIN_WINDOW_WIDTH: f32 = 1080.;
+pub const MIN_WINDOW_HEIGHT: f32 = 704.;
+
 /// What every screen shares: the runtime that does the I/O, and the app's
 /// directory on disk.
 pub struct Core {
@@ -35,6 +40,9 @@ pub struct Core {
     pub secrets: Arc<dyn Secrets>,
     /// Which of the venue's networks is shown. Chosen in settings.
     pub network: Network,
+    /// The user has allowed order actions on the main network. Chosen in
+    /// settings, off until then.
+    pub allow_mainnet_trading: bool,
     /// `GALATA_DESK_INFO_URL` points the app at another info endpoint, for
     /// development. It is used whatever the network.
     pub info_override: Option<String>,
@@ -70,6 +78,14 @@ impl Core {
     /// The addresses come from the development environment, not the network.
     pub fn overridden(&self) -> bool {
         self.endpoints().overridden
+    }
+
+    /// What is remembered across launches.
+    pub fn settings(&self) -> galata_desk_core::store::Settings {
+        galata_desk_core::store::Settings {
+            network: self.network,
+            allow_mainnet_trading: self.allow_mainnet_trading,
+        }
     }
 }
 
@@ -133,12 +149,13 @@ fn main() {
             #[cfg(target_os = "macos")]
             set_dock_icon();
             let store = store();
-            let network = store.settings().network;
+            let settings = store.settings();
             cx.set_global(Core {
                 runtime: Arc::new(runtime),
                 store,
                 secrets: secrets(),
-                network,
+                network: settings.network,
+                allow_mainnet_trading: settings.allow_mainnet_trading,
                 info_override: std::env::var("GALATA_DESK_INFO_URL").ok(),
                 ws_override: std::env::var("GALATA_DESK_WS_URL").ok(),
             });
@@ -157,7 +174,7 @@ fn main() {
             let quiet = cfg!(feature = "shot") && std::env::var_os("GALATA_DESK_SHOT").is_some();
             let options = WindowOptions {
                 window_bounds: Some(WindowBounds::Windowed(bounds)),
-                window_min_size: Some(size(px(1080.), px(680.))),
+                window_min_size: Some(size(px(MIN_WINDOW_WIDTH), px(MIN_WINDOW_HEIGHT))),
                 show: !quiet,
                 focus: !quiet,
                 ..TitleBar::window_options()

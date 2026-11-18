@@ -84,3 +84,14 @@ pub fn notice(text: impl Into<SharedString>) -> Div {
         .text_color(Palette::amber_text())
         .child(div().flex_1().child(text.into()))
 }
+
+/// A pencil: amend. From the Lucide set, as the kit's own icons are; the
+/// kit's default bundle does not carry this one.
+pub fn pencil_icon() -> gpui_kit::component::Icon {
+    gpui_kit::component::Icon::default().data(include_bytes!("../../../assets/icons/pencil.svg"))
+}
+
+/// A list with a cross: cancel all.
+pub fn list_cross_icon() -> gpui_kit::component::Icon {
+    gpui_kit::component::Icon::default().data(include_bytes!("../../../assets/icons/list-x.svg"))
+}

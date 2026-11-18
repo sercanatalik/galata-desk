@@ -1,0 +1,30 @@
+{
+ "universe": [
+  {
+   "szDecimals": 5,
+   "name": "BTC",
+   "maxLeverage": 40,
+   "marginTableId": 56
+  },
+  {
+   "szDecimals": 4,
+   "name": "ETH",
+   "maxLeverage": 25,
+   "marginTableId": 55
+  },
+  {
+   "szDecimals": 2,
+   "name": "SOL",
+   "maxLeverage": 20,
+   "marginTableId": 54
+  },
+  {
+   "szDecimals": 2,
+   "name": "HYPE",
+   "maxLeverage": 10,
+   "marginTableId": 52
+  }
+ ],
+ "marginTables": [],
+ "collateralToken": 0
+}

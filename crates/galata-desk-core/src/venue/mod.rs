@@ -231,6 +231,20 @@ impl<T: Transport> Info<T> {
             .await
     }
 
+    /// The perpetual markets of one dex, in the venue's order: a market's
+    /// place in the list is part of its asset number.
+    pub async fn perp_meta(&self, dex: &str) -> Result<PerpMeta, VenueError> {
+        self.ask("meta", with_dex(json!({ "type": "meta" }), dex))
+            .await
+    }
+
+    /// What `address` is to the venue: an account, an API wallet acting for
+    /// one, or nothing it knows.
+    pub async fn user_role(&self, address: &str) -> Result<UserRole, VenueError> {
+        self.ask("userRole", json!({ "type": "userRole", "user": address }))
+            .await
+    }
+
     /// The current hourly funding rate of every market on one dex, by the
     /// venue's coin name. `dex` is empty for the main dex.
     pub async fn funding_rates(&self, dex: &str) -> Result<HashMap<String, Decimal>, VenueError> {
@@ -268,6 +282,41 @@ impl<T: Transport> Info<T> {
         .await
     }
 
+    /// One market's hourly funding rates charged between `start_ms` and
+    /// `end_ms`, both included, oldest first. The venue returns at most 500
+    /// rows, the oldest in the range; nothing for a time before the market
+    /// was listed; and `null` for a market it does not know, which is read
+    /// here as nothing.
+    pub async fn funding_history(
+        &self,
+        coin: &str,
+        start_ms: u64,
+        end_ms: u64,
+    ) -> Result<Vec<WireFunding>, VenueError> {
+        let rows: Option<Vec<WireFunding>> = self
+            .ask(
+                "fundingHistory",
+                json!({ "type": "fundingHistory", "coin": coin, "startTime": start_ms, "endTime": end_ms }),
+            )
+            .await?;
+        Ok(rows.unwrap_or_default())
+    }
+
+    /// The account's fills from `start_ms` on, at most 2,000 in one answer.
+    /// The venue keeps only the account's 10,000 most recent fills, so a
+    /// start before those returns from the earliest it still has.
+    pub async fn user_fills_by_time(
+        &self,
+        user: &str,
+        start_ms: u64,
+    ) -> Result<Vec<UserFill>, VenueError> {
+        self.ask(
+            "userFillsByTime",
+            json!({ "type": "userFillsByTime", "user": user, "startTime": start_ms }),
+        )
+        .await
+    }
+
     /// Spot tokens and the pairs they trade in.
     pub async fn spot_meta(&self) -> Result<SpotMeta, VenueError> {
         self.ask("spotMeta", json!({ "type": "spotMeta" })).await
@@ -275,7 +324,31 @@ impl<T: Transport> Info<T> {
 
     /// Mid prices of the main dex and of spot pairs, by the venue's coin name.
     pub async fn all_mids(&self) -> Result<HashMap<String, Decimal>, VenueError> {
-        self.ask("allMids", json!({ "type": "allMids" })).await
+        self.all_mids_on("").await
+    }
+
+    /// Mid prices of one perpetuals dex: the main dex (with spot) for `""`.
+    /// A builder dex's are keyed `dex:COIN`, as the venue names them.
+    pub async fn all_mids_on(&self, dex: &str) -> Result<HashMap<String, Decimal>, VenueError> {
+        self.ask("allMids", with_dex(json!({ "type": "allMids" }), dex))
+            .await
+    }
+
+    /// The mid price of `coin` on `dex`, or `None` when the venue lists no
+    /// mid for it.
+    pub async fn mid(&self, dex: &str, coin: &str) -> Result<Option<Decimal>, VenueError> {
+        let mids = self.all_mids_on(dex).await?;
+        Ok(mids.get(&mid_key(dex, coin)).copied())
+    }
+}
+
+/// How `allMids` names a market: `BTC` on the main dex, `xyz:NVDA` on a
+/// builder dex.
+pub fn mid_key(dex: &str, coin: &str) -> String {
+    if dex.is_empty() {
+        coin.to_string()
+    } else {
+        format!("{dex}:{coin}")
     }
 }
 

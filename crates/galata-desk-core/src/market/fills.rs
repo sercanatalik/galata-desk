@@ -28,23 +28,64 @@ pub struct Fill {
     /// Milliseconds since the epoch.
     pub time_ms: u64,
     /// PNL realised by the fill, as the venue reports it; zero for a fill
-    /// that opened or added to a position.
+    /// that opened or added to a position. Before the fee.
     pub realised: Decimal,
+    /// The fee the fill paid; negative for a rebate.
+    pub fee: Decimal,
+    /// The venue's trade id, which identifies the fill across answers.
+    pub id: u64,
+}
+
+impl From<crate::venue::UserFill> for Fill {
+    fn from(f: crate::venue::UserFill) -> Self {
+        Fill {
+            coin: f.coin,
+            side: match f.side {
+                crate::venue::Side::Buy => FillSide::Bought,
+                crate::venue::Side::Sell => FillSide::Sold,
+            },
+            price: f.px,
+            size: f.sz,
+            time_ms: f.time,
+            realised: f.closed_pnl,
+            fee: f.fee,
+            id: f.tid,
+        }
+    }
 }
 
 /// The account's latest fills, across all markets.
 #[derive(Debug, Clone, PartialEq, Default)]
 pub struct Fills {
     pub rows: Vec<Fill>,
-    /// The venue returned as many as it gives at once, so older fills may
-    /// exist that are not here.
+    /// Older fills may exist that are not here: the venue returned as many
+    /// as it gives at once, or as many as it keeps.
     pub capped: bool,
+    /// The walk back through the account's history has finished, so sums
+    /// over a period can be trusted as far as `capped` allows.
+    pub walked: bool,
 }
 
 impl Fills {
+    /// One answer's fills, taken as the whole history unless the answer was
+    /// cut short.
     pub fn new(rows: Vec<Fill>) -> Self {
         let capped = rows.len() >= VENUE_CAP;
-        Self { rows, capped }
+        Self {
+            rows,
+            capped,
+            walked: true,
+        }
+    }
+
+    /// When older fills may exist, the earliest held: a period starting
+    /// before it is only partly counted.
+    pub fn reaches_from(&self) -> Option<u64> {
+        if self.capped {
+            self.rows.iter().map(|f| f.time_ms).min()
+        } else {
+            None
+        }
     }
 }
 
@@ -186,6 +227,8 @@ mod tests {
             size: d(size),
             time_ms: at_ms,
             realised: d(realised),
+            fee: Decimal::ZERO,
+            id: at_ms,
         }
     }
 
@@ -315,6 +358,7 @@ mod tests {
         let capped = Fills {
             rows: rows.clone(),
             capped: true,
+            walked: true,
         };
         assert_eq!(shown_since(&capped, T0), Some(T0 + 5 * M15));
         // Cut short, but the fills reach back past the chart's start.
@@ -323,6 +367,7 @@ mod tests {
         let all = Fills {
             rows,
             capped: false,
+            walked: true,
         };
         assert_eq!(shown_since(&all, T0), None);
         assert_eq!(shown_since(&Fills::default(), T0), None);

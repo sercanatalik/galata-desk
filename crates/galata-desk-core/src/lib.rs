@@ -14,5 +14,6 @@ pub mod model;
 pub mod network;
 pub mod secrets;
 pub mod store;
+pub mod trade;
 pub mod venue;
 pub use rust_decimal;

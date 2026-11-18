@@ -3,7 +3,7 @@
 
 use galata_desk_core::connect::{Attempt, AttemptEvent};
 use galata_desk_core::network::Network;
-use galata_desk_core::store::{Account, Settings as StoredSettings};
+use galata_desk_core::store::Account;
 use gpui_kit::component::button::{Button, ButtonVariants};
 use gpui_kit::component::tab::TabBar;
 use gpui_kit::component::{ActiveTheme, Sizable, TitleBar, h_flex, v_flex};
@@ -12,6 +12,7 @@ use gpui_kit::{Context, Entity, Subscription, TestSupportExt, Window, div};
 
 use crate::Core;
 use crate::connect::{self, ConnectState};
+use crate::funding::Funding;
 use crate::markets::Markets;
 use crate::portfolio::{Portfolio, PortfolioEvent};
 use crate::settings::{Settings, SettingsEvent};
@@ -32,6 +33,9 @@ enum Screen {
     Connected {
         section: Section,
         portfolio: Entity<Portfolio>,
+        /// Created with the portfolio: it asks the venue nothing until a row
+        /// is chosen, and keeps its choice while another section is shown.
+        funding: Entity<Funding>,
         /// Created, and its stream opened, the first time Markets is chosen.
         markets: Option<Entity<Markets>>,
         _events: [Subscription; 2],
@@ -76,6 +80,7 @@ impl Desk {
         let view = cx.new(|cx| Settings::new(window, cx));
         let events = cx.subscribe_in(&view, window, |this, _, event, window, cx| match event {
             SettingsEvent::Network(network) => this.set_network(*network, window, cx),
+            SettingsEvent::MainnetTrading(allowed) => this.set_mainnet_trading(*allowed, cx),
             SettingsEvent::Done => this.close_settings(cx),
         });
         self.settings = Some((view, events));
@@ -84,7 +89,25 @@ impl Desk {
 
     pub fn close_settings(&mut self, cx: &mut Context<Self>) {
         self.settings = None;
+        // A key may have been saved or removed while settings was open.
+        self.reconsider_trading(cx);
         cx.notify();
+    }
+
+    /// Allow or forbid order actions on the main network, and remember it.
+    fn set_mainnet_trading(&mut self, allowed: bool, cx: &mut Context<Self>) {
+        cx.global_mut::<Core>().allow_mainnet_trading = allowed;
+        let core = Core::get(cx);
+        let _ = core.store.save_settings(&core.settings());
+        self.reconsider_trading(cx);
+        cx.notify();
+    }
+
+    /// Have the portfolio look again at whether orders can be acted on.
+    fn reconsider_trading(&mut self, cx: &mut Context<Self>) {
+        if let Screen::Connected { portfolio, .. } = &self.screen {
+            portfolio.update(cx, |view, cx| view.reconsider_trading(cx));
+        }
     }
 
     /// Show another network from now on: remember the choice, and build the
@@ -96,9 +119,8 @@ impl Desk {
         }
         cx.global_mut::<Core>().network = network;
         // A choice that could not be saved still applies until the app quits.
-        let _ = Core::get(cx)
-            .store
-            .save_settings(&StoredSettings { network });
+        let core = Core::get(cx);
+        let _ = core.store.save_settings(&core.settings());
         if matches!(self.screen, Screen::Connected { .. })
             && let Some(account) = Core::get(cx).store.account()
         {
@@ -113,16 +135,19 @@ impl Desk {
 
     fn portfolio(account: Account, window: &mut Window, cx: &mut Context<Self>) -> Screen {
         let view = cx.new(|cx| Portfolio::new(account.address, window, cx));
-        let events = cx.subscribe(&view, |this, _, event, cx| match event {
+        let events = cx.subscribe_in(&view, window, |this, _, event, window, cx| match event {
             PortfolioEvent::Disconnect => this.disconnect(cx),
+            PortfolioEvent::OpenSettings => this.open_settings(window, cx),
         });
         // The window draws the portfolio's freshness and footer itself, in
         // every section, so it redraws when the portfolio changes.
         let changes = cx.observe(&view, |_, _, cx| cx.notify());
+        let funding = cx.new(|cx| Funding::new(view.clone(), cx));
         #[allow(unused_mut)]
         let mut screen = Screen::Connected {
             section: Section::Portfolio,
             portfolio: view,
+            funding,
             markets: None,
             _events: [events, changes],
         };
@@ -150,6 +175,7 @@ impl Desk {
         if let Screen::Connected {
             section,
             portfolio,
+            funding,
             markets,
             ..
         } = screen
@@ -157,6 +183,11 @@ impl Desk {
             if to == Section::Markets && markets.is_none() {
                 let portfolio = portfolio.clone();
                 *markets = Some(cx.new(|cx| Markets::new(portfolio, window, cx)));
+            }
+            // The watchlist may have changed in Markets since Funding was
+            // last shown.
+            if to == Section::Funding {
+                funding.update(cx, |view, cx| view.refresh_watchlist(cx));
             }
             *section = to;
         }
@@ -352,6 +383,7 @@ impl Render for Desk {
             Screen::Connected {
                 section,
                 portfolio,
+                funding,
                 markets,
                 ..
             } => {
@@ -380,10 +412,10 @@ impl Render for Desk {
                         markets.update(cx, |view, cx| view.status(cx)),
                         markets.clone().into_any_element(),
                     ),
-                    // Funding is drawn from what the Portfolio view holds.
+                    // Funding's positions and rates are the portfolio's.
                     (Section::Funding, _) => (
                         portfolio.update(cx, |view, cx| view.freshness(cx)),
-                        portfolio.read(cx).funding(),
+                        funding.clone().into_any_element(),
                     ),
                     _ => (
                         portfolio.update(cx, |view, cx| view.freshness(cx)),
@@ -435,6 +467,14 @@ impl Desk {
     pub fn portfolio_view(&self) -> Option<Entity<Portfolio>> {
         match &self.screen {
             Screen::Connected { portfolio, .. } => Some(portfolio.clone()),
+            Screen::Connect(_) => None,
+        }
+    }
+
+    /// The Funding view, when an account is connected.
+    pub fn funding_view(&self) -> Option<Entity<Funding>> {
+        match &self.screen {
+            Screen::Connected { funding, .. } => Some(funding.clone()),
             Screen::Connect(_) => None,
         }
     }

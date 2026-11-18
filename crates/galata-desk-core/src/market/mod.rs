@@ -3,8 +3,10 @@
 
 pub mod candles;
 pub mod feed;
+pub mod fill_history;
 pub mod fills;
 pub mod history;
+pub mod pnl;
 pub mod sort;
 pub mod watchlist;
 pub mod ws;

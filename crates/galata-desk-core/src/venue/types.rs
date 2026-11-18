@@ -106,6 +106,15 @@ pub struct OpenOrder {
     pub reduce_only: bool,
     pub is_trigger: bool,
     pub trigger_condition: String,
+    /// The trigger price; `0.0` for an order that is not a trigger order.
+    pub trigger_px: Decimal,
+    /// A position's take-profit or stop-loss, which covers the whole
+    /// position whatever its size. Listed with a size of `0.0`.
+    #[serde(default)]
+    pub is_position_tpsl: bool,
+    /// Time in force: `Gtc`, `Alo`. Absent for trigger orders.
+    #[serde(default)]
+    pub tif: Option<String>,
 }
 
 /// One fill of the account's, as the venue reports it.
@@ -120,7 +129,13 @@ pub struct UserFill {
     /// Milliseconds since the epoch.
     pub time: u64,
     /// PNL the fill realised; zero when it opened or added to a position.
+    /// It does not include the fee.
     pub closed_pnl: Decimal,
+    /// The fee the fill paid, in `feeToken` (USDC for perpetuals); negative
+    /// for a rebate.
+    pub fee: Decimal,
+    /// The venue's trade id: the same fill keeps it across answers.
+    pub tid: u64,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
@@ -197,9 +212,12 @@ pub struct SpotMeta {
 }
 
 #[derive(Debug, Clone, PartialEq, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct SpotToken {
     pub name: String,
     pub index: u32,
+    /// Decimal places a size in this token may have.
+    pub sz_decimals: u32,
 }
 
 #[derive(Debug, Clone, PartialEq, Deserialize)]
@@ -208,6 +226,8 @@ pub struct SpotPair {
     pub name: String,
     /// `[base, quote]` token indexes.
     pub tokens: [u32; 2],
+    /// The pair's number among spot pairs; its asset number is this plus 10,000.
+    pub index: u32,
 }
 
 /// The perpetual markets of one dex.
@@ -221,6 +241,8 @@ pub struct PerpMeta {
 pub struct PerpMarket {
     /// The venue's coin name: `BTC`, `xyz:NVDA`.
     pub name: String,
+    /// Decimal places a size in this market may have.
+    pub sz_decimals: u32,
     pub max_leverage: u32,
     /// Present and true for a market the venue has delisted.
     #[serde(default)]
@@ -244,6 +266,16 @@ pub struct WireCandle {
     pub c: Decimal,
 }
 
+/// One hour's funding for one market, as the venue's history reports it.
+#[derive(Debug, Clone, PartialEq, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct WireFunding {
+    /// When the rate was charged: a few tens of milliseconds past the hour.
+    pub time: u64,
+    /// The hourly rate, as a fraction. Positive: longs paid shorts.
+    pub funding_rate: Decimal,
+}
+
 /// A market's live figures, as the stream sends them.
 #[derive(Debug, Clone, PartialEq, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -260,4 +292,20 @@ pub struct AssetCtx {
     pub open_interest: Decimal,
     /// 24-hour volume in USD.
     pub day_ntl_vlm: Decimal,
+}
+
+/// What an address is to the venue.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+pub struct UserRole {
+    /// `user`, `agent`, `vault`, `subAccount` or `missing`.
+    pub role: String,
+    #[serde(default)]
+    pub data: Option<UserRoleData>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+pub struct UserRoleData {
+    /// For an agent (an API wallet): the account it acts for.
+    #[serde(default)]
+    pub user: Option<String>,
 }

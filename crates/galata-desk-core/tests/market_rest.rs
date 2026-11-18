@@ -76,3 +76,71 @@ fn a_market_missing_its_leverage_is_an_error() {
         decode::<Vec<PerpMeta>>("allPerpMetas", &serde_json::to_vec(&value).unwrap()).unwrap_err();
     assert!(matches!(error, VenueError::Shape { path, .. } if path == "[0].universe[0]"));
 }
+
+/// Answers a funding history query from the fixture named after its coin,
+/// or with fixed bytes, and records what was asked.
+#[derive(Clone, Default)]
+struct Funding {
+    answer: Option<&'static str>,
+    asked: std::sync::Arc<std::sync::Mutex<Vec<Value>>>,
+}
+
+impl Transport for Funding {
+    async fn post(&self, body: Value) -> Result<Vec<u8>, VenueError> {
+        let coin = body["coin"].as_str().unwrap().replace(':', "_");
+        self.asked.lock().unwrap().push(body);
+        Ok(match self.answer {
+            Some(text) => text.as_bytes().to_vec(),
+            None => fixture(&format!("fundingHistory_{coin}")),
+        })
+    }
+}
+
+#[tokio::test]
+async fn funding_history_decodes_for_a_main_and_a_builder_dex_market() {
+    let transport = Funding::default();
+    let info = Info::new(transport.clone());
+    for coin in ["BTC", "xyz:NVDA"] {
+        let rows = info.funding_history(coin, 1, 2).await.unwrap();
+        assert_eq!(rows.len(), 5, "{coin}");
+        assert!(
+            rows.windows(2).all(|w| w[1].time - w[0].time > 3_500_000),
+            "{coin}: hourly, oldest first"
+        );
+        // The venue stamps each row just past the hour.
+        assert!(rows.iter().all(|r| r.time % 3_600_000 < 1_000), "{coin}");
+        assert!(
+            rows.iter()
+                .all(|r| r.funding_rate.abs() < "0.01".parse().unwrap()),
+            "{coin}: an hourly rate is small"
+        );
+    }
+    let asked = transport.asked.lock().unwrap();
+    assert_eq!(asked[1]["type"], "fundingHistory");
+    assert_eq!(asked[1]["coin"], "xyz:NVDA");
+    assert_eq!(asked[1]["startTime"], 1);
+    assert_eq!(asked[1]["endTime"], 2);
+}
+
+#[tokio::test]
+async fn an_empty_funding_history_and_an_unknown_market_are_both_nothing() {
+    for answer in ["[]", "null"] {
+        let info = Info::new(Funding {
+            answer: Some(answer),
+            ..Funding::default()
+        });
+        assert!(info.funding_history("BTC", 1, 2).await.unwrap().is_empty());
+    }
+}
+
+#[test]
+fn a_funding_row_missing_its_rate_is_an_error_that_names_its_path() {
+    let mut value: Value = serde_json::from_slice(&fixture("fundingHistory_BTC")).unwrap();
+    value[2].as_object_mut().unwrap().remove("fundingRate");
+    let error = decode::<Vec<WireFunding>>("fundingHistory", &serde_json::to_vec(&value).unwrap())
+        .unwrap_err();
+    assert!(
+        matches!(&error, VenueError::Shape { query, path, .. } if *query == "fundingHistory" && path == "[2]"),
+        "{error:?}"
+    );
+}
