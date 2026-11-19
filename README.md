@@ -18,9 +18,9 @@ You prove you own an address by signing a message in your browser wallet.
 From then on, the app reads public data. It signs nothing unless you save an
 API key and confirm an action.
 
-> **Status: 0.x, macOS only.** It can amend and cancel orders, close
-> positions, and set their take-profit and stop-loss. It does not open or add
-> to positions.
+> **Status: 0.x, macOS only.** It can place orders from the Markets panel,
+> amend and cancel them, close positions, and set their take-profit and
+> stop-loss.
 
 Galata is a Rust trading framework. Its siblings record market data
 ([galata-datawatch](https://github.com/sercanatalik/galata-datawatch)), watch
@@ -92,6 +92,24 @@ A heatmap of the markets you watch, up to 40.
 - The current rates of the markets you watch.
 - A chart of any of those markets' funding rate over 7, 30 or 90 days.
 
+### History
+
+What the account did, over 24 hours, 7 days, 30 days or all time, with
+totals for what is listed and **Export CSV**.
+
+- **Trades**: every fill, with its direction, fee, maker or taker, and
+  closed PNL; or each order's fills together.
+- **Orders**: every order once, at its latest status: open, filled,
+  cancelled, triggered or rejected, with the venue's reason on hover.
+- **Funding payments**: paid and received per market, or every payment.
+- **Deposits and withdrawals**: deposits, withdrawals, transfers between
+  spot and perpetuals, sends, and vault deposits and withdrawals, each with
+  its transaction hash to copy.
+
+Hyperliquid keeps an account's latest 10,000 fills and 2,000 order updates.
+When the period reaches further back than that, the tab says from when its
+rows are shown.
+
 ### Footer
 
 Equity, unrealised and 24-hour PNL, the number of positions and the margin
@@ -108,6 +126,32 @@ Hyperliquid stops answering, the last figures stay on screen with their time.
 Trading needs an API key: the private key of an API wallet you created on
 Hyperliquid, saved in **Settings**. Nothing is sent until you confirm, and
 each confirmation shows the network and the wallet that will sign.
+
+**Order ticket (Markets)**
+
+**Buy / Long** and **Sell / Short** under the selected market's details open
+the order ticket. It is the one control in the app that can open or add to a
+position.
+
+- **Market** fills at once at no worse than 5% from the mid, or not at all;
+  **Limit** rests at your price (**Mid** fills in the mid).
+- Size is entered in **USD** by default, or in the coin. Dollars become a
+  coin size rounded down to the market's size step, and that coin size is
+  what is sent. 25/50/75/100% fill in a share of what Hyperliquid says you
+  can trade on that side.
+- **Quick** buttons ($5k, $10k and $25k unless changed in Settings) fill in
+  that many dollars and switch the size to USD. A Quick size is the order's
+  value, not its margin. The button stays highlighted while the size matches
+  it. A size above what you can trade on that side is greyed out, and a line
+  says the most you can trade.
+- **Reduce only**, and an optional **take-profit / stop-loss** sent with the
+  order and sized to it.
+- The ticket shows what you can trade, your position, the leverage (set on
+  Hyperliquid, not here), the order's value, margin and fee. It checks the
+  size step, price precision, the $10 minimum, the maximum for that side and
+  the TP/SL sides before sending. One line says exactly what will be sent.
+- After you confirm, the ticket shows Hyperliquid's answer: filled with its
+  average price, resting, refused with the reason, or unknown.
 
 **Open orders tab**
 
@@ -173,9 +217,15 @@ address has no portfolio of its own.
   `dev.galata.desk`. The page shows the wallet address the key belongs to,
   never the key itself.
 - **Allow trading on mainnet**: off by default.
+- **Quick order sizes**: one to four whole-dollar amounts, each at least $10,
+  for the ticket's Quick buttons. The same on both networks. The list is saved
+  as you type once every amount is valid. Until then the field says what is
+  wrong and the last valid list stays in use. **Reset** restores $5k, $10k
+  and $25k.
 
 Other state is in `~/Library/Application Support/galata-desk/`:
-`account.json` (the connected address), `watchlist.json`, `settings.json`, and
+`account.json` (the connected address), `watchlist.json`, `settings.json` (network,
+mainnet switch, quick sizes), and
 an optional `config.toml`. No key or seed phrase is ever written there.
 
 **Phone wallets** need a free WalletConnect project id from
@@ -193,7 +243,7 @@ macOS may ask for your password before the app can read a saved key. Choose
 
 ```sh
 cargo run -p galata-desk                                # the app
-cargo test --workspace                                  # 481 tests, no network needed
+cargo test --workspace                                  # 578 tests, no network needed
 cargo clippy --workspace --all-targets -- -D warnings
 
 cargo run -p galata-desk-core --example portfolio -- 0x<address>   # a portfolio in the terminal
@@ -214,7 +264,11 @@ run against recorded venue answers and an in-process WebSocket server. The
 app's tests click through a headless window.
 
 The app refreshes holdings every 5 seconds, orders every 10 and history every
-60, and backs off when Hyperliquid asks it to. Market data comes over one
+60, and backs off when Hyperliquid asks it to. The History section asks for
+nothing until a tab is opened: then for its rows (`historicalOrders`,
+`userFunding` and `userNonFundingLedgerUpdates`, the last two a page at a
+time), and every 60 seconds for newer ones while the tab is shown. Its trades
+are the fills the app already holds. Market data comes over one
 WebSocket connection. A full 40-market watchlist stays well inside the
 venue's request budget.
 
@@ -240,10 +294,13 @@ GALATA_DESK_SHOT_STATE=section=markets,select=xyz:NVDA ./target/debug/galata-des
 
 `GALATA_DESK_SHOT_STATE` picks the screen and state to render:
 
-- `section=`, `select=`, `tab=` choose what is shown.
-- `funding=`, `orders=` and `positions=` stage a dialog or a result. For
-  example, `positions=market` opens the market-close dialog and
-  `orders=amend` opens the amend form.
+- `section=`, `select=`, `tab=` choose what is shown. In History,
+  `htab=orders|funding|transfers`, `hgroup=0`, `hview=every`, `hperiod=all`
+  choose its tab and views, and `hstale=1` shows its orders as not current.
+- `funding=`, `orders=`, `positions=` and `ticket=` stage a dialog or a
+  result. For example, `positions=market` opens the market-close dialog,
+  `orders=amend` opens the amend form, and `ticket=tpsl` (with
+  `section=markets`) opens the order ticket with a take-profit and stop-loss.
 
 A `shot` build keeps no keys and uses a stand-in for the exchange, so it can
 send nothing.
@@ -264,9 +321,10 @@ built it.
 
 ## Not built yet
 
-- Opening or adding to positions, reversing them, trailing stops, and
-  transfers.
-- Trade history, the account's own funding payments, and TWAP.
+- Changing leverage or margin mode, stop and TWAP entries, reversing a
+  position in one step, trailing stops, and transfers.
+- In History: interest, TWAP and Chase histories, and links to a block
+  explorer.
 - Spot markets in the Markets section, and alerts.
 - Windows and Linux.
 - Smart-contract wallets, which cannot prove ownership by signature.

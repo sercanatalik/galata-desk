@@ -1,0 +1,161 @@
+[
+ {
+  "time": 1692910113661,
+  "hash": "0xce15544a6633006c1fdc869a601313d5b8314e7a6b58b9c288cadacd5d8d87ba",
+  "delta": {
+   "type": "deposit",
+   "usdc": "100.0"
+  }
+ },
+ {
+  "time": 1692939322922,
+  "hash": "0xe0ffb7b0e3b917b44c8304043747c701a3009e3007126e0fc442336502f1253c",
+  "delta": {
+   "type": "vaultDeposit",
+   "vault": "0x67c9913781023f46ab7881da0ab2a453db56862c",
+   "usdc": "75.0"
+  }
+ },
+ {
+  "time": 1693264482959,
+  "hash": "0xcf132c3855591c45cee104044d5d8b010200ba98af207395fa2afac5ce4611f7",
+  "delta": {
+   "type": "vaultWithdraw",
+   "vault": "0x67c9913781023f46ab7881da0ab2a453db56862c",
+   "user": "0xbc8819c1821bc52b5d30d2dd52f0cb6110510005",
+   "requestedUsd": "75.0",
+   "commission": "0.0",
+   "closingCost": "0.0",
+   "basis": "75.0",
+   "netWithdrawnUsd": "75.0"
+  }
+ },
+ {
+  "time": 1693445297598,
+  "hash": "0xf72717d1aa106702cfb4040459ad87011000fbfd19db13fb2f8cc45ab2d3799f",
+  "delta": {
+   "type": "internalTransfer",
+   "usdc": "0.010488",
+   "user": "0x995e92d4bb508276f839f1f191df0fbddb8582ba",
+   "destination": "0xbc8819c1821bc52b5d30d2dd52f0cb6110510005",
+   "fee": "0.0"
+  }
+ },
+ {
+  "time": 1694177972346,
+  "hash": "0xefdd1a617a1a17e32df304048bb466010600e806b4d59306e9d3f7bdea05b73d",
+  "delta": {
+   "type": "vaultCreate",
+   "vault": "0x80f8e36e4e38ac6e69b5ee7eabeea8b07c82be08",
+   "usdc": "170.0",
+   "fee": "0.0"
+  }
+ },
+ {
+  "time": 1694311744812,
+  "hash": "0x6e04121cd002065a92b388b5ff1e621c034078b5a4a5065dc0c2daabd46854c7",
+  "delta": {
+   "type": "withdraw",
+   "usdc": "509.539145",
+   "nonce": 0,
+   "fee": "0.0"
+  }
+ },
+ {
+  "time": 1695160513549,
+  "hash": "0xa94185ce9de5d1f0d44a0404cdb3cb010c00b163f72b07a260c47faa3671ac6e",
+  "delta": {
+   "type": "vaultDistribution",
+   "vault": "0x80f8e36e4e38ac6e69b5ee7eabeea8b07c82be08",
+   "usdc": "104.52529"
+  }
+ },
+ {
+  "time": 1713242668600,
+  "hash": "0xcd1a7d5328cf46316fa704087f30890202a6002d4bbbd0ec755d1acbe6961d5e",
+  "delta": {
+   "type": "spotGenesis",
+   "token": "PURR",
+   "amount": "66926.0"
+  }
+ },
+ {
+  "time": 1713319159644,
+  "hash": "0x50d50065f56049f464c70408823f75012a00321e799c194c9c60e8ceda2ddcb7",
+  "delta": {
+   "type": "accountClassTransfer",
+   "usdc": "4564.005983",
+   "toPerp": true
+  }
+ },
+ {
+  "time": 1719265852258,
+  "hash": "0xbb176eebb15fac223bc8040c3fe65c012d0024aca74628bd90aa8d6a42d1b294",
+  "delta": {
+   "type": "spotTransfer",
+   "token": "SCHIZO",
+   "amount": "139.0",
+   "usdcValue": "212.4059",
+   "user": "0xe2a0cc663acfe5d7a9cb82a743383297597a8ff3",
+   "destination": "0xbc8819c1821bc52b5d30d2dd52f0cb6110510005",
+   "fee": "0.0",
+   "nativeTokenFee": "0.0",
+   "nonce": null,
+   "feeToken": ""
+  }
+ },
+ {
+  "time": 1734067210629,
+  "hash": "0x07bb2c0c1815d933235104191b48f3013000c7eab67267caf02aead19fbc2b5c",
+  "delta": {
+   "type": "subAccountTransfer",
+   "usdc": "1000.0",
+   "user": "0xbc8819c1821bc52b5d30d2dd52f0cb6110510005",
+   "destination": "0x3a4110e930d10050d323ededb3eb99d65403ccc2"
+  }
+ },
+ {
+  "time": 1754624438052,
+  "hash": "0x0000000000000000000000000000000000000000000000000000000000000000",
+  "delta": {
+   "type": "cStakingTransfer",
+   "token": "HYPE",
+   "amount": "9.1656897",
+   "isDeposit": false
+  }
+ },
+ {
+  "time": 1760110313439,
+  "hash": "0xbc4e499e8a554fbebdc8042d368762015b00618425586e906016f4f1495929a9",
+  "delta": {
+   "type": "liquidation",
+   "liquidatedNtlPos": "1580.09305",
+   "accountValue": "-72.694685",
+   "leverageType": "Isolated",
+   "liquidatedPositions": [
+    {
+     "coin": "WLFI",
+     "szi": "12427.0"
+    }
+   ]
+  }
+ },
+ {
+  "time": 1763194321526,
+  "hash": "0x1787c259201c71fe1901042f84120b02010a003ebb1f90d0bb506dabdf104be8",
+  "delta": {
+   "type": "send",
+   "user": "0xbc8819c1821bc52b5d30d2dd52f0cb6110510005",
+   "destination": "0x200000000000000000000000000000000000012b",
+   "sourceDex": "spot",
+   "destinationDex": "spot",
+   "token": "UPUMP",
+   "amount": "796072.37147",
+   "usdcValue": "2875.731834",
+   "fee": "0.0",
+   "nativeTokenFee": "0.00002",
+   "nonce": 1763194292832,
+   "feeToken": ""
+  }
+ }
+]

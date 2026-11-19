@@ -177,6 +177,7 @@ mod tests {
             realised: Decimal::ZERO,
             fee: Decimal::ZERO,
             id,
+            ..Fill::blank()
         }
     }
 

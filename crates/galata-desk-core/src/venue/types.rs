@@ -117,6 +117,312 @@ pub struct OpenOrder {
     pub tif: Option<String>,
 }
 
+/// One change of status of one of the account's orders. The venue lists a
+/// row for each change, newest first, so an order that rested and then
+/// filled appears twice.
+#[derive(Debug, Clone, PartialEq, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct HistoricalOrder {
+    pub order: OpenOrder,
+    /// As the venue words it: `open`, `filled`, `canceled`, `triggered`,
+    /// `reduceOnlyCanceled`, `badAloPxRejected`, and others. Kept as text so
+    /// a status this build has not met still decodes.
+    pub status: String,
+    /// Milliseconds since the epoch.
+    pub status_timestamp: u64,
+}
+
+/// One funding payment of the account's, as the venue reports it. Older
+/// payments come summed by day: `n_samples` says how many hourly payments
+/// a row stands for.
+#[derive(Debug, Clone, PartialEq, Deserialize)]
+pub struct UserFundingRow {
+    /// Milliseconds since the epoch: the hour, or for a summed row the day.
+    pub time: u64,
+    pub delta: FundingDelta,
+}
+
+#[derive(Debug, Clone, PartialEq, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct FundingDelta {
+    /// The venue's coin name: `BTC`, `xyz:NVDA`.
+    pub coin: String,
+    /// The payment in USDC: positive when the position received funding.
+    pub usdc: Decimal,
+    /// The position's signed size when it was paid: negative is short.
+    pub szi: Decimal,
+    /// The hourly rate, averaged over `n_samples` hours for a summed row.
+    pub funding_rate: Decimal,
+    /// How many hourly payments the row stands for. The venue sends `null`
+    /// for an hourly row, and older answers leave the field out: both are 1.
+    #[serde(default = "one", deserialize_with = "one_if_null")]
+    pub n_samples: u32,
+}
+
+fn one() -> u32 {
+    1
+}
+
+fn one_if_null<'de, D: serde::Deserializer<'de>>(de: D) -> Result<u32, D::Error> {
+    Ok(Option::<u32>::deserialize(de)?.unwrap_or(1))
+}
+
+/// One movement of the account's money that is not funding: a deposit, a
+/// withdrawal, a transfer, a vault deposit, and others.
+#[derive(Debug, Clone, PartialEq, Deserialize)]
+pub struct LedgerRow {
+    /// Milliseconds since the epoch.
+    pub time: u64,
+    /// The transaction it was settled in.
+    pub hash: String,
+    pub delta: LedgerDelta,
+}
+
+/// What a ledger row did, by the venue's `type`. A type this build does not
+/// read is kept as `Other`, with its name and fields, so that it is still
+/// listed.
+#[derive(Debug, Clone, PartialEq)]
+pub enum LedgerDelta {
+    /// Bridged in. The venue reports no fee.
+    Deposit {
+        usdc: Decimal,
+    },
+    /// Bridged out.
+    Withdraw {
+        usdc: Decimal,
+        fee: Decimal,
+    },
+    /// Between the account's spot and perpetuals balances.
+    AccountClassTransfer {
+        usdc: Decimal,
+        to_perp: bool,
+    },
+    /// USDC from `user` to `destination`, on the perpetuals side.
+    InternalTransfer {
+        usdc: Decimal,
+        user: String,
+        destination: String,
+        fee: Decimal,
+    },
+    /// USDC between an account and one of its sub-accounts.
+    SubAccountTransfer {
+        usdc: Decimal,
+        user: String,
+        destination: String,
+    },
+    /// A token from `user` to `destination`, possibly between dexes.
+    Send {
+        user: String,
+        destination: String,
+        source_dex: String,
+        destination_dex: String,
+        token: String,
+        amount: Decimal,
+        usdc_value: Decimal,
+        fee: Decimal,
+    },
+    /// A spot token from `user` to `destination`.
+    SpotTransfer {
+        user: String,
+        destination: String,
+        token: String,
+        amount: Decimal,
+        usdc_value: Decimal,
+        fee: Decimal,
+    },
+    VaultCreate {
+        vault: String,
+        usdc: Decimal,
+        fee: Decimal,
+    },
+    VaultDeposit {
+        vault: String,
+        usdc: Decimal,
+    },
+    /// `net_withdrawn_usd` is what reached the account, after the leader's
+    /// commission and the cost of closing positions.
+    VaultWithdraw {
+        vault: String,
+        requested_usd: Decimal,
+        net_withdrawn_usd: Decimal,
+    },
+    VaultDistribution {
+        vault: String,
+        usdc: Decimal,
+    },
+    Other {
+        kind: String,
+        fields: serde_json::Value,
+    },
+}
+
+impl<'de> Deserialize<'de> for LedgerDelta {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        #[derive(Deserialize)]
+        #[serde(
+            tag = "type",
+            rename_all = "camelCase",
+            rename_all_fields = "camelCase"
+        )]
+        enum Known {
+            Deposit {
+                usdc: Decimal,
+            },
+            Withdraw {
+                usdc: Decimal,
+                #[serde(default)]
+                fee: Decimal,
+            },
+            AccountClassTransfer {
+                usdc: Decimal,
+                to_perp: bool,
+            },
+            InternalTransfer {
+                usdc: Decimal,
+                user: String,
+                destination: String,
+                #[serde(default)]
+                fee: Decimal,
+            },
+            SubAccountTransfer {
+                usdc: Decimal,
+                user: String,
+                destination: String,
+            },
+            Send {
+                user: String,
+                destination: String,
+                #[serde(default)]
+                source_dex: String,
+                #[serde(default)]
+                destination_dex: String,
+                token: String,
+                amount: Decimal,
+                usdc_value: Decimal,
+                #[serde(default)]
+                fee: Decimal,
+            },
+            SpotTransfer {
+                user: String,
+                destination: String,
+                token: String,
+                amount: Decimal,
+                usdc_value: Decimal,
+                #[serde(default)]
+                fee: Decimal,
+            },
+            VaultCreate {
+                vault: String,
+                usdc: Decimal,
+                #[serde(default)]
+                fee: Decimal,
+            },
+            VaultDeposit {
+                vault: String,
+                usdc: Decimal,
+            },
+            VaultWithdraw {
+                vault: String,
+                requested_usd: Decimal,
+                net_withdrawn_usd: Decimal,
+            },
+            VaultDistribution {
+                vault: String,
+                usdc: Decimal,
+            },
+        }
+        let value = serde_json::Value::deserialize(deserializer)?;
+        let kind = value
+            .get("type")
+            .and_then(|t| t.as_str())
+            .unwrap_or_default()
+            .to_string();
+        // A known type whose fields do not read is kept as `Other` too:
+        // listed under its own name rather than lost.
+        Ok(match serde_json::from_value::<Known>(value.clone()) {
+            Ok(Known::Deposit { usdc }) => LedgerDelta::Deposit { usdc },
+            Ok(Known::Withdraw { usdc, fee }) => LedgerDelta::Withdraw { usdc, fee },
+            Ok(Known::AccountClassTransfer { usdc, to_perp }) => {
+                LedgerDelta::AccountClassTransfer { usdc, to_perp }
+            }
+            Ok(Known::InternalTransfer {
+                usdc,
+                user,
+                destination,
+                fee,
+            }) => LedgerDelta::InternalTransfer {
+                usdc,
+                user,
+                destination,
+                fee,
+            },
+            Ok(Known::SubAccountTransfer {
+                usdc,
+                user,
+                destination,
+            }) => LedgerDelta::SubAccountTransfer {
+                usdc,
+                user,
+                destination,
+            },
+            Ok(Known::Send {
+                user,
+                destination,
+                source_dex,
+                destination_dex,
+                token,
+                amount,
+                usdc_value,
+                fee,
+            }) => LedgerDelta::Send {
+                user,
+                destination,
+                source_dex,
+                destination_dex,
+                token,
+                amount,
+                usdc_value,
+                fee,
+            },
+            Ok(Known::SpotTransfer {
+                user,
+                destination,
+                token,
+                amount,
+                usdc_value,
+                fee,
+            }) => LedgerDelta::SpotTransfer {
+                user,
+                destination,
+                token,
+                amount,
+                usdc_value,
+                fee,
+            },
+            Ok(Known::VaultCreate { vault, usdc, fee }) => {
+                LedgerDelta::VaultCreate { vault, usdc, fee }
+            }
+            Ok(Known::VaultDeposit { vault, usdc }) => LedgerDelta::VaultDeposit { vault, usdc },
+            Ok(Known::VaultWithdraw {
+                vault,
+                requested_usd,
+                net_withdrawn_usd,
+            }) => LedgerDelta::VaultWithdraw {
+                vault,
+                requested_usd,
+                net_withdrawn_usd,
+            },
+            Ok(Known::VaultDistribution { vault, usdc }) => {
+                LedgerDelta::VaultDistribution { vault, usdc }
+            }
+            Err(_) => LedgerDelta::Other {
+                kind,
+                fields: value,
+            },
+        })
+    }
+}
+
 /// One fill of the account's, as the venue reports it.
 #[derive(Debug, Clone, PartialEq, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -136,6 +442,19 @@ pub struct UserFill {
     pub fee: Decimal,
     /// The venue's trade id: the same fill keeps it across answers.
     pub tid: u64,
+    /// What the fill did to the position: `Open Long`, `Close Short`, and
+    /// others the venue names (`Buy`, `Sell` for spot).
+    #[serde(default)]
+    pub dir: String,
+    /// The fill crossed the book: the account was the taker.
+    #[serde(default)]
+    pub crossed: bool,
+    /// The order the fill belongs to.
+    #[serde(default)]
+    pub oid: u64,
+    /// The transaction the fill was settled in.
+    #[serde(default)]
+    pub hash: String,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
@@ -308,4 +627,29 @@ pub struct UserRoleData {
     /// For an agent (an API wallet): the account it acts for.
     #[serde(default)]
     pub user: Option<String>,
+}
+
+/// What one account can do in one market now, as the venue works it out:
+/// its leverage setting, and how much it could buy or sell.
+#[derive(Debug, Clone, PartialEq, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ActiveAsset {
+    pub leverage: Leverage,
+    /// The largest order size, in the coin, for a buy and for a sell.
+    pub max_trade_szs: [Decimal; 2],
+    /// The margin, in USD, behind a buy and behind a sell.
+    pub available_to_trade: [Decimal; 2],
+    pub mark_px: Decimal,
+}
+
+impl ActiveAsset {
+    /// The largest order size on one side.
+    pub fn max_size(&self, buy: bool) -> Decimal {
+        self.max_trade_szs[if buy { 0 } else { 1 }]
+    }
+
+    /// The margin available on one side.
+    pub fn available(&self, buy: bool) -> Decimal {
+        self.available_to_trade[if buy { 0 } else { 1 }]
+    }
 }

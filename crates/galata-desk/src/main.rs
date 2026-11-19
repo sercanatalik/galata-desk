@@ -4,6 +4,7 @@ mod connect;
 mod desk;
 mod funding;
 mod grid;
+mod history;
 mod market_tile;
 mod markets;
 mod portfolio;
@@ -19,15 +20,16 @@ use std::sync::Arc;
 
 use galata_desk_core::network::{self, Network};
 use galata_desk_core::secrets::Secrets;
-use galata_desk_core::store::Store;
+use galata_desk_core::store::{QuickSizes, Store};
 use gpui_kit::component::TitleBar;
 use gpui_kit::prelude::*;
 use gpui_kit::{App, Bounds, Global, WindowBounds, WindowOptions, px, size};
 
 /// The smallest the window may be, in points. Tall enough that the Markets
-/// panel and one whole row of tiles both fit beneath the toolbar and legend.
+/// panel (with its Buy and Sell buttons) and one whole row of tiles both fit
+/// beneath the toolbar and legend.
 pub const MIN_WINDOW_WIDTH: f32 = 1080.;
-pub const MIN_WINDOW_HEIGHT: f32 = 704.;
+pub const MIN_WINDOW_HEIGHT: f32 = 768.;
 /// The window opens at this size unless `GALATA_DESK_SIZE` says otherwise.
 pub const DEFAULT_WINDOW_WIDTH: f32 = 1480.;
 pub const DEFAULT_WINDOW_HEIGHT: f32 = 960.;
@@ -46,6 +48,9 @@ pub struct Core {
     /// The user has allowed order actions on the main network. Chosen in
     /// settings, off until then.
     pub allow_mainnet_trading: bool,
+    /// The order ticket's Quick buttons. Chosen in settings; always a list
+    /// that keeps every rule.
+    pub quick_sizes: QuickSizes,
     /// `GALATA_DESK_INFO_URL` points the app at another info endpoint, for
     /// development. It is used whatever the network.
     pub info_override: Option<String>,
@@ -88,6 +93,7 @@ impl Core {
         galata_desk_core::store::Settings {
             network: self.network,
             allow_mainnet_trading: self.allow_mainnet_trading,
+            quick_sizes: self.quick_sizes.clone(),
         }
     }
 }
@@ -159,6 +165,7 @@ fn main() {
                 secrets: secrets(),
                 network: settings.network,
                 allow_mainnet_trading: settings.allow_mainnet_trading,
+                quick_sizes: settings.quick_sizes,
                 info_override: std::env::var("GALATA_DESK_INFO_URL").ok(),
                 ws_override: std::env::var("GALATA_DESK_WS_URL").ok(),
             });

@@ -1,7 +1,7 @@
 //! The connect screen: shown until an account is connected.
 
 use gpui_kit::component::button::{Button, ButtonVariants};
-use gpui_kit::component::{Sizable, h_flex, v_flex};
+use gpui_kit::component::{Icon, IconName, Sizable, h_flex, v_flex};
 use gpui_kit::prelude::*;
 use gpui_kit::{ClipboardItem, Context, SharedString, Task, div, px};
 
@@ -86,7 +86,7 @@ pub fn render(state: &ConnectState, cx: &mut Context<Desk>) -> impl IntoElement 
                                         .text_ellipsis()
                                         .child(url.clone()),
                                 )
-                                .child(Button::new("copy-url").small().label("Copy").on_click(
+                                .child(Button::new("copy-url").small().icon(Icon::new(IconName::Copy)).tooltip("Copy link").on_click(
                                     move |_, _, cx| {
                                         cx.write_to_clipboard(ClipboardItem::new_string(copy_url.to_string()));
                                     },

@@ -92,6 +92,17 @@ impl Transport for Venue {
             };
             return Ok(answer.to_string().into_bytes());
         }
+        if body["type"] == "perpDexs" || body["type"] == "meta" {
+            let name = match (
+                body["type"].as_str().unwrap(),
+                body.get("dex").and_then(Value::as_str),
+            ) {
+                ("meta", Some(dex)) => format!("meta_{dex}"),
+                (kind, _) => kind.to_string(),
+            };
+            let path = format!("{}/tests/fixtures/{name}.json", env!("CARGO_MANIFEST_DIR"));
+            return Ok(std::fs::read(path).unwrap());
+        }
         assert_eq!(body["type"], "userRole", "the gate asks nothing else");
         self.asked.lock().unwrap().push(body);
         let answer = match *self.role.lock().unwrap() {
@@ -959,5 +970,203 @@ async fn each_guard_stops_a_tpsl_change_before_anything_is_sent() {
             .iter()
             .all(|s| s.answer == Err(Unavailable::Overridden))
     );
+    assert!(venue.sent().is_empty());
+}
+
+const HYPE: Asset = Asset {
+    number: 4,
+    sz_decimals: 2,
+    spot: false,
+};
+
+fn vector_action(name: &str) -> Value {
+    let all: Value = serde_json::from_str(include_str!("fixtures/signing_vectors.json")).unwrap();
+    all["vectors"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|v| v["name"] == name)
+        .unwrap()["action"]
+        .clone()
+}
+
+fn new_order(buy: bool, size: &str, pricing: Pricing) -> NewOrder {
+    NewOrder {
+        asset: HYPE,
+        buy,
+        size: dec(size),
+        pricing,
+        reduce_only: false,
+        take_profit: None,
+        stop_loss: None,
+    }
+}
+
+#[tokio::test]
+async fn an_opening_market_buy_is_sent_as_the_venues_sdk_builds_it() {
+    let venue = Venue::new(Role::AgentOf(ACCOUNT));
+    let t = approved_on_testnet(&venue);
+    t.place(&new_order(
+        true,
+        "1.49",
+        Pricing::Market {
+            worst: dec("70.064"),
+        },
+    ))
+    .await
+    .unwrap();
+    let sent = venue.sent();
+    assert_eq!(sent.len(), 1);
+    // Not reduce-only: this order may open a position.
+    assert_eq!(sent[0]["action"], vector_action("open_ioc_buy"));
+}
+
+#[tokio::test]
+async fn an_order_with_tpsl_carries_them_in_the_same_request() {
+    let venue = Venue::new(Role::AgentOf(ACCOUNT));
+    let t = approved_on_testnet(&venue);
+    t.place(&NewOrder {
+        take_profit: Some(dec("72")),
+        stop_loss: Some(dec("63")),
+        ..new_order(true, "1.5", Pricing::Limit { price: dec("66.5") })
+    })
+    .await
+    .unwrap();
+    let sent = venue.sent();
+    assert_eq!(sent.len(), 1, "one request for the entry and both triggers");
+    assert_eq!(sent[0]["action"], vector_action("entry_with_tpsl"));
+    // And the signature is this app's for that same action.
+    let action: sign::Action = match sent[0]["action"]["grouping"].as_str() {
+        Some("normalTpsl") => sign::Action::Order {
+            orders: vec![
+                sign::OrderWire {
+                    a: 4,
+                    b: true,
+                    p: "66.5".into(),
+                    s: "1.5".into(),
+                    r: false,
+                    t: sign::OrderKind::limit("Gtc"),
+                },
+                sign::OrderWire {
+                    a: 4,
+                    b: false,
+                    p: "64.8".into(),
+                    s: "1.5".into(),
+                    r: true,
+                    t: sign::OrderKind::Trigger(sign::Trigger {
+                        is_market: true,
+                        trigger_px: "72".into(),
+                        tpsl: sign::Tpsl::Tp,
+                    }),
+                },
+                sign::OrderWire {
+                    a: 4,
+                    b: false,
+                    p: "56.7".into(),
+                    s: "1.5".into(),
+                    r: true,
+                    t: sign::OrderKind::Trigger(sign::Trigger {
+                        is_market: true,
+                        trigger_px: "63".into(),
+                        tpsl: sign::Tpsl::Sl,
+                    }),
+                },
+            ],
+            grouping: sign::Grouping::NormalTpsl,
+        },
+        other => panic!("grouping {other:?}"),
+    };
+    signed_as_sent(&sent[0], &action);
+}
+
+#[tokio::test]
+async fn a_sell_and_a_reduce_only_order_are_sent_as_asked() {
+    let venue = Venue::new(Role::AgentOf(ACCOUNT));
+    let t = approved_on_testnet(&venue);
+    t.place(&new_order(
+        false,
+        "2",
+        Pricing::Limit { price: dec("72.5") },
+    ))
+    .await
+    .unwrap();
+    t.place(&NewOrder {
+        reduce_only: true,
+        ..new_order(false, "1", Pricing::Market { worst: dec("63.4") })
+    })
+    .await
+    .unwrap();
+    let sent = venue.sent();
+    let first = &sent[0]["action"]["orders"][0];
+    assert_eq!(
+        (first["b"].clone(), first["r"].clone(), first["t"].clone()),
+        (
+            json!(false),
+            json!(false),
+            json!({ "limit": { "tif": "Gtc" } })
+        )
+    );
+    assert_eq!(sent[0]["action"]["grouping"], "na");
+    let second = &sent[1]["action"]["orders"][0];
+    assert_eq!(second["r"], true);
+    assert_eq!(second["t"], json!({ "limit": { "tif": "Ioc" } }));
+}
+
+#[tokio::test]
+async fn each_guard_stops_an_order_before_anything_is_asked_or_sent() {
+    let venue = Venue::new(Role::AgentOf(ACCOUNT));
+    let order = new_order(true, "1", Pricing::Market { worst: dec("70") });
+    for (t, why) in [
+        (
+            trader(
+                &venue,
+                secrets_with_key(Network::Testnet),
+                Standing {
+                    overridden: true,
+                    ..standing(Network::Testnet)
+                },
+            ),
+            Unavailable::Overridden,
+        ),
+        (
+            trader(
+                &venue,
+                secrets_with_key(Network::Mainnet),
+                standing(Network::Mainnet),
+            ),
+            Unavailable::MainnetOff,
+        ),
+        (
+            trader(
+                &venue,
+                secrets_with_key(Network::Mainnet),
+                standing(Network::Testnet),
+            ),
+            Unavailable::NoKey(Network::Testnet),
+        ),
+    ] {
+        assert_eq!(t.place(&order).await, Err(why));
+    }
+    assert_eq!(venue.asked(), 0);
+    assert!(venue.sent().is_empty());
+    let stranger = Venue::new(Role::User);
+    assert_eq!(
+        approved_on_testnet(&stranger).place(&order).await,
+        Err(Unavailable::KeyNotApproved)
+    );
+    assert!(stranger.sent().is_empty());
+}
+
+#[tokio::test]
+async fn a_market_is_numbered_from_the_dex_list_and_that_dexs_markets() {
+    let venue = Venue::new(Role::AgentOf(ACCOUNT));
+    let t = approved_on_testnet(&venue);
+    // `xyz` is the second dex in `perpDexs.json`, NVDA the first of its markets.
+    let nvda = t.market("xyz", "xyz:NVDA").await.unwrap().unwrap();
+    assert_eq!((nvda.number, nvda.spot), (110_000, false));
+    let btc = t.market("", "BTC").await.unwrap().unwrap();
+    assert_eq!(btc.number, 0);
+    assert_eq!(t.market("xyz", "xyz:NOPE").await.unwrap(), None);
+    // Asking is public: nothing is signed or sent.
     assert!(venue.sent().is_empty());
 }

@@ -68,12 +68,132 @@ struct ConfigFile {
 }
 
 /// What the user has chosen in settings. No secret is ever part of it.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct Settings {
     pub network: Network,
     /// Order actions are allowed on the main network. Off unless the user
     /// turns it on; the test network needs no such permission.
     pub allow_mainnet_trading: bool,
+    /// The order ticket's Quick buttons, the same on both networks.
+    pub quick_sizes: QuickSizes,
+}
+
+/// The order ticket's quick sizes: one to four whole US dollar amounts, each
+/// at least the venue's $10 minimum, no two alike, smallest first. Only
+/// [`QuickSizes::check`] and [`QuickSizes::from_amounts`] make one, so a list
+/// that breaks a rule never reaches the ticket or the file.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct QuickSizes(Vec<u64>);
+
+/// Why a quick size field is not usable.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum QuickSizeRule {
+    /// Not a whole number of dollars.
+    NotWhole,
+    /// Under the venue's $10 minimum.
+    BelowMinimum,
+    /// The same amount as another field. Every field holding it says so.
+    Duplicate,
+}
+
+impl QuickSizeRule {
+    /// What the field says under it.
+    pub fn message(self) -> &'static str {
+        match self {
+            Self::NotWhole => "Whole dollars only.",
+            Self::BelowMinimum => "At least $10.",
+            Self::Duplicate => "Already listed.",
+        }
+    }
+}
+
+impl QuickSizes {
+    /// The venue's smallest order value, in dollars.
+    pub const MINIMUM: u64 = 10;
+    /// The most quick sizes the ticket shows.
+    pub const MOST: usize = 4;
+    /// The amounts a first launch starts with.
+    pub const DEFAULT: [u64; 3] = [5_000, 10_000, 25_000];
+
+    /// Check the Settings fields, in their order. On success, the list sorted
+    /// ascending; otherwise one result per field, in the fields' order, with
+    /// the rule each field breaks. A list of no fields or more than
+    /// [`Self::MOST`] fails with no field to blame.
+    pub fn check(texts: &[&str]) -> Result<Self, Vec<Option<QuickSizeRule>>> {
+        let parsed: Vec<Option<u64>> = texts.iter().map(|t| whole_dollars(t)).collect();
+        let results: Vec<Result<u64, QuickSizeRule>> = parsed
+            .iter()
+            .map(|amount| {
+                let amount = amount.ok_or(QuickSizeRule::NotWhole)?;
+                if amount < Self::MINIMUM {
+                    return Err(QuickSizeRule::BelowMinimum);
+                }
+                if parsed.iter().filter(|a| **a == Some(amount)).count() > 1 {
+                    return Err(QuickSizeRule::Duplicate);
+                }
+                Ok(amount)
+            })
+            .collect();
+        let count_ok = (1..=Self::MOST).contains(&texts.len());
+        if count_ok && results.iter().all(Result::is_ok) {
+            let mut amounts: Vec<u64> = results.into_iter().flatten().collect();
+            amounts.sort_unstable();
+            Ok(Self(amounts))
+        } else {
+            Err(results.into_iter().map(Result::err).collect())
+        }
+    }
+
+    /// A list from stored amounts, when it keeps every rule.
+    pub fn from_amounts(amounts: &[u64]) -> Option<Self> {
+        let texts: Vec<String> = amounts.iter().map(u64::to_string).collect();
+        let texts: Vec<&str> = texts.iter().map(String::as_str).collect();
+        Self::check(&texts).ok()
+    }
+
+    /// The amounts in whole dollars, smallest first.
+    pub fn amounts(&self) -> &[u64] {
+        &self.0
+    }
+
+    /// A button's label for `amount`: `$500`, `$5k`, `$2.5k`, and in full
+    /// (`$1,250`) when thousands would round it.
+    pub fn label(amount: u64) -> String {
+        if amount < 1_000 {
+            format!("${amount}")
+        } else if amount.is_multiple_of(1_000) {
+            format!("${}k", amount / 1_000)
+        } else if amount.is_multiple_of(100) {
+            format!("${}.{}k", amount / 1_000, (amount % 1_000) / 100)
+        } else {
+            let digits = amount.to_string();
+            let mut out = String::new();
+            for (i, c) in digits.chars().enumerate() {
+                if i > 0 && (digits.len() - i).is_multiple_of(3) {
+                    out.push(',');
+                }
+                out.push(c);
+            }
+            format!("${out}")
+        }
+    }
+}
+
+impl Default for QuickSizes {
+    fn default() -> Self {
+        Self(Self::DEFAULT.to_vec())
+    }
+}
+
+/// A field's text as whole dollars: digits, with an optional leading `$`
+/// and thousands commas.
+fn whole_dollars(text: &str) -> Option<u64> {
+    let text = text.trim();
+    let text = text.strip_prefix('$').unwrap_or(text).replace(',', "");
+    if text.is_empty() || !text.bytes().all(|b| b.is_ascii_digit()) {
+        return None;
+    }
+    text.parse().ok()
 }
 
 #[derive(Serialize, Deserialize)]
@@ -83,6 +203,20 @@ struct SettingsRecord {
     /// Absent in files written before the switch existed: off.
     #[serde(default)]
     mainnet_trading: bool,
+    /// Absent in files written before quick sizes existed: the default. A
+    /// value that is not a list of whole amounts is dropped on its own, so it
+    /// never costs the network or the mainnet switch.
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "amounts_or_none"
+    )]
+    quick_sizes: Option<Vec<u64>>,
+}
+
+fn amounts_or_none<'de, D: serde::Deserializer<'de>>(d: D) -> Result<Option<Vec<u64>>, D::Error> {
+    let value = serde_json::Value::deserialize(d)?;
+    Ok(serde_json::from_value(value).ok())
 }
 
 /// The app's directory on disk.
@@ -175,6 +309,12 @@ impl Store {
             .map(|record| Settings {
                 network: record.network,
                 allow_mainnet_trading: record.mainnet_trading,
+                // A missing list, or one that breaks a rule, is the default.
+                quick_sizes: record
+                    .quick_sizes
+                    .as_deref()
+                    .and_then(QuickSizes::from_amounts)
+                    .unwrap_or_default(),
             })
             .unwrap_or_default()
     }
@@ -184,6 +324,7 @@ impl Store {
             v: 1,
             network: settings.network,
             mainnet_trading: settings.allow_mainnet_trading,
+            quick_sizes: Some(settings.quick_sizes.amounts().to_vec()),
         };
         let text = serde_json::to_string_pretty(&record).expect("the record serialises");
         self.write_whole(SETTINGS_FILE, &text)
@@ -371,7 +512,7 @@ mod tests {
         store
             .save_settings(&Settings {
                 network: Network::Testnet,
-                allow_mainnet_trading: false,
+                ..Settings::default()
             })
             .unwrap();
         assert_eq!(store.settings().network, Network::Testnet);
@@ -379,7 +520,12 @@ mod tests {
         let value: serde_json::Value = serde_json::from_str(&text).unwrap();
         assert_eq!(
             value,
-            serde_json::json!({ "v": 1, "network": "testnet", "mainnet_trading": false })
+            serde_json::json!({
+                "v": 1,
+                "network": "testnet",
+                "mainnet_trading": false,
+                "quick_sizes": [5000, 10000, 25000],
+            })
         );
     }
 
@@ -399,11 +545,13 @@ mod tests {
             Settings {
                 network: Network::Testnet,
                 allow_mainnet_trading: false,
+                quick_sizes: QuickSizes::default(),
             }
         );
         let on = Settings {
             network: Network::Mainnet,
             allow_mainnet_trading: true,
+            ..Settings::default()
         };
         store.save_settings(&on).unwrap();
         assert_eq!(store.settings(), on);
@@ -488,6 +636,160 @@ mod tests {
             std::fs::write(dir.path().join(WATCHLIST_FILE), bad).unwrap();
             assert_eq!(store.watchlist(), None, "{bad:?}");
         }
+    }
+
+    fn checked(texts: &[&str]) -> Result<Vec<u64>, Vec<Option<QuickSizeRule>>> {
+        QuickSizes::check(texts).map(|list| list.amounts().to_vec())
+    }
+
+    #[test]
+    fn quick_sizes_start_at_five_ten_and_twenty_five_thousand() {
+        assert_eq!(QuickSizes::default().amounts(), [5_000, 10_000, 25_000]);
+    }
+
+    #[test]
+    fn a_quick_size_list_is_checked_field_by_field() {
+        use QuickSizeRule::*;
+        // Valid lists come back sorted ascending.
+        assert_eq!(
+            checked(&["25000", "1000", "5000"]),
+            Ok(vec![1_000, 5_000, 25_000])
+        );
+        assert_eq!(checked(&[" $10,000 "]), Ok(vec![10_000]));
+        assert_eq!(checked(&["10"]), Ok(vec![10]));
+        // One result per field, in the fields' order.
+        assert_eq!(
+            checked(&["5000", "2500.5", "10000"]),
+            Err(vec![None, Some(NotWhole), None])
+        );
+        assert_eq!(checked(&["5", "5000"]), Err(vec![Some(BelowMinimum), None]));
+        assert_eq!(checked(&["9"]), Err(vec![Some(BelowMinimum)]));
+        assert_eq!(
+            checked(&["5000", "10000", "25000", "10000"]),
+            Err(vec![None, Some(Duplicate), None, Some(Duplicate)])
+        );
+        // Both fields say so, however the amount is written.
+        assert_eq!(
+            checked(&["10,000", "10000"]),
+            Err(vec![Some(Duplicate), Some(Duplicate)])
+        );
+        for not_whole in ["", " ", "abc", "-5000", "1e4", "5k", "$"] {
+            assert_eq!(
+                checked(&[not_whole]),
+                Err(vec![Some(NotWhole)]),
+                "{not_whole:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn quick_size_labels_are_short_but_exact() {
+        for (amount, label) in [
+            (10, "$10"),
+            (500, "$500"),
+            (1_000, "$1k"),
+            (2_500, "$2.5k"),
+            (25_000, "$25k"),
+            (1_250, "$1,250"),
+            (1_234_567, "$1,234,567"),
+        ] {
+            assert_eq!(QuickSizes::label(amount), label);
+        }
+    }
+
+    #[test]
+    fn a_quick_size_list_has_one_to_four_entries() {
+        assert_eq!(checked(&[]), Err(vec![]));
+        assert_eq!(checked(&["10", "20", "30", "40"]), Ok(vec![10, 20, 30, 40]));
+        // Five fields that are each fine: no field to blame, still refused.
+        assert_eq!(checked(&["10", "20", "30", "40", "50"]), Err(vec![None; 5]));
+    }
+
+    #[test]
+    fn settings_without_quick_sizes_load_the_default_and_keep_the_rest() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::at(dir.path());
+        std::fs::write(
+            dir.path().join(SETTINGS_FILE),
+            r#"{"v":1,"network":"testnet","mainnet_trading":true}"#,
+        )
+        .unwrap();
+        assert_eq!(
+            store.settings(),
+            Settings {
+                network: Network::Testnet,
+                allow_mainnet_trading: true,
+                quick_sizes: QuickSizes::default(),
+            }
+        );
+    }
+
+    #[test]
+    fn a_stored_quick_size_list_that_breaks_a_rule_loads_as_the_default() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::at(dir.path());
+        for bad in [
+            "[]",
+            "[5]",
+            "[5000, 5000]",
+            "[10, 20, 30, 40, 50]",
+            "[-5]",
+            "[2500.5]",
+            r#""5000""#,
+        ] {
+            std::fs::write(
+                dir.path().join(SETTINGS_FILE),
+                format!(
+                    r#"{{"v":1,"network":"testnet","mainnet_trading":true,"quick_sizes":{bad}}}"#
+                ),
+            )
+            .unwrap();
+            let settings = store.settings();
+            assert_eq!(settings.quick_sizes, QuickSizes::default(), "{bad}");
+            // Only the list falls back: the rest is kept.
+            assert_eq!(settings.network, Network::Testnet, "{bad}");
+            assert!(settings.allow_mainnet_trading, "{bad}");
+        }
+    }
+
+    #[test]
+    fn a_saved_quick_size_list_is_remembered() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::at(dir.path());
+        let settings = Settings {
+            network: Network::Testnet,
+            allow_mainnet_trading: false,
+            quick_sizes: QuickSizes::check(&["20000", "2000"]).unwrap(),
+        };
+        store.save_settings(&settings).unwrap();
+        assert_eq!(store.settings(), settings);
+        assert_eq!(store.settings().quick_sizes.amounts(), [2_000, 20_000]);
+    }
+
+    #[test]
+    fn the_record_from_before_quick_sizes_reads_a_new_file() {
+        /// `SettingsRecord` as it was before quick sizes.
+        #[derive(Deserialize)]
+        struct OldRecord {
+            v: u32,
+            network: Network,
+            #[serde(default)]
+            mainnet_trading: bool,
+        }
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::at(dir.path());
+        store
+            .save_settings(&Settings {
+                network: Network::Testnet,
+                allow_mainnet_trading: true,
+                quick_sizes: QuickSizes::check(&["2000"]).unwrap(),
+            })
+            .unwrap();
+        let text = std::fs::read_to_string(dir.path().join(SETTINGS_FILE)).unwrap();
+        let old: OldRecord = serde_json::from_str(&text).unwrap();
+        assert_eq!(old.v, 1);
+        assert_eq!(old.network, Network::Testnet);
+        assert!(old.mainnet_trading);
     }
 
     #[test]

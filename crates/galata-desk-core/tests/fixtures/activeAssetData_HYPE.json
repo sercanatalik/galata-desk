@@ -1,0 +1,17 @@
+{
+ "user": "0x010461c14e146ac35fe42271bdc1134ee31c703a",
+ "coin": "HYPE",
+ "leverage": {
+  "type": "cross",
+  "value": 20
+ },
+ "maxTradeSzs": [
+  "928851.47",
+  "930454.47"
+ ],
+ "availableToTrade": [
+  "3073987.4973909999",
+  "3079292.5457410002"
+ ],
+ "markPx": "66.189"
+}

@@ -24,7 +24,7 @@ use crate::api_key::ApiKey;
 use crate::connect::Address;
 use crate::network::Network;
 use crate::secrets::{Secrets, api_key_name};
-use crate::venue::{Info, Side, Transport, VenueError};
+use crate::venue::{ActiveAsset, Info, Side, Transport, VenueError};
 
 /// Why no action can be taken now.
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
@@ -161,6 +161,72 @@ pub enum TpslRequest {
     Remove,
 }
 
+/// An order from the order ticket: the one kind of order that may open or
+/// add to a position. Every other method builds reduce-only orders only.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct NewOrder {
+    pub asset: Asset,
+    pub buy: bool,
+    /// In the coin, already on the market's size step.
+    pub size: Decimal,
+    pub pricing: Pricing,
+    /// Only shrink the current position.
+    pub reduce_only: bool,
+    /// A take-profit and a stop-loss for the size this order opens, sent
+    /// with it in the same request.
+    pub take_profit: Option<Decimal>,
+    pub stop_loss: Option<Decimal>,
+}
+
+impl NewOrder {
+    /// A market trigger on the other side of this order, for its size: the
+    /// order's own take-profit or stop-loss.
+    fn trigger(&self, at: Decimal, tpsl: Tpsl) -> OrderWire {
+        let worst = rules::slippage(at, !self.buy, &self.asset, rules::TRIGGER_SLIPPAGE_PCT);
+        OrderWire {
+            a: self.asset.number,
+            b: !self.buy,
+            p: rules::wire(worst),
+            s: rules::wire(self.size),
+            r: true,
+            t: OrderKind::Trigger(Trigger {
+                is_market: true,
+                trigger_px: rules::wire(at),
+                tpsl,
+            }),
+        }
+    }
+
+    /// The action that places it: the entry, then its take-profit and its
+    /// stop-loss when it has them.
+    fn action(&self) -> Action {
+        let (price, tif) = match self.pricing {
+            Pricing::Market { worst } => (worst, "Ioc"),
+            Pricing::Limit { price } => (price, "Gtc"),
+        };
+        let mut orders = vec![OrderWire {
+            a: self.asset.number,
+            b: self.buy,
+            p: rules::wire(price),
+            s: rules::wire(self.size),
+            r: self.reduce_only,
+            t: OrderKind::limit(tif),
+        }];
+        if let Some(at) = self.take_profit {
+            orders.push(self.trigger(at, Tpsl::Tp));
+        }
+        if let Some(at) = self.stop_loss {
+            orders.push(self.trigger(at, Tpsl::Sl));
+        }
+        let grouping = if orders.len() > 1 {
+            Grouping::NormalTpsl
+        } else {
+            Grouping::Na
+        };
+        Action::Order { orders, grouping }
+    }
+}
+
 /// How a close is priced.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Pricing {
@@ -294,6 +360,25 @@ impl<T: Transport + Clone> Trader<T> {
         self.info.mid(dex, coin).await
     }
 
+    /// The connected account's leverage and tradeable size in `coin` (the
+    /// venue's name: `HYPE`, `xyz:NVDA`). A public question: no guard
+    /// applies.
+    pub async fn active_asset(&self, coin: &str) -> Result<ActiveAsset, VenueError> {
+        self.info
+            .active_asset(self.standing.account.as_str(), coin)
+            .await
+    }
+
+    /// The market `coin` on `dex` as an action names it: its asset number
+    /// and size step, from the venue's list of dexes and that dex's markets
+    /// (the same path open orders and positions take). `None` when the
+    /// venue does not list it.
+    pub async fn market(&self, dex: &str, coin: &str) -> Result<Option<Asset>, VenueError> {
+        let dexes = self.info.perp_dexs().await?;
+        let meta = self.info.perp_meta(dex).await?;
+        Ok(super::assets::perp(&dexes, dex, &meta, coin))
+    }
+
     /// Take `size` off a position, at market or at a limit.
     pub async fn close(
         &self,
@@ -323,6 +408,12 @@ impl<T: Transport + Clone> Trader<T> {
             grouping: Grouping::Na,
         })
         .await
+    }
+
+    /// Place an order from the order ticket. The only method that may open
+    /// or add to a position: everything else here is reduce-only.
+    pub async fn place(&self, order: &NewOrder) -> Result<Answer, Unavailable> {
+        self.act(order.action()).await
     }
 
     /// Set, move or remove a position's take-profit and stop-loss.

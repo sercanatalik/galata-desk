@@ -48,7 +48,18 @@ fn open_sized(
     window_size: gpui_kit::Size<gpui_kit::Pixels>,
 ) -> (WindowHandle<Root>, Entity<Desk>, tempfile::TempDir) {
     let dir = tempfile::tempdir().unwrap();
-    let store = Store::at(dir.path());
+    let (window, desk) = open_at(cx, dir.path(), remembered, window_size);
+    (window, desk, dir)
+}
+
+/// Open the app on a directory the test has prepared, as `main` does.
+fn open_at(
+    cx: &mut TestAppContext,
+    dir: &std::path::Path,
+    remembered: bool,
+    window_size: gpui_kit::Size<gpui_kit::Pixels>,
+) -> (WindowHandle<Root>, Entity<Desk>) {
+    let store = Store::at(dir);
     if remembered {
         store
             .remember(&Account::proven_now(Address::parse(ADDRESS).unwrap()))
@@ -71,6 +82,7 @@ fn open_sized(
             secrets: Arc::new(galata_desk_core::secrets::MemorySecrets::default()),
             network: store_network,
             allow_mainnet_trading: stored.allow_mainnet_trading,
+            quick_sizes: stored.quick_sizes,
             // Nothing listens here: every venue request fails at once,
             // whichever network is chosen.
             info_override: Some("http://127.0.0.1:9/info".into()),
@@ -90,7 +102,7 @@ fn open_sized(
         .unwrap();
         (window.downcast::<Root>().unwrap(), desk)
     });
-    (window, desk, dir)
+    (window, desk)
 }
 
 #[gpui_kit::test]
@@ -1064,7 +1076,7 @@ fn the_app_starts_on_the_remembered_network(cx: &mut TestAppContext) {
     Store::at(dir.path())
         .save_settings(&galata_desk_core::store::Settings {
             network: Network::Testnet,
-            allow_mainnet_trading: false,
+            ..Default::default()
         })
         .unwrap();
     assert_eq!(Store::at(dir.path()).settings().network, Network::Testnet);
@@ -1249,6 +1261,7 @@ fn a_fill(coin: &str, side: FillSide, candle: u64) -> Fill {
         realised: Decimal::ZERO,
         fee: Decimal::ZERO,
         id: candle,
+        ..Fill::blank()
     }
 }
 
@@ -1512,6 +1525,7 @@ fn pnl_fill(coin: &str, days: u64, realised: &str, fee: &str, id: u64) -> Fill {
         realised: realised.parse().unwrap(),
         fee: fee.parse().unwrap(),
         id,
+        ..Fill::blank()
     }
 }
 
@@ -2507,6 +2521,7 @@ fn the_settings_page_says_what_a_saved_key_is_used_for() {
     use crate::settings::{KEY_USE, MAINNET_SWITCH_NOTE};
     for text in [KEY_USE, MAINNET_SWITCH_NOTE] {
         for action in [
+            "place",
             "amend and cancel",
             "close",
             "positions",
@@ -3791,4 +3806,1485 @@ fn close_all_and_tpsl_say_what_was_not_done(cx: &mut TestAppContext) {
         assert!(problem);
     })
     .unwrap();
+}
+
+// The order ticket, opened from the Markets panel.
+
+use galata_desk_core::trade::NewOrder;
+use galata_desk_core::trade::rules::SizeUnit;
+
+const HYPE_ASSET: Asset = Asset {
+    number: 4,
+    sz_decimals: 2,
+    spot: false,
+};
+
+/// Open the ticket for HYPE with these positions and this stand-in.
+fn ticket(
+    cx: &mut TestAppContext,
+    staged: &Rc<Staged>,
+    positions: Vec<PositionRow>,
+    buy: bool,
+) -> (
+    WindowHandle<Root>,
+    Entity<Desk>,
+    Entity<Portfolio>,
+    tempfile::TempDir,
+) {
+    let (window, desk, view, dir) = positions_tab(cx, staged, positions, vec![]);
+    on_view(cx, window, &view, |v, w, cx| {
+        v.open_ticket(MarketId::new("HYPE"), buy, w, cx)
+    });
+    (window, desk, view, dir)
+}
+
+fn ticket_says(
+    cx: &mut TestAppContext,
+    window: WindowHandle<Root>,
+    view: &Entity<Portfolio>,
+) -> (String, bool) {
+    cx.update_window(window.into(), |_, _, cx| {
+        view.read(cx).ticket_state(cx).unwrap()
+    })
+    .unwrap()
+}
+
+#[gpui_kit::test]
+fn the_ticket_opens_in_usd_and_takes_the_coin_too(cx: &mut TestAppContext) {
+    let staged = Rc::new(Staged::new(Ok(())));
+    let (window, _desk, view, _dir) = ticket(cx, &staged, vec![], true);
+    cx.update_window(window.into(), |_, _, cx| {
+        let view = view.read(cx);
+        assert_eq!(view.ticket_open(), Some(("HYPE".into(), true, true)));
+        assert_eq!(view.ticket_unit(), Some(SizeUnit::Usd));
+    })
+    .unwrap();
+    // $100 at the worst price, 5% over the mid of 154: 0.61 HYPE.
+    on_view(cx, window, &view, |v, w, cx| {
+        v.type_ticket("100", "", w, cx)
+    });
+    assert_eq!(
+        ticket_says(cx, window, &view),
+        ("buy 0.61 at 161.7".into(), true)
+    );
+    // In the coin.
+    click(cx, window, "ticket-unit-coin");
+    on_view(cx, window, &view, |v, w, cx| {
+        v.type_ticket("1.5", "", w, cx)
+    });
+    assert_eq!(
+        ticket_says(cx, window, &view),
+        ("buy 1.5 at 161.7".into(), true)
+    );
+}
+
+#[gpui_kit::test]
+fn the_ticket_names_what_to_fix(cx: &mut TestAppContext) {
+    let staged = Rc::new(Staged::new(Ok(())));
+    let (window, _desk, view, _dir) = ticket(cx, &staged, vec![], true);
+    let cases: &[(Option<SizeUnit>, bool, &str, &str, &str)] = &[
+        (
+            None,
+            true,
+            "5",
+            "",
+            "The order would be worth less than the $10 minimum.",
+        ),
+        (
+            Some(SizeUnit::Coin),
+            true,
+            "1.505",
+            "",
+            "Size is too fine: at most 2 decimal places here.",
+        ),
+        (
+            Some(SizeUnit::Coin),
+            true,
+            "31",
+            "",
+            "Not enough to trade this size: at most 30 here.",
+        ),
+        (
+            Some(SizeUnit::Coin),
+            false,
+            "2",
+            "x",
+            "Price must be a number above zero.",
+        ),
+    ];
+    for (unit, at_market, size, price, message) in cases {
+        on_view(cx, window, &view, |v, _, cx| {
+            v.set_ticket_for_test(None, Some(*at_market), *unit, None, None, cx)
+        });
+        on_view(cx, window, &view, |v, w, cx| {
+            v.type_ticket(size, price, w, cx)
+        });
+        assert_eq!(
+            ticket_says(cx, window, &view),
+            (message.to_string(), false),
+            "{size} {price}"
+        );
+    }
+    // Reduce only with no position, then a take-profit on the wrong side.
+    on_view(cx, window, &view, |v, _, cx| {
+        v.set_ticket_for_test(None, Some(true), Some(SizeUnit::Coin), Some(true), None, cx)
+    });
+    on_view(cx, window, &view, |v, w, cx| v.type_ticket("1", "", w, cx));
+    assert_eq!(
+        ticket_says(cx, window, &view),
+        ("There is no position to reduce.".into(), false)
+    );
+    on_view(cx, window, &view, |v, _, cx| {
+        v.set_ticket_for_test(None, None, None, Some(false), Some(true), cx)
+    });
+    on_view(cx, window, &view, |v, w, cx| {
+        v.type_ticket_tpsl("150", "140", w, cx)
+    });
+    assert_eq!(
+        ticket_says(cx, window, &view),
+        (
+            "A take-profit for a buy must be above its price.".into(),
+            false
+        )
+    );
+    // Backing out sends nothing.
+    click(cx, window, "dialog-keep");
+    cx.update_window(window.into(), |_, _, cx| {
+        assert_eq!(view.read(cx).ticket_open(), None)
+    })
+    .unwrap();
+    assert!(staged.placed.borrow().is_empty());
+}
+
+#[gpui_kit::test]
+fn a_share_fills_in_part_of_what_can_be_traded(cx: &mut TestAppContext) {
+    let staged = Rc::new(Staged::new(Ok(())));
+    let (window, _desk, view, _dir) = ticket(cx, &staged, vec![], true);
+    // Half of the 30 HYPE the venue allows, in USD at the mid of 154.
+    on_view(cx, window, &view, |v, w, cx| v.ticket_share(50, w, cx));
+    let text = |cx: &mut TestAppContext| {
+        cx.update_window(window.into(), |_, _, cx| {
+            view.read(cx).ticket_size_text(cx).unwrap()
+        })
+        .unwrap()
+    };
+    assert_eq!(text(cx), "2310");
+    click(cx, window, "ticket-unit-coin");
+    on_view(cx, window, &view, |v, w, cx| v.ticket_share(50, w, cx));
+    assert_eq!(text(cx), "15");
+}
+
+#[gpui_kit::test]
+fn the_order_sent_is_the_one_shown(cx: &mut TestAppContext) {
+    let staged = Rc::new(Staged::new(Ok(())));
+    let (window, _desk, view, _dir) = ticket(cx, &staged, vec![], true);
+    on_view(cx, window, &view, |v, w, cx| {
+        v.type_ticket("100", "", w, cx)
+    });
+    click(cx, window, "dialog-confirm");
+    // A limit sell with a take-profit and stop-loss, in the coin.
+    on_view(cx, window, &view, |v, w, cx| {
+        v.dismiss_dialog(cx);
+        v.open_ticket(MarketId::new("HYPE"), false, w, cx)
+    });
+    on_view(cx, window, &view, |v, _, cx| {
+        v.set_ticket_for_test(
+            None,
+            Some(false),
+            Some(SizeUnit::Coin),
+            None,
+            Some(true),
+            cx,
+        )
+    });
+    on_view(cx, window, &view, |v, w, cx| {
+        v.type_ticket("2", "160", w, cx);
+        v.type_ticket_tpsl("150", "170", w, cx);
+    });
+    click(cx, window, "dialog-confirm");
+    assert_eq!(
+        *staged.placed.borrow(),
+        vec![
+            NewOrder {
+                asset: HYPE_ASSET,
+                buy: true,
+                size: dec("0.61"),
+                pricing: Pricing::Market {
+                    worst: dec("161.7")
+                },
+                reduce_only: false,
+                take_profit: None,
+                stop_loss: None,
+            },
+            NewOrder {
+                asset: HYPE_ASSET,
+                buy: false,
+                size: dec("2"),
+                pricing: Pricing::Limit { price: dec("160") },
+                reduce_only: false,
+                take_profit: Some(dec("150")),
+                stop_loss: Some(dec("170")),
+            },
+        ]
+    );
+}
+
+#[gpui_kit::test]
+fn the_ticket_says_why_it_cannot_send(cx: &mut TestAppContext) {
+    let cases = [
+        (
+            Unavailable::NoKey(Network::Testnet),
+            "An API key is needed to place orders",
+        ),
+        (
+            Unavailable::KeyNotApproved,
+            "The saved key cannot act for this account",
+        ),
+        (
+            Unavailable::MainnetOff,
+            "Trading on mainnet is switched off",
+        ),
+        (Unavailable::Overridden, "Placing orders is off"),
+    ];
+    for (why, heading) in cases {
+        let staged = Rc::new(Staged::new(Err(why)));
+        let (window, _desk, view, _dir) = ticket(cx, &staged, vec![], true);
+        on_view(cx, window, &view, |v, w, cx| {
+            v.type_ticket("100", "", w, cx)
+        });
+        assert_eq!(ticket_says(cx, window, &view), (heading.to_string(), false));
+        click(cx, window, "dialog-confirm");
+        assert!(staged.placed.borrow().is_empty());
+    }
+    // What the venue could not tell: the account, then the price.
+    let staged = Rc::new(Staged::new(Ok(())));
+    *staged.active.borrow_mut() = Err("no connection".into());
+    let (window, _desk, view, _dir) = ticket(cx, &staged, vec![], true);
+    on_view(cx, window, &view, |v, w, cx| {
+        v.type_ticket("100", "", w, cx)
+    });
+    assert_eq!(
+        ticket_says(cx, window, &view),
+        (
+            "What this account can trade could not be read: no connection.".into(),
+            false
+        )
+    );
+    let staged = Rc::new(Staged::new(Ok(())));
+    *staged.mid.borrow_mut() = Err("no connection".into());
+    let (window, _desk, view, _dir) = ticket(cx, &staged, vec![], true);
+    on_view(cx, window, &view, |v, w, cx| {
+        v.type_ticket("100", "", w, cx)
+    });
+    assert_eq!(
+        ticket_says(cx, window, &view),
+        (
+            "The market price could not be read: no connection.".into(),
+            false
+        )
+    );
+    // Asking again, once the venue answers.
+    *staged.mid.borrow_mut() = Ok(Some(dec("154")));
+    click(cx, window, "ticket-retry");
+    assert!(ticket_says(cx, window, &view).1);
+}
+
+#[gpui_kit::test]
+fn each_answer_is_said_in_the_ticket_and_both_lists_are_reloaded(cx: &mut TestAppContext) {
+    let filled = |size: &str| Outcome::Done {
+        filled: Some(Traded {
+            size: Some(dec(size)),
+            avg_price: Some(dec("154.2")),
+        }),
+        resting: false,
+    };
+    let cases: Vec<(Result<Answer, Unavailable>, &str, Option<&str>)> = vec![
+        (
+            Ok(Answer::Each(vec![filled("0.61")])),
+            "Bought 0.61 HYPE at an average of 154.2.",
+            None,
+        ),
+        (
+            Ok(Answer::Each(vec![filled("0.3")])),
+            "Bought 0.3 of 0.61 HYPE at an average of 154.2.",
+            Some("The rest did not fill within the price limit of 161.7; nothing is left resting."),
+        ),
+        (
+            Ok(Answer::Each(vec![Outcome::Refused(
+                "Order could not immediately match against any resting orders. asset=4".into(),
+            )])),
+            "Not filled: nothing on the book within the price limit of 161.7.",
+            Some(
+                "Hyperliquid said: Order could not immediately match against any resting orders. asset=4",
+            ),
+        ),
+        (
+            Ok(Answer::Unknown("the request timed out".into())),
+            "No answer from Hyperliquid (the request timed out). The order may or may not have gone through; positions and orders are being reloaded.",
+            None,
+        ),
+    ];
+    for (answer, text, more) in cases {
+        let staged = Rc::new(Staged::new(Ok(())));
+        staged.answers.borrow_mut().push_back(answer);
+        let (window, _desk, view, _dir) = ticket(cx, &staged, vec![], true);
+        on_view(cx, window, &view, |v, w, cx| {
+            v.type_ticket("100", "", w, cx)
+        });
+        click(cx, window, "dialog-confirm");
+        cx.update_window(window.into(), |_, _, cx| {
+            let view = view.read(cx);
+            // The ticket stays open with the answer.
+            assert!(view.ticket_open().is_some());
+            let (said, extra, _) = view.ticket_outcome().unwrap();
+            assert_eq!(said, text);
+            assert_eq!(extra.as_deref(), more);
+            assert_eq!(view.orders_refreshes(), 1);
+        })
+        .unwrap();
+        click(cx, window, "ticket-done");
+        cx.update_window(window.into(), |_, _, cx| {
+            assert_eq!(view.read(cx).ticket_open(), None)
+        })
+        .unwrap();
+    }
+    // A resting limit order.
+    let staged = Rc::new(Staged::new(Ok(())));
+    staged
+        .answers
+        .borrow_mut()
+        .push_back(Ok(Answer::Each(vec![Outcome::Done {
+            filled: None,
+            resting: true,
+        }])));
+    let (window, _desk, view, _dir) = ticket(cx, &staged, vec![], false);
+    on_view(cx, window, &view, |v, _, cx| {
+        v.set_ticket_for_test(None, Some(false), Some(SizeUnit::Coin), None, None, cx)
+    });
+    on_view(cx, window, &view, |v, w, cx| {
+        v.type_ticket("2", "160", w, cx)
+    });
+    click(cx, window, "dialog-confirm");
+    cx.update_window(window.into(), |_, _, cx| {
+        assert_eq!(
+            view.read(cx).ticket_outcome().unwrap().0,
+            "Order placed: Sell 2 HYPE at 160. It is resting and listed in Open orders."
+        );
+    })
+    .unwrap();
+}
+
+#[gpui_kit::test]
+fn an_order_with_the_venue_holds_every_other_action(cx: &mut TestAppContext) {
+    let staged = Rc::new(Staged::new(Ok(())));
+    let (window, _desk, view, _dir) = ticket(cx, &staged, vec![long_nvda()], true);
+    on_view(cx, window, &view, |v, w, cx| {
+        v.type_ticket("100", "", w, cx)
+    });
+    staged.hold.set(true);
+    click(cx, window, "dialog-confirm");
+    cx.update_window(window.into(), |_, _, cx| {
+        let view = view.read(cx);
+        assert_eq!(view.positions_pending(), [4]);
+        assert!(view.position_controls().iter().all(|c| c.2));
+        assert!(!view.can_close_all());
+    })
+    .unwrap();
+}
+
+#[gpui_kit::test]
+fn the_panel_opens_the_ticket_on_the_side_pressed(cx: &mut TestAppContext) {
+    let (window, desk, _dir) = open_with(cx, Some(&["HYPE", "BTC"]));
+    let markets = go_to_markets(window, &desk, cx);
+    cx.update_window(window.into(), |_, window, cx| {
+        let portfolio = desk.read(cx).portfolio_view().unwrap();
+        portfolio.update(cx, |p, _| p.use_trading(Rc::new(Staged::new(Ok(())))));
+        markets.update(cx, |view, cx| {
+            view.set_snapshot(priced_snapshot(&["HYPE", "BTC"]), cx)
+        });
+        window.render_frame(cx);
+        // Named with the market for assistive technology.
+        assert_eq!(window.find_all_by_label("Buy HYPE").len(), 1);
+        assert_eq!(window.find_all_by_label("Sell HYPE").len(), 1);
+    })
+    .unwrap();
+    click(cx, window, "trade-sell");
+    cx.update_window(window.into(), |_, window, cx| {
+        let portfolio = desk.read(cx).portfolio_view().unwrap();
+        assert_eq!(
+            portfolio.read(cx).ticket_open(),
+            Some(("HYPE".into(), false, true))
+        );
+        // Drawn over the Markets section.
+        assert!(window.try_find("ticket-dialog").is_some());
+    })
+    .unwrap();
+
+    // A market the venue no longer lists offers neither button.
+    cx.update_window(window.into(), |_, window, cx| {
+        let portfolio = desk.read(cx).portfolio_view().unwrap();
+        portfolio.update(cx, |p, cx| p.dismiss_dialog(cx));
+        let mut snapshot = priced_snapshot(&["HYPE"]);
+        snapshot.tiles[0].unavailable = true;
+        markets.update(cx, |view, cx| view.set_snapshot(snapshot, cx));
+        window.render_frame(cx);
+        assert!(window.try_find("trade-buy").is_none());
+    })
+    .unwrap();
+}
+
+// ---- Quick order sizes in Settings ----
+
+use galata_desk_core::store::QuickSizes;
+
+/// A window tall enough to show all of Settings without scrolling.
+fn open_tall(cx: &mut TestAppContext) -> (WindowHandle<Root>, Entity<Desk>, tempfile::TempDir) {
+    open_sized(cx, false, size(px(1320.), px(1400.)))
+}
+
+/// Open Settings and hand back its view.
+fn open_settings(
+    cx: &mut TestAppContext,
+    window: WindowHandle<Root>,
+    desk: &Entity<Desk>,
+) -> Entity<crate::settings::Settings> {
+    click(cx, window, "settings");
+    cx.update_window(window.into(), |_, _, cx| {
+        desk.read(cx).settings_view().unwrap()
+    })
+    .unwrap()
+}
+
+fn type_quick(
+    cx: &mut TestAppContext,
+    window: WindowHandle<Root>,
+    settings: &Entity<crate::settings::Settings>,
+    ix: usize,
+    text: &str,
+) {
+    cx.update_window(window.into(), |_, window, cx| {
+        settings.update(cx, |view, cx| view.type_quick(ix, text, window, cx));
+    })
+    .unwrap();
+    cx.run_until_parked();
+    cx.update_window(window.into(), |_, window, cx| {
+        settings.update(cx, |_, cx| cx.notify());
+        window.render_frame(cx)
+    })
+    .unwrap();
+}
+
+fn remove_quick(cx: &mut TestAppContext, window: WindowHandle<Root>, ix: usize) {
+    cx.update_window(window.into(), |_, window, cx| {
+        window.click(("quick-size-remove", ix), cx)
+    })
+    .unwrap();
+    cx.run_until_parked();
+    cx.update_window(window.into(), |_, window, cx| window.render_frame(cx))
+        .unwrap();
+}
+
+fn quick_in_use(cx: &mut TestAppContext) -> Vec<u64> {
+    cx.update(|cx| Core::get(cx).quick_sizes.amounts().to_vec())
+}
+
+#[gpui_kit::test]
+fn quick_sizes_start_at_the_default_and_a_changed_list_is_used_and_saved(cx: &mut TestAppContext) {
+    let (window, desk, dir) = open_tall(cx);
+    assert_eq!(quick_in_use(cx), [5_000, 10_000, 25_000]);
+    let settings = open_settings(cx, window, &desk);
+    cx.update_window(window.into(), |_, window, cx| {
+        assert_eq!(
+            settings.read(cx).quick_field_texts(cx),
+            ["5000", "10000", "25000"]
+        );
+        assert_eq!(window.find_all_by_label("Quick size 1").len(), 1);
+        assert_eq!(window.find_all_by_label("Remove Quick size 3").len(), 1);
+    })
+    .unwrap();
+
+    type_quick(cx, window, &settings, 0, "2000");
+    type_quick(cx, window, &settings, 1, "20000");
+    remove_quick(cx, window, 2);
+    assert_eq!(quick_in_use(cx), [2_000, 20_000]);
+    let stored = Store::at(dir.path()).settings();
+    assert_eq!(stored.quick_sizes.amounts(), [2_000, 20_000]);
+    // Nothing else changed.
+    assert_eq!(stored.network, Network::Mainnet);
+    assert!(!stored.allow_mainnet_trading);
+}
+
+#[gpui_kit::test]
+fn quick_sizes_are_remembered_across_launches(cx: &mut TestAppContext) {
+    let dir = tempfile::tempdir().unwrap();
+    Store::at(dir.path())
+        .save_settings(&galata_desk_core::store::Settings {
+            quick_sizes: QuickSizes::check(&["2000", "20000"]).unwrap(),
+            ..Default::default()
+        })
+        .unwrap();
+    let (_window, _desk) = open_at(
+        cx,
+        dir.path(),
+        false,
+        size(
+            px(crate::DEFAULT_WINDOW_WIDTH),
+            px(crate::DEFAULT_WINDOW_HEIGHT),
+        ),
+    );
+    assert_eq!(quick_in_use(cx), [2_000, 20_000]);
+}
+
+#[gpui_kit::test]
+fn a_quick_size_that_breaks_a_rule_says_why_and_changes_nothing(cx: &mut TestAppContext) {
+    let (window, desk, dir) = open_tall(cx);
+    let settings = open_settings(cx, window, &desk);
+    let before = std::fs::read_to_string(dir.path().join("settings.json")).ok();
+    for (text, reasons) in [
+        ("2500.5", [Some("Whole dollars only."), None, None]),
+        ("5", [Some("At least $10."), None, None]),
+        // Typed while $10k is listed: both fields say so.
+        (
+            "10000",
+            [Some("Already listed."), Some("Already listed."), None],
+        ),
+    ] {
+        type_quick(cx, window, &settings, 0, text);
+        cx.update_window(window.into(), |_, _, cx| {
+            assert_eq!(settings.read(cx).quick_problems(cx), reasons, "{text}");
+        })
+        .unwrap();
+        // The last valid list stays in use, and the file is untouched.
+        assert_eq!(quick_in_use(cx), [5_000, 10_000, 25_000], "{text}");
+        assert_eq!(
+            std::fs::read_to_string(dir.path().join("settings.json")).ok(),
+            before,
+            "{text}"
+        );
+    }
+    // Fixed: used at once.
+    type_quick(cx, window, &settings, 0, "1000");
+    cx.update_window(window.into(), |_, _, cx| {
+        assert_eq!(settings.read(cx).quick_problems(cx), [None, None, None]);
+    })
+    .unwrap();
+    assert_eq!(quick_in_use(cx), [1_000, 10_000, 25_000]);
+}
+
+#[gpui_kit::test]
+fn add_stops_at_four_remove_at_one_and_reset_restores_the_default(cx: &mut TestAppContext) {
+    let (window, desk, dir) = open_tall(cx);
+    let settings = open_settings(cx, window, &desk);
+    click(cx, window, "quick-size-add");
+    // A new field is empty: not valid yet, says nothing, and the list in
+    // use is unchanged.
+    cx.update_window(window.into(), |_, window, cx| {
+        assert_eq!(settings.read(cx).quick_field_texts(cx).len(), 4);
+        assert_eq!(settings.read(cx).quick_problems(cx), [None; 4]);
+        // Four fields: no more can be added.
+        assert!(window.try_find("quick-size-add").is_none());
+    })
+    .unwrap();
+    assert_eq!(quick_in_use(cx), [5_000, 10_000, 25_000]);
+    type_quick(cx, window, &settings, 3, "1000");
+    assert_eq!(quick_in_use(cx), [1_000, 5_000, 10_000, 25_000]);
+
+    for _ in 0..3 {
+        remove_quick(cx, window, 0);
+    }
+    // The field typed last is the one left.
+    assert_eq!(quick_in_use(cx), [1_000]);
+    // One left: it cannot be removed.
+    remove_quick(cx, window, 0);
+    cx.update_window(window.into(), |_, _, cx| {
+        assert_eq!(settings.read(cx).quick_field_texts(cx), ["1000"]);
+    })
+    .unwrap();
+    assert_eq!(quick_in_use(cx), [1_000]);
+
+    click(cx, window, "quick-size-reset");
+    cx.update_window(window.into(), |_, _, cx| {
+        assert_eq!(
+            settings.read(cx).quick_field_texts(cx),
+            ["5000", "10000", "25000"]
+        );
+    })
+    .unwrap();
+    assert_eq!(quick_in_use(cx), [5_000, 10_000, 25_000]);
+    assert_eq!(
+        Store::at(dir.path()).settings().quick_sizes,
+        QuickSizes::default()
+    );
+}
+
+// ---- Quick sizes in the order ticket ----
+
+use crate::portfolio::QuickButton;
+
+/// A stand-in account that can trade up to `buy` and `sell` of the coin.
+fn account_trading(buy: &str, sell: &str) -> galata_desk_core::venue::ActiveAsset {
+    serde_json::from_value(serde_json::json!({
+        "leverage": { "type": "cross", "value": 5 },
+        "maxTradeSzs": [buy, sell],
+        "availableToTrade": ["3737.4", "3737.4"],
+        "markPx": "154"
+    }))
+    .unwrap()
+}
+
+fn press_quick(cx: &mut TestAppContext, window: WindowHandle<Root>, amount: u64) {
+    cx.update_window(window.into(), |_, window, cx| {
+        window.click(
+            gpui_kit::ElementId::NamedInteger("ticket-quick".into(), amount),
+            cx,
+        )
+    })
+    .unwrap();
+    cx.run_until_parked();
+    cx.update_window(window.into(), |_, window, cx| window.render_frame(cx))
+        .unwrap();
+}
+
+fn quick_buttons(
+    cx: &mut TestAppContext,
+    window: WindowHandle<Root>,
+    view: &Entity<Portfolio>,
+) -> (Vec<QuickButton>, Option<u64>) {
+    cx.update_window(window.into(), |_, _, cx| {
+        view.read(cx).ticket_quick_buttons(cx).unwrap()
+    })
+    .unwrap()
+}
+
+/// Which quick sizes are marked, and which can be pressed.
+fn marked_and_usable(buttons: &[QuickButton]) -> (Vec<u64>, Vec<u64>) {
+    (
+        buttons
+            .iter()
+            .filter(|b| b.marked)
+            .map(|b| b.amount)
+            .collect(),
+        buttons
+            .iter()
+            .filter(|b| b.usable)
+            .map(|b| b.amount)
+            .collect(),
+    )
+}
+
+#[gpui_kit::test]
+fn a_quick_size_fills_in_dollars_from_the_coin_and_stays_marked_while_it_matches(
+    cx: &mut TestAppContext,
+) {
+    let staged = Rc::new(Staged::new(Ok(())));
+    *staged.active.borrow_mut() = Ok(account_trading("1000", "1000"));
+    let (window, _desk, view, _dir) = ticket(cx, &staged, vec![], true);
+    click(cx, window, "ticket-unit-coin");
+    on_view(cx, window, &view, |v, w, cx| {
+        v.type_ticket("1.5", "", w, cx)
+    });
+    // In the coin, 1.5 is not a dollar amount: nothing is marked.
+    let (buttons, most) = quick_buttons(cx, window, &view);
+    assert_eq!(
+        marked_and_usable(&buttons),
+        (vec![], vec![5_000, 10_000, 25_000])
+    );
+    assert_eq!(most, None);
+
+    press_quick(cx, window, 5_000);
+    cx.update_window(window.into(), |_, _, cx| {
+        let view = view.read(cx);
+        assert_eq!(view.ticket_unit(), Some(SizeUnit::Usd));
+        assert_eq!(view.ticket_size_text(cx).as_deref(), Some("5000"));
+    })
+    .unwrap();
+    // $5,000 at the worst price of 161.7: 30.92 HYPE.
+    assert_eq!(
+        ticket_says(cx, window, &view),
+        ("buy 30.92 at 161.7".into(), true)
+    );
+    assert_eq!(
+        marked_and_usable(&quick_buttons(cx, window, &view).0).0,
+        [5_000]
+    );
+
+    press_quick(cx, window, 10_000);
+    assert_eq!(
+        marked_and_usable(&quick_buttons(cx, window, &view).0).0,
+        [10_000]
+    );
+    // Typing another size: nothing marked. Typing the amount: marked again.
+    on_view(cx, window, &view, |v, w, cx| {
+        v.type_ticket("7500", "", w, cx)
+    });
+    assert!(
+        marked_and_usable(&quick_buttons(cx, window, &view).0)
+            .0
+            .is_empty()
+    );
+    on_view(cx, window, &view, |v, w, cx| {
+        v.type_ticket("25000", "", w, cx)
+    });
+    assert_eq!(
+        marked_and_usable(&quick_buttons(cx, window, &view).0).0,
+        [25_000]
+    );
+    // The same digits in the coin are not dollars.
+    click(cx, window, "ticket-unit-coin");
+    assert!(
+        marked_and_usable(&quick_buttons(cx, window, &view).0)
+            .0
+            .is_empty()
+    );
+}
+
+#[gpui_kit::test]
+fn quick_sizes_above_what_the_account_can_trade_cannot_be_pressed(cx: &mut TestAppContext) {
+    let staged = Rc::new(Staged::new(Ok(())));
+    // Buying at the worst price of 161.7, 49.48 HYPE is about $8,000; selling
+    // at 146.3, 200 HYPE is $29,260.
+    *staged.active.borrow_mut() = Ok(account_trading("49.48", "200"));
+    let (window, _desk, view, _dir) = ticket(cx, &staged, vec![], true);
+    let (buttons, most) = quick_buttons(cx, window, &view);
+    assert_eq!(marked_and_usable(&buttons).1, [5_000]);
+    assert_eq!(most, Some(8_000));
+    cx.update_window(window.into(), |_, window, _| {
+        assert_eq!(window.find_all_by_label("Size $5k").len(), 1);
+        assert_eq!(
+            window
+                .find_all_by_label("Size $10k, more than this account can trade")
+                .len(),
+            1
+        );
+        assert_eq!(
+            window
+                .find_all_by_label("Size $25k, more than this account can trade")
+                .len(),
+            1
+        );
+    })
+    .unwrap();
+    // Pressing one that is out of reach does nothing.
+    press_quick(cx, window, 10_000);
+    cx.update_window(window.into(), |_, _, cx| {
+        assert_eq!(view.read(cx).ticket_size_text(cx).as_deref(), Some(""));
+    })
+    .unwrap();
+    press_quick(cx, window, 5_000);
+    cx.update_window(window.into(), |_, _, cx| {
+        assert_eq!(view.read(cx).ticket_size_text(cx).as_deref(), Some("5000"));
+    })
+    .unwrap();
+
+    // The sell side allows more: every button can be pressed, and the line
+    // goes.
+    click(cx, window, "ticket-sell");
+    let (buttons, most) = quick_buttons(cx, window, &view);
+    assert_eq!(marked_and_usable(&buttons).1, [5_000, 10_000, 25_000]);
+    assert_eq!(most, None);
+    cx.update_window(window.into(), |_, window, _| {
+        assert_eq!(window.find_all_by_label("Size $25k").len(), 1);
+    })
+    .unwrap();
+}
+
+#[gpui_kit::test]
+fn every_quick_size_can_be_pressed_before_the_venue_answers(cx: &mut TestAppContext) {
+    let staged = Rc::new(Staged::new(Ok(())));
+    *staged.active.borrow_mut() = Ok(account_trading("1", "1"));
+    staged.hold.set(true);
+    let (window, _desk, view, _dir) = ticket(cx, &staged, vec![], true);
+    let (buttons, most) = quick_buttons(cx, window, &view);
+    assert_eq!(marked_and_usable(&buttons).1, [5_000, 10_000, 25_000]);
+    assert_eq!(most, None);
+    press_quick(cx, window, 25_000);
+    cx.update_window(window.into(), |_, _, cx| {
+        assert_eq!(view.read(cx).ticket_size_text(cx).as_deref(), Some("25000"));
+    })
+    .unwrap();
+}
+
+#[gpui_kit::test]
+fn the_ticket_offers_the_quick_sizes_chosen_in_settings(cx: &mut TestAppContext) {
+    let staged = Rc::new(Staged::new(Ok(())));
+    *staged.active.borrow_mut() = Ok(account_trading("1000", "1000"));
+    let (window, _desk, view, _dir) = ticket(cx, &staged, vec![], true);
+    cx.update(|cx| {
+        cx.global_mut::<Core>().quick_sizes = QuickSizes::check(&["20000", "2000"]).unwrap();
+    });
+    on_view(cx, window, &view, |_, _, cx| cx.notify());
+    let (buttons, _) = quick_buttons(cx, window, &view);
+    assert_eq!(
+        buttons.iter().map(|b| b.amount).collect::<Vec<_>>(),
+        [2_000, 20_000]
+    );
+    cx.update_window(window.into(), |_, window, _| {
+        assert_eq!(window.find_all_by_label("Size $2k").len(), 1);
+        assert_eq!(window.find_all_by_label("Size $20k").len(), 1);
+        assert!(window.find_all_by_label("Size $5k").is_empty());
+    })
+    .unwrap();
+}
+
+// ---- The History section -------------------------------------------------
+
+mod history_section {
+    use super::*;
+    use crate::history::History;
+    use galata_desk_core::history::Period;
+    use galata_desk_core::history::feed::{HistorySnapshot, OrdersHeld, Tab};
+    use galata_desk_core::history::loader::Paged;
+    use galata_desk_core::history::orders::Status;
+    use galata_desk_core::venue::{
+        FundingDelta, HistoricalOrder, LedgerDelta, LedgerRow, OpenOrder, UserFundingRow,
+        VenueError,
+    };
+
+    const MINUTE_MS: u64 = 60_000;
+
+    fn d(s: &str) -> Decimal {
+        s.parse().unwrap()
+    }
+
+    /// Click History in the section switch and return the view.
+    fn go_to_history(
+        window: WindowHandle<Root>,
+        desk: &Entity<Desk>,
+        cx: &mut TestAppContext,
+    ) -> Entity<History> {
+        cx.update_window(window.into(), |_, window, cx| {
+            window.render_frame(cx);
+            window.within("sections").click(3usize, cx);
+        })
+        .unwrap();
+        cx.run_until_parked();
+        cx.update_window(window.into(), |_, window, cx| {
+            window.render_frame(cx);
+            desk.read(cx)
+                .history_view()
+                .expect("an account is connected")
+        })
+        .unwrap()
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn fill(
+        id: u64,
+        oid: u64,
+        coin: &str,
+        dir: &str,
+        price: &str,
+        size: &str,
+        fee: &str,
+        taker: bool,
+        pnl: &str,
+        minutes_ago: u64,
+    ) -> Fill {
+        Fill {
+            coin: coin.into(),
+            side: if matches!(dir, "Open Long" | "Close Short") {
+                FillSide::Bought
+            } else {
+                FillSide::Sold
+            },
+            price: d(price),
+            size: d(size),
+            time_ms: now_ms() - minutes_ago * MINUTE_MS,
+            realised: d(pnl),
+            fee: d(fee),
+            id,
+            dir: dir.into(),
+            taker,
+            oid,
+            hash: format!("0x{id:064x}"),
+        }
+    }
+
+    /// The spec's fills: ANT opened and part closed, and one NVDA order in
+    /// five fills.
+    fn the_fills() -> Vec<Fill> {
+        let mut fills = vec![
+            fill(
+                1,
+                61,
+                "xyz:ANT",
+                "Open Short",
+                "105.00",
+                "28.57",
+                "0.09",
+                false,
+                "0",
+                10,
+            ),
+            fill(
+                2,
+                63,
+                "xyz:ANT",
+                "Close Short",
+                "101.00",
+                "14.85",
+                "0.04",
+                false,
+                "21.24",
+                20,
+            ),
+            fill(
+                3,
+                64,
+                "xyz:ANT",
+                "Open Short",
+                "105.00",
+                "23.80",
+                "0.07",
+                true,
+                "0",
+                30,
+            ),
+        ];
+        for (i, size) in ["0.367", "5.970", "6.650", "0.347", "6.650"]
+            .iter()
+            .enumerate()
+        {
+            let fee = if size.starts_with("0.") { "0" } else { "0.03" };
+            fills.push(fill(
+                10 + i as u64,
+                68,
+                "xyz:NVDA",
+                "Open Long",
+                "150.12",
+                size,
+                fee,
+                true,
+                "0",
+                3 * 24 * 60 + i as u64,
+            ));
+        }
+        fills
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn order(
+        oid: u64,
+        status: &str,
+        minutes_ago: u64,
+        sz: &str,
+        orig: &str,
+        kind: &str,
+        reduce: bool,
+        side: Side,
+    ) -> HistoricalOrder {
+        let at = now_ms() - minutes_ago * MINUTE_MS;
+        HistoricalOrder {
+            order: OpenOrder {
+                coin: "xyz:ANT".into(),
+                side,
+                limit_px: d("105"),
+                sz: d(sz),
+                orig_sz: d(orig),
+                oid,
+                timestamp: at - 60 * MINUTE_MS,
+                order_type: kind.into(),
+                reduce_only: reduce,
+                is_trigger: kind != "Limit",
+                trigger_condition: if kind == "Limit" {
+                    "N/A".into()
+                } else {
+                    "Price below 85".into()
+                },
+                trigger_px: if kind == "Limit" {
+                    Decimal::ZERO
+                } else {
+                    d("85")
+                },
+                is_position_tpsl: orig == "0",
+                tif: None,
+            },
+            status: status.into(),
+            status_timestamp: at,
+        }
+    }
+
+    fn the_orders() -> HistorySnapshot {
+        let mut snapshot = HistorySnapshot::default();
+        snapshot.orders.data = Some(OrdersHeld {
+            rows: vec![
+                order(1, "filled", 5, "0", "28.57", "Limit", false, Side::Sell),
+                order(1, "open", 30, "28.57", "28.57", "Limit", false, Side::Sell),
+                order(
+                    2,
+                    "reduceOnlyCanceled",
+                    40,
+                    "0",
+                    "0",
+                    "Take Profit Market",
+                    true,
+                    Side::Buy,
+                ),
+                order(3, "open", 50, "15", "15", "Limit", false, Side::Buy),
+            ],
+            shown_from: None,
+        });
+        snapshot
+    }
+
+    fn payment(
+        minutes_ago: u64,
+        coin: &str,
+        szi: &str,
+        usdc: &str,
+        rate: &str,
+        n: u32,
+    ) -> UserFundingRow {
+        UserFundingRow {
+            time: now_ms() - minutes_ago * MINUTE_MS,
+            delta: FundingDelta {
+                coin: coin.into(),
+                usdc: d(usdc),
+                szi: d(szi),
+                funding_rate: d(rate),
+                n_samples: n,
+            },
+        }
+    }
+
+    fn the_payments() -> HistorySnapshot {
+        let mut rows: Vec<UserFundingRow> = (1..=29)
+            .map(|day| {
+                payment(
+                    day * 24 * 60 + 30,
+                    "xyz:SILVER",
+                    "212.54",
+                    "-1.94",
+                    "0.000021",
+                    24,
+                )
+            })
+            .collect();
+        rows.push(payment(30, "xyz:SILVER", "212.54", "-2.05", "0.000021", 24));
+        rows.push(payment(5 * 24 * 60, "BTC", "-0.5", "0.20", "0.00001", 1));
+        rows.push(payment(
+            20,
+            "xyz:COPPER",
+            "871.62",
+            "0.0436",
+            "-0.000009",
+            1,
+        ));
+        let mut snapshot = HistorySnapshot::default();
+        snapshot.funding.data = Some(Paged {
+            rows,
+            from_ms: Some(0),
+            stopped_at: None,
+        });
+        snapshot
+    }
+
+    fn ledger_row(minutes_ago: u64, hash: &str, delta: LedgerDelta) -> LedgerRow {
+        LedgerRow {
+            time: now_ms() - minutes_ago * MINUTE_MS,
+            hash: hash.into(),
+            delta,
+        }
+    }
+
+    fn the_transfers() -> HistorySnapshot {
+        let mut snapshot = HistorySnapshot::default();
+        snapshot.ledger.data = Some(Paged {
+            rows: vec![
+                ledger_row(
+                    3 * 24 * 60,
+                    "0x5c1e00000000000000000000000000000000000000000000000000000000009a04",
+                    LedgerDelta::Deposit {
+                        usdc: d("18706.66"),
+                    },
+                ),
+                ledger_row(
+                    3 * 24 * 60 + 2,
+                    "0x81ad000000000000000000000000000000000000000000000000000000002f6c",
+                    LedgerDelta::Deposit { usdc: d("19.80") },
+                ),
+                ledger_row(
+                    60,
+                    "0x77",
+                    LedgerDelta::AccountClassTransfer {
+                        usdc: d("500"),
+                        to_perp: false,
+                    },
+                ),
+            ],
+            from_ms: Some(0),
+            stopped_at: None,
+        });
+        snapshot
+    }
+
+    #[gpui_kit::test]
+    fn history_is_a_section_on_trades_with_the_footer_and_no_trading_control(
+        cx: &mut TestAppContext,
+    ) {
+        let (window, desk, _dir) = open(cx, true);
+        let history = go_to_history(window, &desk, cx);
+        cx.update_window(window.into(), |_, window, cx| {
+            assert_eq!(desk.read(cx).section(), Some(Section::History));
+            assert_eq!(history.read(cx).tab(), Tab::Trades);
+            assert_eq!(history.read(cx).period(), Period::Month);
+            assert!(window.try_find("account-footer").is_some());
+            for forbidden in [
+                "Buy", "Sell", "Close", "Cancel", "Amend", "Deposit", "Withdraw", "Transfer",
+            ] {
+                assert!(
+                    window.find_all_by_label(forbidden).is_empty(),
+                    "a `{forbidden}` control is in History"
+                );
+            }
+        })
+        .unwrap();
+    }
+
+    #[gpui_kit::test]
+    fn history_is_not_offered_before_connecting(cx: &mut TestAppContext) {
+        let (window, desk, _dir) = open(cx, false);
+        cx.update_window(window.into(), |_, window, cx| {
+            window.render_frame(cx);
+            assert!(desk.read(cx).history_view().is_none());
+            assert!(window.find_all_by_label("History").is_empty());
+        })
+        .unwrap();
+    }
+
+    #[gpui_kit::test]
+    fn a_tabs_filter_is_kept_across_a_round_trip_to_markets(cx: &mut TestAppContext) {
+        let (window, desk, _dir) = open_with(cx, Some(&["BTC"]));
+        let history = go_to_history(window, &desk, cx);
+        cx.update_window(window.into(), |_, _, cx| {
+            history.update(cx, |view, cx| {
+                view.set_snapshot(the_orders(), cx);
+                view.set_tab(Tab::Orders, cx);
+                view.order_filter_mut().status = Some(Status::Filled);
+                view.refilter(cx);
+            });
+        })
+        .unwrap();
+        go_to_markets(window, &desk, cx);
+        let history = go_to_history(window, &desk, cx);
+        cx.update_window(window.into(), |_, _, cx| {
+            let view = history.read(cx);
+            assert_eq!(view.tab(), Tab::Orders);
+            assert_eq!(view.column(10, cx), ["Filled"]);
+        })
+        .unwrap();
+    }
+
+    #[gpui_kit::test]
+    fn the_counts_beside_the_tabs_follow_the_period(cx: &mut TestAppContext) {
+        let (window, desk, _dir) = open(cx, true);
+        let history = go_to_history(window, &desk, cx);
+        cx.update_window(window.into(), |_, window, cx| {
+            give_account(&desk, None, Some(walked(the_fills())), cx);
+            history.update(cx, |view, cx| {
+                view.set_grouped(false, cx);
+                view.set_snapshot(the_orders(), cx);
+            });
+            window.render_frame(cx);
+            assert_eq!(history.read(cx).count(Tab::Trades), Some(8));
+            assert_eq!(history.read(cx).count(Tab::Orders), Some(3));
+            history.update(cx, |view, cx| view.set_period(Period::Day, cx));
+            // The NVDA fills were three days ago.
+            assert_eq!(history.read(cx).count(Tab::Trades), Some(3));
+            window.render_frame(cx);
+            assert!(!window.find_all_by_label("Trades 3").is_empty());
+        })
+        .unwrap();
+    }
+
+    #[gpui_kit::test]
+    fn an_export_writes_the_listed_rows_and_nothing_else(cx: &mut TestAppContext) {
+        let (window, desk, dir) = open(cx, true);
+        let history = go_to_history(window, &desk, cx);
+        let path = dir.path().join("ant.csv");
+        cx.update_window(window.into(), |_, _, cx| {
+            give_account(&desk, None, Some(walked(the_fills())), cx);
+            history.update(cx, |view, cx| {
+                view.set_grouped(false, cx);
+                view.trade_filter_mut().coin = Some("xyz:ANT".into());
+                view.refilter(cx);
+                view.export_to(path.clone(), cx);
+            });
+            assert_eq!(
+                history.read(cx).note().as_deref(),
+                Some("Exported 3 rows to ant.csv.")
+            );
+        })
+        .unwrap();
+        let text = std::fs::read_to_string(&path).unwrap();
+        let lines: Vec<&str> = text.lines().collect();
+        assert_eq!(lines.len(), 4);
+        assert!(lines[0].starts_with("time_utc,market,direction"));
+        assert!(lines[1..].iter().all(|l| l.contains(",xyz:ANT,")));
+    }
+
+    #[gpui_kit::test]
+    fn trades_show_each_fill_and_group_an_orders_fills(cx: &mut TestAppContext) {
+        let (window, desk, _dir) = open(cx, true);
+        let history = go_to_history(window, &desk, cx);
+        cx.update_window(window.into(), |_, _, cx| {
+            give_account(&desk, None, Some(walked(the_fills())), cx);
+        })
+        .unwrap();
+        cx.run_until_parked();
+        cx.update_window(window.into(), |_, window, cx| {
+            window.render_frame(cx);
+            let view = history.read(cx);
+            // Grouped by default: the five NVDA fills are one row.
+            assert_eq!(
+                view.column(2, cx),
+                ["Open Short", "Close Short", "Open Short", "Open Long"]
+            );
+            assert_eq!(view.column(4, cx)[3], "19.984 NVDA 5 fills");
+            assert_eq!(view.column(3, cx)[3], "150.12");
+            // The opening fill: its value and fee, and no closed PNL.
+            assert_eq!(view.column(1, cx)[0], "ANT xyz");
+            assert_eq!(view.column(4, cx)[0], "28.57 ANT");
+            assert_eq!(view.column(5, cx)[0], "$2,999.85");
+            assert_eq!(view.column(6, cx)[0], "$0.09");
+            assert_eq!(view.column(8, cx)[0], "\u{2014}");
+            assert_eq!(view.column(7, cx)[0], "Maker");
+            // The closing fill realised PNL; the last ANT fill took.
+            assert_eq!(view.column(8, cx)[1], "+$21.24");
+            assert_eq!(view.column(7, cx)[2], "Taker");
+            let totals = view.trade_totals();
+            assert_eq!(totals.rows, 4);
+            assert_eq!(totals.fills, 8);
+            assert_eq!(totals.closed_pnl, d("21.24"));
+            // Every fill, with grouping off.
+            history.update(cx, |view, cx| view.set_grouped(false, cx));
+            assert_eq!(history.read(cx).column(2, cx).len(), 8);
+            // The venue held every fill: no note about how far back.
+            assert!(window.try_find("history-reach").is_none());
+        })
+        .unwrap();
+    }
+
+    #[gpui_kit::test]
+    fn trades_say_from_when_they_are_shown_when_the_venue_kept_no_older(cx: &mut TestAppContext) {
+        let (window, desk, _dir) = open(cx, true);
+        let history = go_to_history(window, &desk, cx);
+        cx.update_window(window.into(), |_, _, cx| {
+            give_account(
+                &desk,
+                None,
+                Some(Fills {
+                    rows: the_fills(),
+                    capped: true,
+                    walked: true,
+                }),
+                cx,
+            );
+        })
+        .unwrap();
+        cx.run_until_parked();
+        cx.update_window(window.into(), |_, window, cx| {
+            // Within 24 hours the fills reach back far enough.
+            history.update(cx, |view, cx| view.set_period(Period::Day, cx));
+            window.render_frame(cx);
+            assert!(window.try_find("history-reach").is_none());
+            history.update(cx, |view, cx| view.set_period(Period::Month, cx));
+            window.render_frame(cx);
+            assert!(window.try_find("history-reach").is_some());
+            let note = history.update(cx, |view, cx| view.reach_text(cx)).unwrap();
+            assert!(note.starts_with("* Trades before"), "{note}");
+            assert!(note.contains("latest 10,000 fills"), "{note}");
+        })
+        .unwrap();
+    }
+
+    #[gpui_kit::test]
+    fn orders_show_each_order_once_at_its_latest_status(cx: &mut TestAppContext) {
+        let (window, desk, _dir) = open(cx, true);
+        let history = go_to_history(window, &desk, cx);
+        cx.update_window(window.into(), |_, window, cx| {
+            history.update(cx, |view, cx| {
+                view.set_snapshot(the_orders(), cx);
+                view.set_tab(Tab::Orders, cx);
+            });
+            window.render_frame(cx);
+            let view = history.read(cx);
+            // Newest placed first; the order that rested and filled is one row.
+            assert_eq!(view.column(10, cx), ["Filled", "Cancelled", "Open"]);
+            assert_eq!(view.column(4, cx)[0], "28.57 ANT");
+            assert_eq!(view.column(5, cx)[0], "28.57");
+            assert_eq!(view.column(7, cx)[0], "$2,999.85");
+            // The take-profit: at market, reduce-only, with its trigger.
+            assert_eq!(view.column(2, cx)[1], "Close Short");
+            assert_eq!(view.column(3, cx)[1], "Take Profit Market");
+            assert_eq!(view.column(4, cx)[1], "Position");
+            assert_eq!(view.column(6, cx)[1], "Market");
+            assert_eq!(view.column(8, cx)[1], "Yes");
+            assert_eq!(view.column(9, cx)[1], "Price below 85");
+            // Its status says why it was cancelled.
+            assert!(view.tip(1, 10, cx).unwrap().contains("reduce-only"));
+            assert_eq!(view.tip(0, 10, cx), None);
+            let (all, by) = view.order_counts();
+            assert_eq!(all, 3);
+            assert_eq!(by[&Status::Open], 1);
+            // Only open orders.
+            history.update(cx, |view, cx| {
+                view.order_filter_mut().status = Some(Status::Open);
+                view.refilter(cx);
+            });
+            assert_eq!(history.read(cx).column(10, cx), ["Open"]);
+        })
+        .unwrap();
+    }
+
+    #[gpui_kit::test]
+    fn funding_payments_are_summed_by_market_and_listed_one_by_one(cx: &mut TestAppContext) {
+        let (window, desk, _dir) = open(cx, true);
+        let history = go_to_history(window, &desk, cx);
+        cx.update_window(window.into(), |_, window, cx| {
+            give_account(
+                &desk,
+                Some(vec![PositionRow {
+                    size: d("212.54"),
+                    ..position("SILVER", "xyz", 9_655)
+                }]),
+                None,
+                cx,
+            );
+            history.update(cx, |view, cx| {
+                view.set_snapshot(the_payments(), cx);
+                view.set_tab(Tab::Funding, cx);
+            });
+            window.render_frame(cx);
+            let view = history.read(cx);
+            // The largest net cost first: SILVER, paid every hour for 30 days.
+            assert_eq!(view.column(0, cx), ["SILVER xyz", "COPPER xyz", "BTC"]);
+            assert_eq!(view.column(3, cx)[0], "720");
+            assert_eq!(view.column(4, cx)[0], "-$58.31");
+            assert_eq!(view.column(5, cx)[0], "\u{2014}");
+            assert_eq!(view.column(6, cx)[0], "-$58.31");
+            assert_eq!(view.column(2, cx)[0], "212.54 SILVER");
+            // BTC is no longer held.
+            assert_eq!(view.column(2, cx)[2], "\u{2014}");
+            assert_eq!(view.column(1, cx)[2], "Short");
+            let totals = view.funding_totals();
+            assert_eq!(totals.received, d("0.2436"));
+            assert_eq!(totals.net, d("-58.31") + d("0.2436"));
+            // Every payment: the newest is COPPER's, received.
+            history.update(cx, |view, cx| view.set_every_payment(true, cx));
+            let view = history.read(cx);
+            assert_eq!(view.column(1, cx)[0], "COPPER xyz");
+            assert_eq!(view.column(4, cx)[0], "+$0.0436");
+            assert_eq!(view.column(5, cx)[0], "-0.0009%");
+            // An older day the venue summed shows the day and its count.
+            assert!(
+                view.column(0, cx)[1].ends_with("24 payments"),
+                "{}",
+                view.column(0, cx)[1]
+            );
+        })
+        .unwrap();
+    }
+
+    #[gpui_kit::test]
+    fn deposits_and_transfers_are_listed_and_a_hash_can_be_copied(cx: &mut TestAppContext) {
+        let (window, desk, _dir) = open(cx, true);
+        let history = go_to_history(window, &desk, cx);
+        cx.update_window(window.into(), |_, window, cx| {
+            history.update(cx, |view, cx| {
+                view.set_snapshot(the_transfers(), cx);
+                view.set_tab(Tab::Transfers, cx);
+            });
+            window.render_frame(cx);
+            let view = history.read(cx);
+            assert_eq!(view.column(1, cx), ["Transfer", "Deposit", "Deposit"]);
+            // A transfer to spot: no change in account value.
+            assert_eq!(
+                (
+                    view.column(3, cx)[0].as_str(),
+                    view.column(4, cx)[0].as_str()
+                ),
+                ("Perpetuals", "Spot")
+            );
+            assert_eq!(view.column(5, cx)[0], "\u{2014}");
+            // A deposit: no fee reported.
+            assert_eq!(
+                (
+                    view.column(3, cx)[1].as_str(),
+                    view.column(4, cx)[1].as_str()
+                ),
+                ("Arbitrum", "Perpetuals")
+            );
+            assert_eq!(view.column(5, cx)[1], "+$18,706.66");
+            assert_eq!(view.column(6, cx)[1], "\u{2014}");
+            assert_eq!(view.column(7, cx)[1], "0x5c1e\u{2026}9a04");
+            let totals = view.ledger_totals();
+            assert_eq!(totals.deposited, d("18726.46"));
+            assert_eq!(totals.withdrawn, Decimal::ZERO);
+            assert_eq!(totals.fees, Decimal::ZERO);
+            // Copy the deposit's hash.
+            history.update(cx, |view, cx| view.press_for_test("copy-hash", 1, cx));
+            assert_eq!(
+                cx.read_from_clipboard().and_then(|c| c.text()).as_deref(),
+                Some("0x5c1e00000000000000000000000000000000000000000000000000000000009a04")
+            );
+            assert_eq!(
+                history.read(cx).note().as_deref(),
+                Some("Copied the transaction hash.")
+            );
+        })
+        .unwrap();
+    }
+
+    #[gpui_kit::test]
+    fn a_tab_shows_placeholders_then_rows_and_says_when_it_is_empty_or_stale(
+        cx: &mut TestAppContext,
+    ) {
+        let (window, desk, _dir) = open(cx, true);
+        let history = go_to_history(window, &desk, cx);
+        cx.update_window(window.into(), |_, window, cx| {
+            history.update(cx, |view, cx| view.set_tab(Tab::Orders, cx));
+            window.render_frame(cx);
+            // Nothing yet: placeholders, never zeros.
+            assert!(window.try_find("history-loading").is_some());
+
+            // Nothing in the period.
+            let mut empty = the_transfers();
+            if let Some(ledger) = &mut empty.ledger.data {
+                for row in &mut ledger.rows {
+                    row.time = now_ms() - 40 * DAY_MS;
+                }
+            }
+            history.update(cx, |view, cx| {
+                view.set_snapshot(empty, cx);
+                view.set_tab(Tab::Transfers, cx);
+            });
+            window.render_frame(cx);
+            assert!(history.read(cx).column(1, cx).is_empty());
+            assert_eq!(
+                history.read(cx).empty_text(cx),
+                "No deposits or withdrawals in the last 30 days."
+            );
+
+            // Orders held and a refresh that failed: still shown, said to be
+            // not current. Funding never loaded and failed: only it says so.
+            let mut snapshot = the_orders();
+            snapshot.orders.error = Some(VenueError::Status(500));
+            snapshot.orders.fetched_at = Some(std::time::SystemTime::now());
+            snapshot.funding.error = Some(VenueError::Status(502));
+            history.update(cx, |view, cx| {
+                view.set_snapshot(snapshot, cx);
+                view.set_tab(Tab::Orders, cx);
+            });
+            window.render_frame(cx);
+            assert!(window.try_find("history-stale").is_some());
+            assert!(window.try_find("history-failed").is_none());
+            assert_eq!(history.read(cx).column(10, cx).len(), 3);
+            history.update(cx, |view, cx| view.set_tab(Tab::Funding, cx));
+            window.render_frame(cx);
+            assert!(window.try_find("history-failed").is_some());
+            assert!(window.try_find("history-stale").is_none());
+        })
+        .unwrap();
+    }
 }

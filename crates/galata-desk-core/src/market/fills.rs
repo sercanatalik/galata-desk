@@ -34,6 +34,35 @@ pub struct Fill {
     pub fee: Decimal,
     /// The venue's trade id, which identifies the fill across answers.
     pub id: u64,
+    /// What the fill did to the position, as the venue names it: `Open
+    /// Long`, `Close Short`.
+    pub dir: String,
+    /// The account took liquidity: it crossed the book.
+    pub taker: bool,
+    /// The order the fill belongs to.
+    pub oid: u64,
+    /// The transaction the fill was settled in.
+    pub hash: String,
+}
+
+impl Fill {
+    /// A fill with nothing set: for building one field by field.
+    pub fn blank() -> Self {
+        Fill {
+            coin: String::new(),
+            side: FillSide::Bought,
+            price: Decimal::ZERO,
+            size: Decimal::ZERO,
+            time_ms: 0,
+            realised: Decimal::ZERO,
+            fee: Decimal::ZERO,
+            id: 0,
+            dir: String::new(),
+            taker: false,
+            oid: 0,
+            hash: String::new(),
+        }
+    }
 }
 
 impl From<crate::venue::UserFill> for Fill {
@@ -50,6 +79,10 @@ impl From<crate::venue::UserFill> for Fill {
             realised: f.closed_pnl,
             fee: f.fee,
             id: f.tid,
+            dir: f.dir,
+            taker: f.crossed,
+            oid: f.oid,
+            hash: f.hash,
         }
     }
 }
@@ -229,6 +262,7 @@ mod tests {
             realised: d(realised),
             fee: Decimal::ZERO,
             id: at_ms,
+            ..Fill::blank()
         }
     }
 

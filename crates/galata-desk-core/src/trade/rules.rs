@@ -39,6 +39,34 @@ pub enum Rule {
     PartialBelowMinimum,
     #[error("{}", wrong_side(*tpsl, *long))]
     WrongSide { tpsl: Tpsl, long: bool },
+    #[error("There is no position to reduce.")]
+    NoPositionToReduce,
+    #[error("{}", if *buy { "A buy cannot reduce a long position." } else { "A sell cannot reduce a short position." })]
+    ReduceWrongSide { buy: bool },
+    #[error("Not enough to trade this size: at most {} here.", wire(*max))]
+    AboveMaximum { max: Decimal },
+    #[error("{}", order_trigger_side(*tpsl, *buy))]
+    OrderTriggerSide { tpsl: Tpsl, buy: bool },
+    #[error("{} price must be a number above zero.", trigger_name(*tpsl))]
+    TriggerNotNumber { tpsl: Tpsl },
+    #[error("{} price is too precise: at most {PRICE_FIGURES} significant figures and {places} decimal places here.", trigger_name(*tpsl))]
+    TriggerTooPrecise { tpsl: Tpsl, places: u32 },
+}
+
+fn trigger_name(tpsl: Tpsl) -> &'static str {
+    match tpsl {
+        Tpsl::Tp => "Take-profit",
+        Tpsl::Sl => "Stop-loss",
+    }
+}
+
+fn order_trigger_side(tpsl: Tpsl, buy: bool) -> &'static str {
+    match (tpsl, buy) {
+        (Tpsl::Tp, true) => "A take-profit for a buy must be above its price.",
+        (Tpsl::Tp, false) => "A take-profit for a sell must be below its price.",
+        (Tpsl::Sl, true) => "A stop-loss for a buy must be below its price.",
+        (Tpsl::Sl, false) => "A stop-loss for a sell must be above its price.",
+    }
 }
 
 fn wrong_side(tpsl: Tpsl, long: bool) -> &'static str {
@@ -222,6 +250,160 @@ pub fn trigger_price(
         return Err(Rule::WrongSide { tpsl, long });
     }
     Ok(price)
+}
+
+/// How a typed order size is meant.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum SizeUnit {
+    /// US dollars: turned into the coin at the order's price.
+    #[default]
+    Usd,
+    /// The market's coin.
+    Coin,
+}
+
+/// A typed size in `unit`, as the coin size sent at `price`. Dollars are
+/// divided by the price and rounded down to the size step, so the order is
+/// never larger than typed. A coin size must already be on the step.
+pub fn order_size(
+    text: &str,
+    unit: SizeUnit,
+    price: Decimal,
+    asset: &Asset,
+) -> Result<Decimal, Rule> {
+    let typed = number(text).ok_or(Rule::SizeNotNumber)?;
+    match unit {
+        SizeUnit::Coin => {
+            if typed.scale() > asset.sz_decimals {
+                return Err(Rule::SizeTooFine {
+                    places: asset.sz_decimals,
+                });
+            }
+            Ok(typed)
+        }
+        SizeUnit::Usd => Ok((typed / price)
+            .round_dp_with_strategy(asset.sz_decimals, RoundingStrategy::ToZero)
+            .normalize()),
+    }
+}
+
+/// What the ticket holds, as typed.
+#[derive(Debug, Clone, Copy)]
+pub struct OrderInput<'a> {
+    pub buy: bool,
+    pub size: &'a str,
+    pub unit: SizeUnit,
+    /// The worst price of a market order, or the typed price of a limit one.
+    pub price: OrderPrice<'a>,
+    pub reduce_only: bool,
+    /// Typed take-profit and stop-loss; empty or `None` for none.
+    pub take_profit: Option<&'a str>,
+    pub stop_loss: Option<&'a str>,
+}
+
+#[derive(Debug, Clone, Copy)]
+pub enum OrderPrice<'a> {
+    Market { worst: Decimal },
+    Limit { text: &'a str },
+}
+
+/// What is known about the market and the account.
+#[derive(Debug, Clone, Copy)]
+pub struct OrderContext {
+    pub asset: Asset,
+    /// The current position, signed; zero for none.
+    pub position: Decimal,
+    /// The venue's largest size on the order's side, once known.
+    pub max_size: Option<Decimal>,
+}
+
+/// An order that passed every check, in the numbers that are sent.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct CheckedOrder {
+    pub size: Decimal,
+    /// The price the order is held to: the worst price, or the limit.
+    pub price: Decimal,
+    pub take_profit: Option<Decimal>,
+    pub stop_loss: Option<Decimal>,
+}
+
+impl CheckedOrder {
+    pub fn value(&self) -> Decimal {
+        self.size * self.price
+    }
+}
+
+/// Check an order from the ticket against the venue's rules, in order:
+/// size, size step, limit price, reduce-only, the minimum, the maximum,
+/// then the take-profit and stop-loss.
+pub fn check_order(input: &OrderInput<'_>, ctx: &OrderContext) -> Result<CheckedOrder, Rule> {
+    let asset = &ctx.asset;
+    if number(input.size).is_none() {
+        return Err(Rule::SizeNotNumber);
+    }
+    let price = match input.price {
+        OrderPrice::Market { worst } => worst,
+        OrderPrice::Limit { text } => {
+            let price = number(text).ok_or(Rule::PriceNotNumber)?;
+            precise_enough(price, asset)?;
+            price
+        }
+    };
+    let size = order_size(input.size, input.unit, price, asset)?;
+    let held = ctx.position;
+    let closes_whole = input.reduce_only && size == held.abs();
+    if input.reduce_only {
+        if held.is_zero() {
+            return Err(Rule::NoPositionToReduce);
+        }
+        let long = held > Decimal::ZERO;
+        if input.buy == long {
+            return Err(Rule::ReduceWrongSide { buy: input.buy });
+        }
+        if size > held.abs() {
+            return Err(Rule::SizeAbovePosition);
+        }
+    }
+    if size.is_zero() || (!closes_whole && size * price < Decimal::from(MIN_VALUE)) {
+        return Err(Rule::BelowMinimum);
+    }
+    // A reduce-only order frees margin rather than using it.
+    if !input.reduce_only
+        && let Some(max) = ctx.max_size
+        && size > max
+    {
+        return Err(Rule::AboveMaximum { max });
+    }
+    let trigger = |text: Option<&str>, tpsl: Tpsl| -> Result<Option<Decimal>, Rule> {
+        let Some(text) = text.filter(|t| !t.trim().is_empty()) else {
+            return Ok(None);
+        };
+        let at = number(text).ok_or(Rule::TriggerNotNumber { tpsl })?;
+        precise_enough(at, asset).map_err(|_| Rule::TriggerTooPrecise {
+            tpsl,
+            places: asset.price_decimals(),
+        })?;
+        let above = at > price;
+        let ok = match (tpsl, input.buy) {
+            (Tpsl::Tp, true) | (Tpsl::Sl, false) => above,
+            (Tpsl::Tp, false) | (Tpsl::Sl, true) => at < price,
+        };
+        if !ok {
+            return Err(Rule::OrderTriggerSide {
+                tpsl,
+                buy: input.buy,
+            });
+        }
+        Ok(Some(at))
+    };
+    let take_profit = trigger(input.take_profit, Tpsl::Tp)?;
+    let stop_loss = trigger(input.stop_loss, Tpsl::Sl)?;
+    Ok(CheckedOrder {
+        size,
+        price,
+        take_profit,
+        stop_loss,
+    })
 }
 
 /// The estimated profit (positive) or loss of closing a position of signed
@@ -598,6 +780,268 @@ mod tests {
         assert_eq!(result_at(dec("10"), dec("152"), dec("148")), dec("-40"));
         // A short of 10 entered at 152, taken at 148: $40 made.
         assert_eq!(result_at(dec("-10"), dec("152"), dec("148")), dec("40"));
+    }
+
+    const HYPE: Asset = Asset {
+        number: 4,
+        sz_decimals: 2,
+        spot: false,
+    };
+
+    #[test]
+    fn dollars_become_a_coin_size_rounded_down_to_the_step() {
+        let at = dec("66.75");
+        assert_eq!(order_size("100", SizeUnit::Usd, at, &HYPE), Ok(dec("1.49")));
+        // Never more than typed: 1.4981… rounds down, not up.
+        assert!(dec("1.49") * at <= dec("100"));
+        assert_eq!(
+            order_size("1.50", SizeUnit::Coin, at, &HYPE),
+            Ok(dec("1.5"))
+        );
+        assert_eq!(
+            order_size("1.505", SizeUnit::Coin, at, &HYPE),
+            Err(Rule::SizeTooFine { places: 2 })
+        );
+        for bad in ["", "0", "-5", "abc"] {
+            for unit in [SizeUnit::Usd, SizeUnit::Coin] {
+                assert_eq!(order_size(bad, unit, at, &HYPE), Err(Rule::SizeNotNumber));
+            }
+        }
+        // A few cents is no coin at all.
+        assert_eq!(order_size("0.5", SizeUnit::Usd, at, &HYPE), Ok(dec("0")));
+    }
+
+    fn order<'a>(
+        buy: bool,
+        size: &'a str,
+        unit: SizeUnit,
+        price: OrderPrice<'a>,
+    ) -> OrderInput<'a> {
+        OrderInput {
+            buy,
+            size,
+            unit,
+            price,
+            reduce_only: false,
+            take_profit: None,
+            stop_loss: None,
+        }
+    }
+
+    fn context(position: &str, max: Option<&str>) -> OrderContext {
+        OrderContext {
+            asset: HYPE,
+            position: dec(position),
+            max_size: max.map(dec),
+        }
+    }
+
+    const MARKET: OrderPrice<'static> = OrderPrice::Market {
+        worst: Decimal::from_parts(70064, 0, 0, false, 3),
+    };
+
+    #[test]
+    fn a_valid_order_comes_back_in_the_numbers_sent() {
+        let ok = check_order(
+            &order(true, "100", SizeUnit::Usd, MARKET),
+            &context("0", Some("30")),
+        )
+        .unwrap();
+        // $100 at the worst price of 70.064 is 1.42 HYPE.
+        assert_eq!(ok.size, dec("1.42"));
+        assert_eq!(ok.price, dec("70.064"));
+        let limit = check_order(
+            &order(
+                false,
+                "2",
+                SizeUnit::Coin,
+                OrderPrice::Limit { text: "72.50" },
+            ),
+            &context("0", Some("30")),
+        )
+        .unwrap();
+        assert_eq!((limit.size, limit.price), (dec("2"), dec("72.5")));
+    }
+
+    #[test]
+    fn each_order_rule_is_reported_in_order() {
+        let limit = |text| OrderPrice::Limit { text };
+        let none = context("0", Some("30"));
+        let cases: Vec<(OrderInput, OrderContext, Rule)> = vec![
+            (
+                order(true, "", SizeUnit::Usd, MARKET),
+                none,
+                Rule::SizeNotNumber,
+            ),
+            (
+                order(true, "1.505", SizeUnit::Coin, MARKET),
+                none,
+                Rule::SizeTooFine { places: 2 },
+            ),
+            (
+                order(true, "2", SizeUnit::Coin, limit("x")),
+                none,
+                Rule::PriceNotNumber,
+            ),
+            (
+                order(true, "2", SizeUnit::Coin, limit("66.12345")),
+                none,
+                Rule::PriceTooPrecise { places: 4 },
+            ),
+            (
+                order(true, "5", SizeUnit::Usd, MARKET),
+                none,
+                Rule::BelowMinimum,
+            ),
+            (
+                order(true, "0.10", SizeUnit::Coin, limit("72.5")),
+                none,
+                Rule::BelowMinimum,
+            ),
+            (
+                order(true, "31", SizeUnit::Coin, MARKET),
+                none,
+                Rule::AboveMaximum { max: dec("30") },
+            ),
+        ];
+        for (input, ctx, rule) in cases {
+            assert_eq!(check_order(&input, &ctx), Err(rule), "{input:?}");
+        }
+        // Until the venue's maximum is known, it is not held against the order.
+        assert!(
+            check_order(
+                &order(true, "31", SizeUnit::Coin, MARKET),
+                &context("0", None)
+            )
+            .is_ok()
+        );
+    }
+
+    #[test]
+    fn reduce_only_shrinks_the_position_and_nothing_else() {
+        let reduce = |buy, size| OrderInput {
+            reduce_only: true,
+            ..order(buy, size, SizeUnit::Coin, MARKET)
+        };
+        assert_eq!(
+            check_order(&reduce(false, "1"), &context("0", None)),
+            Err(Rule::NoPositionToReduce)
+        );
+        assert_eq!(
+            check_order(&reduce(true, "1"), &context("12.5", None)),
+            Err(Rule::ReduceWrongSide { buy: true })
+        );
+        assert_eq!(
+            check_order(&reduce(false, "1"), &context("-12.5", None)),
+            Err(Rule::ReduceWrongSide { buy: false })
+        );
+        assert_eq!(
+            check_order(&reduce(false, "13"), &context("12.5", None)),
+            Err(Rule::SizeAbovePosition)
+        );
+        // Part of a small position is held to the minimum; all of it is not.
+        assert_eq!(
+            check_order(&reduce(false, "0.05"), &context("0.1", None)),
+            Err(Rule::BelowMinimum)
+        );
+        assert!(check_order(&reduce(false, "0.1"), &context("0.1", None)).is_ok());
+        // Reduce-only frees margin: the maximum does not apply.
+        assert!(check_order(&reduce(false, "12.5"), &context("12.5", Some("1"))).is_ok());
+    }
+
+    #[test]
+    fn an_orders_take_profit_and_stop_loss_are_on_their_sides() {
+        let with = |buy, tp, sl| OrderInput {
+            take_profit: Some(tp),
+            stop_loss: Some(sl),
+            ..order(buy, "2", SizeUnit::Coin, OrderPrice::Limit { text: "66.5" })
+        };
+        let ctx = context("0", None);
+        let ok = check_order(&with(true, "72", "63"), &ctx).unwrap();
+        assert_eq!(
+            (ok.take_profit, ok.stop_loss),
+            (Some(dec("72")), Some(dec("63")))
+        );
+        let sell = check_order(&with(false, "63", "72"), &ctx).unwrap();
+        assert_eq!(sell.take_profit, Some(dec("63")));
+        // Either may be left empty.
+        assert_eq!(
+            check_order(&with(true, "72", " "), &ctx).unwrap().stop_loss,
+            None
+        );
+        let cases = [
+            (
+                with(true, "60", "63"),
+                Rule::OrderTriggerSide {
+                    tpsl: Tpsl::Tp,
+                    buy: true,
+                },
+            ),
+            (
+                with(true, "72", "70"),
+                Rule::OrderTriggerSide {
+                    tpsl: Tpsl::Sl,
+                    buy: true,
+                },
+            ),
+            (
+                with(false, "70", "72"),
+                Rule::OrderTriggerSide {
+                    tpsl: Tpsl::Tp,
+                    buy: false,
+                },
+            ),
+            (
+                with(false, "63", "60"),
+                Rule::OrderTriggerSide {
+                    tpsl: Tpsl::Sl,
+                    buy: false,
+                },
+            ),
+            (
+                with(true, "x", "63"),
+                Rule::TriggerNotNumber { tpsl: Tpsl::Tp },
+            ),
+            (
+                with(true, "72", "63.12345"),
+                Rule::TriggerTooPrecise {
+                    tpsl: Tpsl::Sl,
+                    places: 4,
+                },
+            ),
+        ];
+        for (input, rule) in cases {
+            assert_eq!(check_order(&input, &ctx), Err(rule));
+        }
+    }
+
+    #[test]
+    fn the_order_messages_say_what_to_fix() {
+        let cases = [
+            (Rule::NoPositionToReduce, "There is no position to reduce."),
+            (
+                Rule::ReduceWrongSide { buy: true },
+                "A buy cannot reduce a long position.",
+            ),
+            (
+                Rule::AboveMaximum { max: dec("30.00") },
+                "Not enough to trade this size: at most 30 here.",
+            ),
+            (
+                Rule::OrderTriggerSide {
+                    tpsl: Tpsl::Tp,
+                    buy: true,
+                },
+                "A take-profit for a buy must be above its price.",
+            ),
+            (
+                Rule::TriggerNotNumber { tpsl: Tpsl::Sl },
+                "Stop-loss price must be a number above zero.",
+            ),
+        ];
+        for (rule, text) in cases {
+            assert_eq!(rule.to_string(), text);
+        }
     }
 
     #[test]

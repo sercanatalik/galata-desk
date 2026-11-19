@@ -3,11 +3,20 @@
 //! The rows are built from the portfolio each time it changes; the table only
 //! draws them, virtualised, so an account with hundreds of positions scrolls
 //! as easily as one with four.
+//!
+//! A column may be sortable: its header then carries the table's sort
+//! control, which cycles largest first, smallest first, and back to the
+//! order the rows were given in. Each row carries a key per column for this,
+//! so sorting is by the figure, not by its formatted text. The sort is kept
+//! when the rows are replaced.
 
+use std::cmp::Ordering;
 use std::rc::Rc;
 
+use galata_desk_core::rust_decimal::Decimal;
+
 use gpui_kit::component::button::{Button, ButtonVariants};
-use gpui_kit::component::table::{Column, TableDelegate, TableState};
+use gpui_kit::component::table::{Column, ColumnSort, TableDelegate, TableState};
 use gpui_kit::component::{Disableable, Icon, IconName, Sizable, h_flex};
 use gpui_kit::prelude::*;
 use gpui_kit::{App, Context, ElementId, Hsla, SharedString, Window, div, px};
@@ -50,6 +59,7 @@ impl Tone {
 pub enum Glyph {
     Pencil,
     Cross,
+    Copy,
     /// A word in place of an icon: `Limit`, `Market`.
     Word(&'static str),
 }
@@ -79,6 +89,8 @@ pub type OnPress = Rc<dyn Fn(&'static str, u64, &mut Window, &mut App)>;
 pub struct Cell {
     parts: Vec<(SharedString, Tone)>,
     buttons: Vec<RowButton>,
+    /// Shown on hover: what the cell's words stand for.
+    tip: Option<SharedString>,
 }
 
 impl Cell {
@@ -86,6 +98,7 @@ impl Cell {
         Self {
             parts: vec![(text.into(), tone)],
             buttons: Vec::new(),
+            tip: None,
         }
     }
 
@@ -94,6 +107,7 @@ impl Cell {
         Self {
             parts: Vec::new(),
             buttons,
+            tip: None,
         }
     }
 
@@ -109,6 +123,18 @@ impl Cell {
     pub fn and(mut self, text: impl Into<SharedString>, tone: Tone) -> Self {
         self.parts.push((text.into(), tone));
         self
+    }
+
+    /// Explain the cell on hover.
+    pub fn tip(mut self, tip: impl Into<SharedString>) -> Self {
+        self.tip = Some(tip.into());
+        self
+    }
+
+    /// The cell's tooltip, for tests.
+    #[cfg(test)]
+    pub fn tip_text(&self) -> Option<&str> {
+        self.tip.as_deref()
     }
 
     /// Buttons after the cell's text: a value with its edit control.
@@ -132,6 +158,45 @@ impl Cell {
     }
 }
 
+/// What a row is sorted by in one column.
+#[derive(Clone, Debug, PartialEq)]
+pub enum Key {
+    Num(Decimal),
+    /// Compared without regard to case.
+    Text(String),
+    /// No value, as a liquidation price the venue does not give: always
+    /// listed last, whichever way the column is sorted.
+    Missing,
+}
+
+impl Key {
+    pub fn num(value: Option<Decimal>) -> Key {
+        value.map_or(Key::Missing, Key::Num)
+    }
+
+    fn cmp(&self, other: &Key) -> Ordering {
+        match (self, other) {
+            (Key::Num(a), Key::Num(b)) => a.cmp(b),
+            (Key::Text(a), Key::Text(b)) => a.to_lowercase().cmp(&b.to_lowercase()),
+            _ => Ordering::Equal,
+        }
+    }
+}
+
+/// How two rows' keys order under a sort; missing values go last.
+fn compare(a: Option<&Key>, b: Option<&Key>, sort: ColumnSort) -> Ordering {
+    let present = |k: Option<&Key>| k.filter(|k| **k != Key::Missing).cloned();
+    match (present(a), present(b)) {
+        (None, None) => Ordering::Equal,
+        (None, Some(_)) => Ordering::Greater,
+        (Some(_), None) => Ordering::Less,
+        (Some(a), Some(b)) => match sort {
+            ColumnSort::Descending => a.cmp(&b).reverse(),
+            _ => a.cmp(&b),
+        },
+    }
+}
+
 /// A column: its heading, width, and whether it holds numbers.
 #[derive(Clone)]
 pub struct Col {
@@ -142,6 +207,8 @@ pub struct Col {
     /// Kept at the right edge while the rest scrolls sideways: a row's
     /// controls stay in view however narrow the window.
     pub pinned: bool,
+    /// Its header offers to sort the rows by it.
+    pub sortable: bool,
 }
 
 impl Col {
@@ -151,6 +218,7 @@ impl Col {
             width,
             numeric: false,
             pinned: false,
+            sortable: false,
         }
     }
 
@@ -160,6 +228,7 @@ impl Col {
             width,
             numeric: true,
             pinned: false,
+            sortable: false,
         }
     }
 
@@ -168,11 +237,23 @@ impl Col {
         self.pinned = true;
         self
     }
+
+    /// Let the rows be sorted by this column.
+    pub const fn sortable(mut self) -> Self {
+        self.sortable = true;
+        self
+    }
 }
 
 pub struct Grid {
     cols: Vec<Col>,
     rows: Vec<Vec<Cell>>,
+    /// Each row's sort keys, one per column; empty when it has none.
+    keys: Vec<Vec<Key>>,
+    /// The column sorted by and which way; `None` keeps the given order.
+    sort: Option<(usize, ColumnSort)>,
+    /// The rows in the order they are drawn: indices into `rows`.
+    order: Vec<usize>,
     /// What to say when there are no rows.
     empty: SharedString,
     on_press: Option<OnPress>,
@@ -183,9 +264,29 @@ impl Grid {
         Self {
             cols,
             rows: Vec::new(),
+            keys: Vec::new(),
+            sort: None,
+            order: Vec::new(),
             empty: empty.into(),
             on_press: None,
         }
+    }
+
+    /// What to say when there are no rows, from now on.
+    pub fn set_empty(&mut self, empty: impl Into<SharedString>) {
+        self.empty = empty.into();
+    }
+
+    /// What the table says when it has no rows, for tests.
+    #[cfg(test)]
+    pub fn empty_text(&self) -> String {
+        self.empty.to_string()
+    }
+
+    /// A cell as given, for tests: by its row as drawn and its column.
+    #[cfg(test)]
+    pub fn cell(&self, row_ix: usize, col_ix: usize) -> Option<&Cell> {
+        self.row(row_ix).and_then(|r| r.get(col_ix))
     }
 
     /// Report presses of row buttons to `on_press`.
@@ -195,7 +296,44 @@ impl Grid {
     }
 
     pub fn set_rows(&mut self, rows: Vec<Vec<Cell>>) {
+        self.set_keyed_rows(rows, Vec::new());
+    }
+
+    /// Rows with their sort keys, in their default order. The current sort,
+    /// if any, is applied to them.
+    pub fn set_keyed_rows(&mut self, rows: Vec<Vec<Cell>>, keys: Vec<Vec<Key>>) {
         self.rows = rows;
+        self.keys = keys;
+        self.reorder();
+    }
+
+    fn reorder(&mut self) {
+        let mut order: Vec<usize> = (0..self.rows.len()).collect();
+        if let Some((col, sort)) = self.sort.filter(|(_, s)| *s != ColumnSort::Default) {
+            let key = |ix: usize| self.keys.get(ix).and_then(|k| k.get(col));
+            // Stable: rows that tie keep their default order.
+            order.sort_by(|&a, &b| compare(key(a), key(b), sort));
+        }
+        self.order = order;
+    }
+
+    fn row(&self, row_ix: usize) -> Option<&Vec<Cell>> {
+        self.order.get(row_ix).and_then(|&ix| self.rows.get(ix))
+    }
+
+    /// The column sorted by and which way, for tests.
+    #[cfg(test)]
+    pub fn sorted_by(&self) -> Option<(usize, ColumnSort)> {
+        self.sort.filter(|(_, s)| *s != ColumnSort::Default)
+    }
+
+    /// A column's cells as drawn, top to bottom, for tests.
+    #[cfg(test)]
+    pub fn column_texts(&self, col_ix: usize) -> Vec<String> {
+        (0..self.order.len())
+            .filter_map(|ix| self.row(ix).and_then(|r| r.get(col_ix)))
+            .map(Cell::plain)
+            .collect()
     }
 }
 
@@ -217,6 +355,13 @@ impl TableDelegate for Grid {
         if col.pinned {
             column = column.fixed_right();
         }
+        if col.sortable {
+            // The header's control shows the sort the rows are in.
+            column = column.sort(match self.sort {
+                Some((ix, sort)) if ix == col_ix => sort,
+                _ => ColumnSort::Default,
+            });
+        }
         if col.numeric {
             column.text_right()
         } else {
@@ -232,7 +377,7 @@ impl TableDelegate for Grid {
         cx: &mut Context<TableState<Self>>,
     ) -> impl IntoElement {
         let numeric = self.cols[col_ix].numeric;
-        let Some(cell) = self.rows.get(row_ix).and_then(|r| r.get(col_ix)) else {
+        let Some(cell) = self.row(row_ix).and_then(|r| r.get(col_ix)) else {
             return div().into_any_element();
         };
         // A spinner turns; with reduced motion the glyph stays and the
@@ -245,6 +390,7 @@ impl TableDelegate for Grid {
             let button = match b.glyph {
                 Glyph::Pencil => button.ghost().icon(crate::ui::pencil_icon()),
                 Glyph::Cross => button.ghost().icon(Icon::new(IconName::Close)),
+                Glyph::Copy => button.ghost().icon(Icon::new(IconName::Copy)),
                 // A word on its own reads as text: the outline says it can
                 // be pressed.
                 Glyph::Word(word) => button.outline().label(word),
@@ -269,10 +415,20 @@ impl TableDelegate for Grid {
                 .children(buttons)
                 .into_any_element();
         }
+        let tip = cell.tip.clone();
         h_flex()
+            .id(ElementId::NamedInteger(
+                "cell".into(),
+                (row_ix * 64 + col_ix) as u64,
+            ))
             .w_full()
             .gap_2()
             .when(numeric, |d| d.justify_end())
+            .when_some(tip, |d, tip| {
+                d.tooltip(move |window, cx| {
+                    gpui_kit::component::tooltip::Tooltip::new(tip.clone()).build(window, cx)
+                })
+            })
             .font_family(MONO)
             .text_size(px(12.5))
             .whitespace_nowrap()
@@ -293,13 +449,23 @@ impl TableDelegate for Grid {
     }
 
     fn cell_label(&self, row_ix: usize, col_ix: usize, _: &App) -> Option<SharedString> {
-        self.rows
-            .get(row_ix)
+        self.row(row_ix)
             .and_then(|r| r.get(col_ix))
             // A cell of buttons only has no words of its own: its buttons
             // are named.
             .filter(|c| !c.parts.is_empty())
             .map(|c| c.plain().into())
+    }
+
+    fn perform_sort(
+        &mut self,
+        col_ix: usize,
+        sort: ColumnSort,
+        _: &mut Window,
+        _: &mut Context<TableState<Self>>,
+    ) {
+        self.sort = Some((col_ix, sort));
+        self.reorder();
     }
 
     fn render_empty(

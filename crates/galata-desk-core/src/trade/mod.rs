@@ -15,6 +15,6 @@ pub mod sign;
 
 pub use exchange::{Answer, Outcome, Traded};
 pub use gate::{
-    Holding, Kept, Level, Pricing, Standing, Target, TpslNow, TpslRequest, TpslStep, Trader,
-    Unavailable,
+    Holding, Kept, Level, NewOrder, Pricing, Standing, Target, TpslNow, TpslRequest, TpslStep,
+    Trader, Unavailable,
 };

@@ -1,0 +1,17 @@
+{
+ "user": "0x010461c14e146ac35fe42271bdc1134ee31c703a",
+ "coin": "xyz:NVDA",
+ "leverage": {
+  "type": "cross",
+  "value": 10
+ },
+ "maxTradeSzs": [
+  "0.0",
+  "0.0"
+ ],
+ "availableToTrade": [
+  "0.0",
+  "0.0"
+ ],
+ "markPx": "150.31"
+}

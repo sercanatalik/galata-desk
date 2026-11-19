@@ -172,6 +172,51 @@ impl<T: Transport> Info<T> {
         .await
     }
 
+    /// The account's orders and each change of their status, newest first,
+    /// across every dex. The venue returns the latest 2,000 rows and cannot
+    /// be asked for older ones.
+    pub async fn historical_orders(&self, user: &str) -> Result<Vec<HistoricalOrder>, VenueError> {
+        self.ask(
+            "historicalOrders",
+            json!({ "type": "historicalOrders", "user": user }),
+        )
+        .await
+    }
+
+    /// The account's funding payments from `start_ms`, oldest first, across
+    /// every dex: at most 500 rows per answer.
+    pub async fn user_funding(
+        &self,
+        user: &str,
+        start_ms: u64,
+        end_ms: Option<u64>,
+    ) -> Result<Vec<UserFundingRow>, VenueError> {
+        let mut body = json!({ "type": "userFunding", "user": user, "startTime": start_ms });
+        if let Some(end) = end_ms {
+            body["endTime"] = json!(end);
+        }
+        self.ask("userFunding", body).await
+    }
+
+    /// The account's deposits, withdrawals and transfers from `start_ms`,
+    /// oldest first: at most 2,000 rows per answer.
+    pub async fn user_ledger(
+        &self,
+        user: &str,
+        start_ms: u64,
+        end_ms: Option<u64>,
+    ) -> Result<Vec<LedgerRow>, VenueError> {
+        let mut body = json!({
+            "type": "userNonFundingLedgerUpdates",
+            "user": user,
+            "startTime": start_ms,
+        });
+        if let Some(end) = end_ms {
+            body["endTime"] = json!(end);
+        }
+        self.ask("userNonFundingLedgerUpdates", body).await
+    }
+
     /// The account's latest fills across all markets, newest first. The
     /// venue returns at most 2,000.
     pub async fn user_fills(&self, user: &str) -> Result<Vec<UserFill>, VenueError> {
@@ -243,6 +288,16 @@ impl<T: Transport> Info<T> {
     pub async fn user_role(&self, address: &str) -> Result<UserRole, VenueError> {
         self.ask("userRole", json!({ "type": "userRole", "user": address }))
             .await
+    }
+
+    /// The account's leverage and tradeable size in one market. `coin` is
+    /// the venue's name: `HYPE`, or `xyz:NVDA` on a builder dex.
+    pub async fn active_asset(&self, user: &str, coin: &str) -> Result<ActiveAsset, VenueError> {
+        self.ask(
+            "activeAssetData",
+            json!({ "type": "activeAssetData", "user": user, "coin": coin }),
+        )
+        .await
     }
 
     /// The current hourly funding rate of every market on one dex, by the

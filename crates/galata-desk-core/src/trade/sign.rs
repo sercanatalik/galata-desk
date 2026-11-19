@@ -90,6 +90,9 @@ pub enum Grouping {
     /// A position's take-profit and stop-loss, which cover the whole
     /// position whatever its size.
     PositionTpsl,
+    /// An entry order followed by its own take-profit and stop-loss, sized
+    /// to the entry.
+    NormalTpsl,
 }
 
 /// One order to replace with another.
@@ -250,6 +253,7 @@ mod tests {
                 grouping: match json["grouping"].as_str().unwrap() {
                     "na" => Grouping::Na,
                     "positionTpsl" => Grouping::PositionTpsl,
+                    "normalTpsl" => Grouping::NormalTpsl,
                     other => panic!("no such grouping: {other}"),
                 },
             },
@@ -334,8 +338,8 @@ mod tests {
             assert_eq!(u64::from(signed.v), v["v"].as_u64().unwrap(), "{label}");
             seen += 1;
         }
-        // Eight actions, each on both networks.
-        assert_eq!(seen, 16);
+        // Ten actions, each on both networks.
+        assert_eq!(seen, 20);
     }
 
     #[test]

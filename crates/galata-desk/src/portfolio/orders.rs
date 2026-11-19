@@ -15,9 +15,10 @@ use std::sync::Arc;
 
 use galata_desk_core::trade::rules::{self, Checked, Current, Rule};
 use galata_desk_core::trade::{
-    Answer, Holding, Kept, Level, Outcome, Pricing, Standing, Target, TpslNow, TpslRequest,
-    TpslStep, Trader, Unavailable,
+    Answer, Holding, Kept, Level, NewOrder, Outcome, Pricing, Standing, Target, TpslNow,
+    TpslRequest, TpslStep, Trader, Unavailable,
 };
+use galata_desk_core::venue::ActiveAsset;
 use gpui_kit::component::Disableable;
 use gpui_kit::component::input::{Input, InputEvent, InputState};
 use gpui_kit::{App, FocusHandle, KeyDownEvent, Subscription};
@@ -31,6 +32,15 @@ pub type Reply = Pin<Box<dyn Future<Output = Result<Answer, Unavailable>>>>;
 /// A mid price, some time later: `None` when the venue lists none, or why
 /// it could not be had.
 pub type MidReply = Pin<Box<dyn Future<Output = Result<Option<Decimal>, String>>>>;
+
+/// What the account can trade in a market, some time later, or why it could
+/// not be had.
+pub type ActiveReply = Pin<Box<dyn Future<Output = Result<ActiveAsset, String>>>>;
+
+/// A market's asset number and size step, some time later: `None` when the
+/// venue does not list it.
+pub type MarketReply =
+    Pin<Box<dyn Future<Output = Result<Option<galata_desk_core::trade::assets::Asset>, String>>>>;
 
 /// What came of each request of a take-profit and stop-loss change.
 pub type TpslReply = Pin<Box<dyn Future<Output = Vec<TpslStep>>>>;
@@ -50,6 +60,14 @@ pub trait Trading {
     /// Close each position whole at market, at its worst price.
     fn close_all(&self, positions: Vec<(Holding, Decimal)>) -> Reply;
     fn set_tpsl(&self, position: Holding, now: TpslNow, tp: Level, sl: Level) -> TpslReply;
+    /// Place an order from the order ticket: the one action that may open
+    /// or add to a position.
+    fn place(&self, order: NewOrder) -> Reply;
+    /// The account's leverage and tradeable size in `coin`, the venue's
+    /// name for the market (`HYPE`, `xyz:NVDA`).
+    fn active_asset(&self, coin: String) -> ActiveReply;
+    /// The market `coin` (the venue's name) on `dex`, as an action names it.
+    fn market(&self, dex: String, coin: String) -> MarketReply;
 }
 
 /// The gate, run on the I/O runtime.
@@ -141,6 +159,27 @@ impl Trading for Live {
         self.run(async move { trader.close_all(&positions).await })
     }
 
+    fn place(&self, order: NewOrder) -> Reply {
+        let trader = self.trader.clone();
+        self.run(async move { trader.place(&order).await })
+    }
+
+    fn active_asset(&self, coin: String) -> ActiveReply {
+        let trader = self.trader.clone();
+        self.spawn(
+            async move { trader.active_asset(&coin).await.map_err(|e| e.to_string()) },
+            || Err("the request was interrupted".into()),
+        )
+    }
+
+    fn market(&self, dex: String, coin: String) -> MarketReply {
+        let trader = self.trader.clone();
+        self.spawn(
+            async move { trader.market(&dex, &coin).await.map_err(|e| e.to_string()) },
+            || Err("the request was interrupted".into()),
+        )
+    }
+
     fn set_tpsl(&self, position: Holding, now: TpslNow, tp: Level, sl: Level) -> TpslReply {
         let trader = self.trader.clone();
         self.spawn(
@@ -176,6 +215,11 @@ pub struct Staged {
     /// Answers to TP/SL changes, in turn. When there are none, every
     /// request succeeds.
     pub tpsl_answers: RefCell<std::collections::VecDeque<Vec<TpslStep>>>,
+    pub placed: RefCell<Vec<NewOrder>>,
+    /// What `active_asset` answers.
+    pub active: RefCell<Result<ActiveAsset, String>>,
+    /// What `market` answers.
+    pub market: RefCell<Result<Option<galata_desk_core::trade::assets::Asset>, String>>,
 }
 
 #[cfg(any(test, feature = "shot"))]
@@ -192,6 +236,13 @@ impl Staged {
             close_alls: RefCell::default(),
             tpsl_changes: RefCell::default(),
             tpsl_answers: RefCell::default(),
+            placed: RefCell::default(),
+            active: RefCell::new(Ok(staged_active_asset())),
+            market: RefCell::new(Ok(Some(galata_desk_core::trade::assets::Asset {
+                number: 4,
+                sz_decimals: 2,
+                spot: false,
+            }))),
         }
     }
 
@@ -206,6 +257,18 @@ impl Staged {
             .unwrap_or_else(|| Ok(Answer::Each(vec![Outcome::DONE; orders])));
         Box::pin(async move { answer })
     }
+}
+
+/// A stand-in account: 5x cross, up to 30 of the coin either way.
+#[cfg(any(test, feature = "shot"))]
+pub fn staged_active_asset() -> ActiveAsset {
+    serde_json::from_value(serde_json::json!({
+        "leverage": { "type": "cross", "value": 5 },
+        "maxTradeSzs": ["30", "30"],
+        "availableToTrade": ["3737.4", "3737.4"],
+        "markPx": "66.728"
+    }))
+    .expect("a well-formed answer")
 }
 
 #[cfg(any(test, feature = "shot"))]
@@ -246,6 +309,28 @@ impl Trading for Staged {
         let count = positions.len();
         self.close_alls.borrow_mut().push(positions);
         self.reply(count)
+    }
+
+    fn place(&self, order: NewOrder) -> Reply {
+        let orders = 1 + order.take_profit.is_some() as usize + order.stop_loss.is_some() as usize;
+        self.placed.borrow_mut().push(order);
+        self.reply(orders)
+    }
+
+    fn market(&self, _dex: String, _coin: String) -> MarketReply {
+        if self.hold.get() {
+            return Box::pin(std::future::pending());
+        }
+        let market = self.market.borrow().clone();
+        Box::pin(async move { market })
+    }
+
+    fn active_asset(&self, _coin: String) -> ActiveReply {
+        if self.hold.get() {
+            return Box::pin(std::future::pending());
+        }
+        let active = self.active.borrow().clone();
+        Box::pin(async move { active })
     }
 
     fn set_tpsl(&self, position: Holding, now: TpslNow, tp: Level, sl: Level) -> TpslReply {
@@ -310,6 +395,8 @@ pub(super) enum Dialog {
     },
     /// A close, Close all, or a take-profit and stop-loss change.
     Position(super::positions::PositionDialog),
+    /// The order ticket.
+    Ticket(Box<super::ticket::Ticket>),
 }
 
 #[derive(Clone, Copy, PartialEq)]
@@ -318,6 +405,7 @@ pub(super) enum Doing {
     Amending,
     Closing,
     SettingTpsl,
+    Placing,
 }
 
 /// An action that is with the venue: the orders and the positions (by
@@ -357,6 +445,9 @@ pub struct Actions {
     /// A screenshot run's Positions tab state, shown once positions load.
     #[cfg(feature = "shot")]
     pub(super) position_shot: Option<String>,
+    /// A screenshot run's order ticket state, shown once Markets has a price.
+    #[cfg(feature = "shot")]
+    pub(super) ticket_shot: Option<String>,
 }
 
 impl Actions {
@@ -380,6 +471,8 @@ impl Actions {
             shot: None,
             #[cfg(feature = "shot")]
             position_shot: None,
+            #[cfg(feature = "shot")]
+            ticket_shot: None,
         }
     }
 }
@@ -424,6 +517,7 @@ pub(super) fn short(address: &str) -> String {
 pub(super) enum Acting {
     Orders,
     Positions,
+    Placing,
 }
 
 impl Acting {
@@ -431,6 +525,7 @@ impl Acting {
         match self {
             Acting::Orders => "amend or cancel orders",
             Acting::Positions => "close positions or set take-profit and stop-loss",
+            Acting::Placing => "place orders",
         }
     }
 }
@@ -462,6 +557,7 @@ pub(super) fn explain(unavailable: &Unavailable, acting: Acting) -> (String, Str
             match acting {
                 Acting::Orders => "Order actions are off".into(),
                 Acting::Positions => "Position actions are off".into(),
+                Acting::Placing => "Placing orders is off".into(),
             },
             "The venue's addresses are set by the development environment, so the app is read-only.".into(),
             false,
@@ -665,6 +761,7 @@ impl Portfolio {
         };
         match dialog {
             Dialog::Position(dialog) => self.confirm_position(dialog, cx),
+            Dialog::Ticket(ticket) => self.confirm_ticket(ticket, cx),
             Dialog::Cancel(order) => {
                 let reply = self.actions.trading.cancel(vec![target(&order)]);
                 self.send(
@@ -914,6 +1011,7 @@ impl Portfolio {
 
         let (id, title, body, buttons): (&'static str, String, AnyElement, AnyElement) = match dialog {
             Dialog::Position(dialog) => return self.position_dialog(dialog, cx),
+            Dialog::Ticket(ticket) => return self.ticket_dialog(ticket, cx),
             Dialog::Cancel(order) => (
                 "cancel-dialog",
                 "Cancel this order?".into(),
@@ -1437,6 +1535,7 @@ impl Portfolio {
             Dialog::CancelAll(_) => "cancel-all",
             Dialog::Amend { .. } => "amend",
             Dialog::Position(d) => d.name(),
+            Dialog::Ticket(_) => "ticket",
         })
     }
 

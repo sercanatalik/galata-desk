@@ -30,6 +30,14 @@
 //!    position, then the last $5 (to learn whether closing a whole position
 //!    worth under $10 is allowed), then save the open orders to see whether
 //!    the take-profit and stop-loss went with the position.
+//!
+//! With `--open` it does something else, and needs no position: it learns
+//! how the venue takes an order that OPENS a position with its own
+//! take-profit and stop-loss (grouping `normalTpsl`). Twice, once with the
+//! triggers sized to the entry and once with size `0`, it buys just over $10
+//! at market with a take-profit and stop-loss 25% away, saves the open
+//! orders, closes what it bought with a reduce-only sell, and saves the open
+//! orders again. This is the one mode that opens a position, briefly.
 
 use std::path::PathBuf;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
@@ -56,6 +64,7 @@ struct Args {
     out: PathBuf,
     orders_only: bool,
     close_position: bool,
+    open: bool,
 }
 
 fn args() -> Args {
@@ -65,6 +74,7 @@ fn args() -> Args {
     let mut out = PathBuf::from("tpsl-probe-out");
     let mut orders_only = false;
     let mut close_position = false;
+    let mut open = false;
     let mut it = std::env::args().skip(1);
     while let Some(arg) = it.next() {
         match arg.as_str() {
@@ -74,6 +84,7 @@ fn args() -> Args {
             "--out" => out = it.next().map(PathBuf::from).unwrap_or(out),
             "--orders-only" => orders_only = true,
             "--close-position" => close_position = true,
+            "--open" => open = true,
             "--mainnet" => fail("this probe runs on testnet only"),
             other => fail(&format!("unknown argument {other}")),
         }
@@ -87,6 +98,7 @@ fn args() -> Args {
         out,
         orders_only,
         close_position,
+        open,
     }
 }
 
@@ -318,6 +330,11 @@ async fn main() {
     };
     let coin = args.coin.clone();
 
+    if args.open {
+        open_with_tpsl(&mut probe, &coin).await;
+        return;
+    }
+
     if args.orders_only {
         probe.save_orders(&coin, "open_orders_now").await;
         return;
@@ -504,4 +521,85 @@ async fn main() {
         None => println!("\nthe position is closed"),
     }
     probe.save_orders(&coin, "open_orders_after_close").await;
+}
+
+/// `--open`: an entry with its own take-profit and stop-loss, then closed.
+async fn open_with_tpsl(probe: &mut Probe, coin: &str) {
+    let dex = dex_of(coin);
+    let dexes = probe.info.perp_dexs().await.expect("perpDexs answers");
+    let meta = probe.info.perp_meta(dex).await.expect("meta answers");
+    let asset = assets::perp(&dexes, dex, &meta, coin)
+        .unwrap_or_else(|| fail(&format!("{coin} is not a market on testnet")));
+    for (round, trigger_size) in [("sized", None), ("zero", Some("0"))] {
+        let mid = probe.mid(coin).await;
+        let worst = rules::slippage(mid, true, &asset, MARKET_SLIPPAGE_PCT);
+        let size = (Decimal::from(11) / mid)
+            .round_dp_with_strategy(asset.sz_decimals, RoundingStrategy::AwayFromZero)
+            .normalize();
+        let size_text = rules::wire(size);
+        let trigger = |at: Decimal, tpsl: Tpsl| OrderWire {
+            a: asset.number,
+            b: false,
+            p: rules::wire(rules::slippage(at, false, &asset, TRIGGER_SLIPPAGE_PCT)),
+            s: trigger_size
+                .map(String::from)
+                .unwrap_or_else(|| size_text.clone()),
+            r: true,
+            t: OrderKind::Trigger(Trigger {
+                is_market: true,
+                trigger_px: rules::wire(at),
+                tpsl,
+            }),
+        };
+        let tp = rules::slippage(mid, true, &asset, 25);
+        let sl = rules::slippage(mid, false, &asset, 25);
+        println!("\nmid {mid}, buying {size_text} {coin} (no worse than {worst})");
+        probe
+            .send(
+                &format!("open ({round}): IOC buy with take-profit and stop-loss, normalTpsl"),
+                Action::Order {
+                    orders: vec![
+                        OrderWire {
+                            a: asset.number,
+                            b: true,
+                            p: rules::wire(worst),
+                            s: size_text.clone(),
+                            r: false,
+                            t: OrderKind::limit("Ioc"),
+                        },
+                        trigger(tp, Tpsl::Tp),
+                        trigger(sl, Tpsl::Sl),
+                    ],
+                    grouping: Grouping::NormalTpsl,
+                },
+            )
+            .await;
+        probe
+            .save_orders(coin, &format!("open_{round}_after_entry"))
+            .await;
+        // Sell back only what this round bought, reduce-only, so a position
+        // held before the probe is left as it was.
+        let mid = probe.mid(coin).await;
+        let worst = rules::slippage(mid, false, &asset, MARKET_SLIPPAGE_PCT);
+        probe
+            .send(
+                &format!("open ({round}): sell back what was bought, reduce-only IOC"),
+                Action::Order {
+                    orders: vec![OrderWire {
+                        a: asset.number,
+                        b: false,
+                        p: rules::wire(worst),
+                        s: size_text.clone(),
+                        r: true,
+                        t: OrderKind::limit("Ioc"),
+                    }],
+                    grouping: Grouping::Na,
+                },
+            )
+            .await;
+        tokio::time::sleep(Duration::from_secs(2)).await;
+        probe
+            .save_orders(coin, &format!("open_{round}_after_close"))
+            .await;
+    }
 }

@@ -20,7 +20,7 @@ use gpui_kit::component::button::{Button, ButtonVariants};
 use gpui_kit::component::chart::LineChart;
 use gpui_kit::component::tab::TabBar;
 use gpui_kit::component::table::{DataTable, TableState};
-use gpui_kit::component::{Sizable, h_flex, v_flex};
+use gpui_kit::component::{Icon, IconName, Sizable, h_flex, v_flex};
 use gpui_kit::prelude::*;
 use gpui_kit::{
     AnyElement, ClipboardItem, Context, Entity, EventEmitter, SharedString, Task, TestSupportExt,
@@ -29,12 +29,15 @@ use gpui_kit::{
 
 mod orders;
 mod positions;
+mod ticket;
 
 #[cfg(test)]
 pub use orders::Staged;
+#[cfg(test)]
+pub use ticket::QuickButton;
 
 use crate::Core;
-use crate::grid::{Cell, Col, Grid, Tone};
+use crate::grid::{Cell, Col, Grid, Key, Tone};
 use crate::theme::{MONO, Palette};
 use crate::ui;
 
@@ -83,8 +86,8 @@ impl EventEmitter<PortfolioEvent> for Portfolio {}
 
 fn table(grid: Grid, window: &mut Window, cx: &mut Context<Portfolio>) -> Entity<TableState<Grid>> {
     cx.new(|cx| {
+        // Only a column marked sortable offers to sort.
         TableState::new(grid, window, cx)
-            .sortable(false)
             .col_movable(false)
             .row_selectable(false)
             .col_selectable(false)
@@ -125,15 +128,16 @@ impl Portfolio {
 
         let positions = Grid::new(
             vec![
-                Col::text("Market", 170.),
-                Col::number("Size", 170.),
-                Col::number("Position value", 140.),
-                Col::number("Entry price", 110.),
-                Col::number("Mark price", 110.),
-                Col::number("PNL (ROE)", 200.),
-                Col::number("Liq. price", 110.),
-                Col::number("Margin", 170.),
-                Col::number("Funding", 110.),
+                // Every figure can be sorted by; the controls cannot.
+                Col::text("Market", 170.).sortable(),
+                Col::number("Size", 170.).sortable(),
+                Col::number("Position value", 140.).sortable(),
+                Col::number("Entry price", 110.).sortable(),
+                Col::number("Mark price", 110.).sortable(),
+                Col::number("PNL (ROE)", 200.).sortable(),
+                Col::number("Liq. price", 110.).sortable(),
+                Col::number("Margin", 170.).sortable(),
+                Col::number("Funding", 110.).sortable(),
                 // Close at a limit, close at market. The buttons name
                 // themselves. Pinned with TP/SL, so a narrow window scrolls
                 // the figures and keeps the controls in view.
@@ -256,6 +260,7 @@ impl Portfolio {
                     self.tab = Tab::Positions;
                     self.actions.position_shot = Some(value.to_string());
                 }
+                "ticket" => self.actions.ticket_shot = Some(value.to_string()),
                 _ => {}
             }
         }
@@ -377,7 +382,16 @@ impl Portfolio {
                 Button::new("copy-address")
                     .ghost()
                     .small()
-                    .label(if self.copied { "Copied" } else { "Copy" })
+                    .icon(Icon::new(if self.copied {
+                        IconName::Check
+                    } else {
+                        IconName::Copy
+                    }))
+                    .tooltip(if self.copied {
+                        "Copied"
+                    } else {
+                        "Copy address"
+                    })
                     .on_click(cx.listener(move |this, _, _, cx| {
                         cx.write_to_clipboard(ClipboardItem::new_string(full.clone()));
                         this.copied = true;
@@ -398,7 +412,8 @@ impl Portfolio {
                 Button::new("disconnect")
                     .ghost()
                     .small()
-                    .label("Disconnect")
+                    .icon(crate::ui::log_out_icon())
+                    .tooltip("Disconnect")
                     .on_click(cx.listener(|_, _, _, cx| cx.emit(PortfolioEvent::Disconnect))),
             )
             .into_any_element()
@@ -981,6 +996,14 @@ impl Portfolio {
     }
 }
 
+impl Portfolio {
+    /// The open dialog, if any, for a section other than this one to draw
+    /// over itself: the order ticket opens from Markets.
+    pub fn dialog_layer(&mut self, cx: &mut Context<Self>) -> Option<AnyElement> {
+        self.order_dialog(cx)
+    }
+}
+
 impl Render for Portfolio {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         #[cfg(feature = "shot")]
@@ -1075,6 +1098,24 @@ fn position_row(p: &PositionRow, buttons: Cell, tpsl: Cell) -> Vec<Cell> {
         Cell::new(f::usd_signed(p.funding), Tone::signed(sign(p.funding))),
         buttons,
         tpsl,
+    ]
+}
+
+/// What a position's row is sorted by, column by column: the figures
+/// themselves, not their text.
+fn position_keys(p: &PositionRow) -> Vec<Key> {
+    vec![
+        Key::Text(p.market.clone()),
+        Key::Num(p.size),
+        Key::Num(p.signed_value()),
+        Key::Num(p.entry),
+        Key::num(p.mark),
+        Key::Num(p.pnl),
+        Key::num(p.liquidation),
+        Key::Num(p.margin),
+        Key::Num(p.funding),
+        Key::Missing,
+        Key::Missing,
     ]
 }
 

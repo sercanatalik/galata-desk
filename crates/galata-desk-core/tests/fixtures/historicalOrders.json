@@ -1,0 +1,134 @@
+[
+ {
+  "order": {
+   "coin": "xyz:NVDA",
+   "side": "B",
+   "limitPx": "160.18",
+   "sz": "0.0",
+   "oid": 610305538201,
+   "timestamp": 1795102558035,
+   "triggerCondition": "N/A",
+   "isTrigger": false,
+   "triggerPx": "0.0",
+   "children": [],
+   "isPositionTpsl": false,
+   "reduceOnly": false,
+   "orderType": "Limit",
+   "origSz": "19.665",
+   "tif": "Ioc",
+   "cloid": null
+  },
+  "status": "filled",
+  "statusTimestamp": 1795102558035
+ },
+ {
+  "order": {
+   "coin": "xyz:NVDA",
+   "side": "B",
+   "limitPx": "160.18",
+   "sz": "19.665",
+   "oid": 610305538201,
+   "timestamp": 1795102558035,
+   "triggerCondition": "N/A",
+   "isTrigger": false,
+   "triggerPx": "0.0",
+   "children": [],
+   "isPositionTpsl": false,
+   "reduceOnly": false,
+   "orderType": "Limit",
+   "origSz": "19.665",
+   "tif": "Ioc",
+   "cloid": null
+  },
+  "status": "open",
+  "statusTimestamp": 1795102558035
+ },
+ {
+  "order": {
+   "coin": "xyz:ANT",
+   "side": "A",
+   "limitPx": "95.4",
+   "sz": "29.03",
+   "oid": 610253861507,
+   "timestamp": 1795100250436,
+   "triggerCondition": "Price above 106",
+   "isTrigger": true,
+   "triggerPx": "106.0",
+   "children": [],
+   "isPositionTpsl": false,
+   "reduceOnly": true,
+   "orderType": "Take Profit Market",
+   "origSz": "29.03",
+   "tif": null,
+   "cloid": null
+  },
+  "status": "reduceOnlyCanceled",
+  "statusTimestamp": 1795100407837
+ },
+ {
+  "order": {
+   "coin": "xyz:ANT",
+   "side": "A",
+   "limitPx": "93.6",
+   "sz": "29.03",
+   "oid": 610244659485,
+   "timestamp": 1795099839182,
+   "triggerCondition": "Price above 104",
+   "isTrigger": true,
+   "triggerPx": "104.0",
+   "children": [],
+   "isPositionTpsl": false,
+   "reduceOnly": true,
+   "orderType": "Take Profit Market",
+   "origSz": "29.03",
+   "tif": null,
+   "cloid": null
+  },
+  "status": "canceled",
+  "statusTimestamp": 1795100251219
+ },
+ {
+  "order": {
+   "coin": "xyz:NBIS",
+   "side": "B",
+   "limitPx": "125.11",
+   "sz": "0.0",
+   "oid": 608792486988,
+   "timestamp": 1794969688018,
+   "triggerCondition": "Price above 113.74",
+   "isTrigger": true,
+   "triggerPx": "113.74",
+   "children": [],
+   "isPositionTpsl": true,
+   "reduceOnly": true,
+   "orderType": "Stop Market",
+   "origSz": "0.0",
+   "tif": null,
+   "cloid": "0x3bfafc34401b08e21171c06fbc928686"
+  },
+  "status": "triggered",
+  "statusTimestamp": 1794975349187
+ },
+ {
+  "order": {
+   "coin": "BTC",
+   "side": "B",
+   "limitPx": "86240.0",
+   "sz": "0.0",
+   "oid": 591878063847,
+   "timestamp": 1793530585958,
+   "triggerCondition": "Price above 78400",
+   "isTrigger": true,
+   "triggerPx": "78400.0",
+   "children": [],
+   "isPositionTpsl": true,
+   "reduceOnly": true,
+   "orderType": "Stop Market",
+   "origSz": "0.0",
+   "tif": null,
+   "cloid": "0xb7b54cc5a30cc5ff6615b95430b6dd33"
+  },
+  "status": "reduceOnlyCanceled",
+  "statusTimestamp": 1793542244230
+ }
+]

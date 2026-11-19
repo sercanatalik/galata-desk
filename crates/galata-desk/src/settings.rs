@@ -6,13 +6,15 @@ use galata_desk_core::api_key::ApiKey;
 use galata_desk_core::connect::Address;
 use galata_desk_core::network::Network;
 use galata_desk_core::secrets::api_key_name;
+use galata_desk_core::store::{QuickSizeRule, QuickSizes};
 use gpui_kit::component::button::{Button, ButtonVariants};
-use gpui_kit::component::input::{Input, InputState};
+use gpui_kit::component::input::{Input, InputEvent, InputState};
 use gpui_kit::component::switch::Switch;
-use gpui_kit::component::{Sizable, h_flex, v_flex};
+use gpui_kit::component::{Disableable, Sizable, h_flex, v_flex};
 use gpui_kit::prelude::*;
 use gpui_kit::{
-    AnyElement, Context, Entity, EventEmitter, SharedString, TestSupportExt, Window, div, px,
+    AnyElement, Context, ElementId, Entity, EventEmitter, Focusable, SharedString, Subscription,
+    TestSupportExt, Window, div, px,
 };
 
 use crate::Core;
@@ -20,10 +22,13 @@ use crate::theme::{MONO, Palette};
 use crate::ui;
 
 /// What the page says a saved key is used for.
-pub const KEY_USE: &str = "Mainnet and testnet each have their own key. A saved key is used to amend and cancel orders, close positions, and set take-profit and stop-loss, each time you confirm one, and for nothing else.";
+pub const KEY_USE: &str = "Mainnet and testnet each have their own key. A saved key is used to place orders, amend and cancel them, close positions, and set take-profit and stop-loss, each time you confirm one, and for nothing else.";
 
 /// What the page says the mainnet switch allows.
-pub const MAINNET_SWITCH_NOTE: &str = "Lets the saved mainnet key amend and cancel real orders, close real positions and set their take-profit and stop-loss. Testnet needs no permission. This guards against slips, not against someone else at this Mac.";
+pub const MAINNET_SWITCH_NOTE: &str = "Lets the saved mainnet key place, amend and cancel real orders, close real positions and set their take-profit and stop-loss. Testnet needs no permission. This guards against slips, not against someone else at this Mac.";
+
+/// What the page says about quick sizes.
+pub const QUICK_SIZES_NOTE: &str = "The dollar amounts the order ticket offers as Quick buttons. Each is the order's value, not its margin. Up to four, from $10. The same on mainnet and testnet. Saved as you type once every amount is valid; until then the last valid list stays in use.";
 
 /// What the page asks of the window.
 pub enum SettingsEvent {
@@ -31,6 +36,9 @@ pub enum SettingsEvent {
     Network(Network),
     /// Allow, or stop allowing, order actions on the main network.
     MainnetTrading(bool),
+    /// Offer these quick sizes in the order ticket. Only a list that keeps
+    /// every rule is ever sent.
+    QuickSizes(QuickSizes),
     /// Go back to where the user was.
     Done,
 }
@@ -50,6 +58,9 @@ pub struct Settings {
     saved: Saved,
     /// The outcome of the last save or removal, and whether it is a problem.
     message: Option<(SharedString, bool)>,
+    /// One field per quick size, in the order the user arranged them.
+    quick: Vec<Entity<InputState>>,
+    _quick_typing: Vec<Subscription>,
 }
 
 impl EventEmitter<SettingsEvent> for Settings {}
@@ -65,7 +76,11 @@ impl Settings {
             key,
             saved: Saved::Nothing,
             message: None,
+            quick: Vec::new(),
+            _quick_typing: Vec::new(),
         };
+        let amounts = Core::get(cx).quick_sizes.amounts().to_vec();
+        this.set_quick_fields(&amounts, window, cx);
         // A screenshot run can show the saved state: `key=1` stores a
         // well-known test key in that run's in-memory secrets.
         #[cfg(feature = "shot")]
@@ -134,6 +149,204 @@ impl Settings {
             Err(e) => self.message = Some((format!("Not removed: {e}.").into(), true)),
         }
         cx.notify();
+    }
+
+    /// Replace the quick size fields with one per amount.
+    fn set_quick_fields(&mut self, amounts: &[u64], window: &mut Window, cx: &mut Context<Self>) {
+        self.quick.clear();
+        self._quick_typing.clear();
+        for amount in amounts {
+            self.push_quick_field(&amount.to_string(), window, cx);
+        }
+    }
+
+    fn push_quick_field(&mut self, text: &str, window: &mut Window, cx: &mut Context<Self>) {
+        let input = cx.new(|cx| InputState::new(window, cx).placeholder("10000"));
+        input.update(cx, |input, cx| {
+            input.set_value(text.to_string(), window, cx)
+        });
+        self._quick_typing
+            .push(cx.subscribe(&input, |this, _, event: &InputEvent, cx| {
+                if matches!(event, InputEvent::Change) {
+                    this.quick_changed(cx);
+                }
+            }));
+        self.quick.push(input);
+    }
+
+    fn quick_texts(&self, cx: &gpui_kit::App) -> Vec<String> {
+        self.quick
+            .iter()
+            .map(|input| input.read(cx).value().to_string())
+            .collect()
+    }
+
+    fn quick_check(&self, cx: &gpui_kit::App) -> Result<QuickSizes, Vec<Option<QuickSizeRule>>> {
+        let texts = self.quick_texts(cx);
+        let texts: Vec<&str> = texts.iter().map(String::as_str).collect();
+        QuickSizes::check(&texts)
+    }
+
+    /// The fields changed: when they make a valid list that differs from the
+    /// one in use, ask for it to be used and saved. Otherwise the last valid
+    /// list stays in use, and the fields say what is wrong.
+    fn quick_changed(&mut self, cx: &mut Context<Self>) {
+        if let Ok(list) = self.quick_check(cx)
+            && list != Core::get(cx).quick_sizes
+        {
+            cx.emit(SettingsEvent::QuickSizes(list));
+        }
+        cx.notify();
+    }
+
+    fn add_quick(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.quick.len() >= QuickSizes::MOST {
+            return;
+        }
+        self.push_quick_field("", window, cx);
+        if let Some(input) = self.quick.last() {
+            let focus = input.read(cx).focus_handle(cx);
+            window.focus(&focus, cx);
+        }
+        self.quick_changed(cx);
+    }
+
+    fn remove_quick(&mut self, ix: usize, cx: &mut Context<Self>) {
+        if self.quick.len() <= 1 || ix >= self.quick.len() {
+            return;
+        }
+        self.quick.remove(ix);
+        drop(self._quick_typing.remove(ix));
+        self.quick_changed(cx);
+    }
+
+    fn reset_quick(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.set_quick_fields(&QuickSizes::DEFAULT, window, cx);
+        self.quick_changed(cx);
+    }
+
+    fn quick_panel(&self, cx: &mut Context<Self>) -> AnyElement {
+        let problems = match self.quick_check(cx) {
+            Ok(_) => vec![None; self.quick.len()],
+            Err(problems) => problems,
+        };
+        let texts = self.quick_texts(cx);
+        let only = self.quick.len() == 1;
+        let in_use = Core::get(cx).quick_sizes.clone();
+        let is_default = texts.iter().map(String::as_str).eq(QuickSizes::DEFAULT
+            .map(|a| a.to_string())
+            .iter()
+            .map(String::as_str));
+        let fields = self.quick.iter().enumerate().map(|(ix, input)| {
+            // An empty field is still being written: no reason yet.
+            let problem = problems
+                .get(ix)
+                .copied()
+                .flatten()
+                .filter(|_| !texts[ix].trim().is_empty());
+            let name = format!("Quick size {}", ix + 1);
+            v_flex()
+                .id(ElementId::NamedInteger(
+                    "quick-size-field".into(),
+                    ix as u64,
+                ))
+                .w(px(132.))
+                .gap(px(4.))
+                .child(
+                    Input::new(input)
+                        .aria_label(name.clone())
+                        .prefix(
+                            div()
+                                .font_family(MONO)
+                                .text_color(Palette::muted())
+                                .child("$"),
+                        )
+                        .suffix(
+                            Button::new(("quick-size-remove", ix))
+                                .ghost()
+                                .xsmall()
+                                .label("\u{d7}")
+                                .accessibility_label(format!("Remove {name}"))
+                                .disabled(only)
+                                .on_click(
+                                    cx.listener(move |this, _, _, cx| this.remove_quick(ix, cx)),
+                                ),
+                        ),
+                )
+                .child(
+                    div()
+                        .id(("quick-size-problem", ix))
+                        .min_h(px(15.))
+                        .text_size(px(11.5))
+                        .text_color(Palette::loss())
+                        .when_some(problem, |d, rule| {
+                            d.aria_label(rule.message()).child(rule.message())
+                        }),
+                )
+        });
+        ui::panel()
+            .px_5()
+            .py_4()
+            .gap_3()
+            .child(Self::heading("QUICK ORDER SIZES"))
+            .child(ui::label(QUICK_SIZES_NOTE))
+            .child(
+                h_flex()
+                    .flex_wrap()
+                    .gap(px(10.))
+                    .items_start()
+                    .children(fields)
+                    .when(self.quick.len() < QuickSizes::MOST, |row| {
+                        row.child(
+                            Button::new("quick-size-add")
+                                .outline()
+                                .label("Add a size")
+                                .on_click(
+                                    cx.listener(|this, _, window, cx| this.add_quick(window, cx)),
+                                ),
+                        )
+                    }),
+            )
+            .child(
+                h_flex()
+                    .id("quick-size-preview")
+                    .gap(px(6.))
+                    .pt_3()
+                    .border_t_1()
+                    .border_color(Palette::line())
+                    .child(
+                        div()
+                            .mr(px(6.))
+                            .text_size(px(12.5))
+                            .text_color(Palette::muted())
+                            .child("In the ticket"),
+                    )
+                    .children(in_use.amounts().iter().map(|amount| {
+                        div()
+                            .id(("quick-size-preview", *amount))
+                            .px(px(10.))
+                            .py(px(4.))
+                            .border_1()
+                            .border_color(Palette::line())
+                            .rounded(px(7.))
+                            .font_family(MONO)
+                            .text_size(px(12.5))
+                            .aria_label(QuickSizes::label(*amount))
+                            .child(QuickSizes::label(*amount))
+                    }))
+                    .child(div().flex_1())
+                    .child(
+                        Button::new("quick-size-reset")
+                            .small()
+                            .outline()
+                            .label("Reset to $5k, $10k, $25k")
+                            .disabled(is_default)
+                            .on_click(
+                                cx.listener(|this, _, window, cx| this.reset_quick(window, cx)),
+                            ),
+                    ),
+            )
+            .into_any_element()
     }
 
     fn heading(text: impl Into<SharedString>) -> gpui_kit::Div {
@@ -338,35 +551,38 @@ impl Settings {
 
 impl Render for Settings {
     fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        h_flex()
+        // The page scrolls when the window is shorter than its sections.
+        div()
             .id("settings-page")
             .size_full()
-            .items_start()
-            .justify_center()
-            .p_5()
+            .overflow_y_scroll()
             .child(
-                v_flex()
-                    .w(px(680.))
-                    .max_w_full()
-                    .gap_4()
-                    .child(
-                        h_flex()
-                            .child(
-                                div()
-                                    .text_size(px(20.))
-                                    .font_weight(gpui_kit::FontWeight::SEMIBOLD)
-                                    .child("Settings"),
-                            )
-                            .child(div().flex_1())
-                            .child(
-                                Button::new("settings-done").small().label("Done").on_click(
-                                    cx.listener(|_, _, _, cx| cx.emit(SettingsEvent::Done)),
+                h_flex().w_full().justify_center().p_5().child(
+                    v_flex()
+                        .w(px(680.))
+                        .max_w_full()
+                        .flex_shrink_0()
+                        .gap_4()
+                        .child(
+                            h_flex()
+                                .child(
+                                    div()
+                                        .text_size(px(20.))
+                                        .font_weight(gpui_kit::FontWeight::SEMIBOLD)
+                                        .child("Settings"),
+                                )
+                                .child(div().flex_1())
+                                .child(
+                                    Button::new("settings-done").small().label("Done").on_click(
+                                        cx.listener(|_, _, _, cx| cx.emit(SettingsEvent::Done)),
+                                    ),
                                 ),
-                            ),
-                    )
-                    .child(self.network_panel(cx))
-                    .child(self.key_panel(cx))
-                    .child(self.trading_panel(cx)),
+                        )
+                        .child(self.network_panel(cx))
+                        .child(self.key_panel(cx))
+                        .child(self.trading_panel(cx))
+                        .child(self.quick_panel(cx)),
+                ),
             )
             .test_support()
     }
@@ -390,6 +606,53 @@ impl Settings {
         match &self.saved {
             Saved::Key(address) => Some(address.to_string()),
             _ => None,
+        }
+    }
+
+    /// Type into the quick size field at `ix`.
+    pub fn set_quick_text(
+        &self,
+        ix: usize,
+        text: &str,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.quick[ix].update(cx, |input, cx| {
+            input.set_value(text.to_string(), window, cx)
+        });
+    }
+
+    /// Type into the quick size field at `ix`, as the keyboard does: the
+    /// list is checked and, when valid, used.
+    pub fn type_quick(
+        &mut self,
+        ix: usize,
+        text: &str,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.set_quick_text(ix, text, window, cx);
+        self.quick_changed(cx);
+    }
+
+    /// What the quick size fields hold.
+    pub fn quick_field_texts(&self, cx: &gpui_kit::App) -> Vec<String> {
+        self.quick_texts(cx)
+    }
+
+    /// The reason under each quick size field, if any.
+    pub fn quick_problems(&self, cx: &gpui_kit::App) -> Vec<Option<&'static str>> {
+        let texts = self.quick_texts(cx);
+        match self.quick_check(cx) {
+            Ok(_) => vec![None; texts.len()],
+            Err(problems) => problems
+                .into_iter()
+                .zip(&texts)
+                .map(|(p, t)| {
+                    p.filter(|_| !t.trim().is_empty())
+                        .map(QuickSizeRule::message)
+                })
+                .collect(),
         }
     }
 

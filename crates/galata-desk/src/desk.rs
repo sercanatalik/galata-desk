@@ -3,16 +3,17 @@
 
 use galata_desk_core::connect::{Attempt, AttemptEvent};
 use galata_desk_core::network::Network;
-use galata_desk_core::store::Account;
+use galata_desk_core::store::{Account, QuickSizes};
 use gpui_kit::component::button::{Button, ButtonVariants};
 use gpui_kit::component::tab::TabBar;
-use gpui_kit::component::{ActiveTheme, Sizable, TitleBar, h_flex, v_flex};
+use gpui_kit::component::{ActiveTheme, Icon, IconName, Sizable, TitleBar, h_flex, v_flex};
 use gpui_kit::prelude::*;
-use gpui_kit::{Context, Entity, Subscription, TestSupportExt, Window, div};
+use gpui_kit::{Context, Entity, Subscription, TestSupportExt, Window, deferred, div};
 
 use crate::Core;
 use crate::connect::{self, ConnectState};
 use crate::funding::Funding;
+use crate::history::History;
 use crate::markets::Markets;
 use crate::portfolio::{Portfolio, PortfolioEvent};
 use crate::settings::{Settings, SettingsEvent};
@@ -24,6 +25,7 @@ pub enum Section {
     Portfolio,
     Markets,
     Funding,
+    History,
 }
 
 enum Screen {
@@ -36,6 +38,9 @@ enum Screen {
         /// Created with the portfolio: it asks the venue nothing until a row
         /// is chosen, and keeps its choice while another section is shown.
         funding: Entity<Funding>,
+        /// Created with the portfolio: each of its tabs asks the venue
+        /// nothing until it is first shown.
+        history: Entity<History>,
         /// Created, and its stream opened, the first time Markets is chosen.
         markets: Option<Entity<Markets>>,
         _events: [Subscription; 2],
@@ -81,6 +86,7 @@ impl Desk {
         let events = cx.subscribe_in(&view, window, |this, _, event, window, cx| match event {
             SettingsEvent::Network(network) => this.set_network(*network, window, cx),
             SettingsEvent::MainnetTrading(allowed) => this.set_mainnet_trading(*allowed, cx),
+            SettingsEvent::QuickSizes(list) => this.set_quick_sizes(list.clone(), cx),
             SettingsEvent::Done => this.close_settings(cx),
         });
         self.settings = Some((view, events));
@@ -100,6 +106,19 @@ impl Desk {
         let core = Core::get(cx);
         let _ = core.store.save_settings(&core.settings());
         self.reconsider_trading(cx);
+        cx.notify();
+    }
+
+    /// Use these quick sizes in the order ticket from now on, and remember
+    /// them. A list that could not be saved still applies until the app quits.
+    fn set_quick_sizes(&mut self, list: QuickSizes, cx: &mut Context<Self>) {
+        cx.global_mut::<Core>().quick_sizes = list;
+        let core = Core::get(cx);
+        let _ = core.store.save_settings(&core.settings());
+        // The page's preview shows the list in use.
+        if let Some((settings, _)) = &self.settings {
+            settings.update(cx, |_, cx| cx.notify());
+        }
         cx.notify();
     }
 
@@ -134,6 +153,7 @@ impl Desk {
     }
 
     fn portfolio(account: Account, window: &mut Window, cx: &mut Context<Self>) -> Screen {
+        let address = account.address.as_str().to_string();
         let view = cx.new(|cx| Portfolio::new(account.address, window, cx));
         let events = cx.subscribe_in(&view, window, |this, _, event, window, cx| match event {
             PortfolioEvent::Disconnect => this.disconnect(cx),
@@ -143,11 +163,16 @@ impl Desk {
         // every section, so it redraws when the portfolio changes.
         let changes = cx.observe(&view, |_, _, cx| cx.notify());
         let funding = cx.new(|cx| Funding::new(view.clone(), cx));
+        let history = {
+            let portfolio = view.clone();
+            cx.new(|cx| History::new(portfolio, address, window, cx))
+        };
         #[allow(unused_mut)]
         let mut screen = Screen::Connected {
             section: Section::Portfolio,
             portfolio: view,
             funding,
+            history,
             markets: None,
             _events: [events, changes],
         };
@@ -167,6 +192,14 @@ impl Desk {
         {
             Self::open_section(&mut screen, Section::Funding, window, cx);
         }
+        #[cfg(feature = "shot")]
+        if std::env::var("GALATA_DESK_SHOT_STATE")
+            .unwrap_or_default()
+            .split(',')
+            .any(|kv| kv == "section=history")
+        {
+            Self::open_section(&mut screen, Section::History, window, cx);
+        }
         screen
     }
 
@@ -176,6 +209,7 @@ impl Desk {
             section,
             portfolio,
             funding,
+            history,
             markets,
             ..
         } = screen
@@ -188,6 +222,10 @@ impl Desk {
             // last shown.
             if to == Section::Funding {
                 funding.update(cx, |view, cx| view.refresh_watchlist(cx));
+            }
+            // History loads and refreshes only while it is shown.
+            if (to == Section::History) != (*section == Section::History) {
+                history.update(cx, |view, cx| view.set_shown(to == Section::History, cx));
             }
             *section = to;
         }
@@ -364,7 +402,8 @@ impl Render for Desk {
         let settings_button = Button::new("settings")
             .small()
             .ghost()
-            .label("Settings")
+            .icon(Icon::new(IconName::Settings))
+            .tooltip("Settings")
             .on_click(cx.listener(|this, _, window, cx| {
                 if this.settings.is_some() {
                     this.close_settings(cx);
@@ -384,6 +423,7 @@ impl Render for Desk {
                 section,
                 portfolio,
                 funding,
+                history,
                 markets,
                 ..
             } => {
@@ -394,28 +434,45 @@ impl Render for Desk {
                         Section::Portfolio => 0,
                         Section::Markets => 1,
                         Section::Funding => 2,
+                        Section::History => 3,
                     })
                     .on_click(cx.listener(|this, ix: &usize, window, cx| {
                         let to = match *ix {
                             0 => Section::Portfolio,
                             1 => Section::Markets,
-                            _ => Section::Funding,
+                            2 => Section::Funding,
+                            _ => Section::History,
                         };
                         this.show(to, window, cx);
                     }))
-                    .children(["Portfolio", "Markets", "Funding"]);
+                    .children(["Portfolio", "Markets", "Funding", "History"]);
                 let account = portfolio.update(cx, |view, cx| view.account_controls(cx));
                 // The current section says how fresh it is; the account is
                 // the same in both.
                 let (status, body) = match (section, markets) {
                     (Section::Markets, Some(markets)) => (
                         markets.update(cx, |view, cx| view.status(cx)),
-                        markets.clone().into_any_element(),
+                        // The order ticket opens from here and is the
+                        // portfolio's dialog: draw it over the section.
+                        div()
+                            .relative()
+                            .size_full()
+                            .child(markets.clone())
+                            .children(
+                                portfolio
+                                    .update(cx, |view, cx| view.dialog_layer(cx))
+                                    .map(|dialog| deferred(dialog).with_priority(3)),
+                            )
+                            .into_any_element(),
                     ),
                     // Funding's positions and rates are the portfolio's.
                     (Section::Funding, _) => (
                         portfolio.update(cx, |view, cx| view.freshness(cx)),
                         funding.clone().into_any_element(),
+                    ),
+                    (Section::History, _) => (
+                        portfolio.update(cx, |view, cx| view.freshness(cx)),
+                        history.clone().into_any_element(),
                     ),
                     _ => (
                         portfolio.update(cx, |view, cx| view.freshness(cx)),
@@ -475,6 +532,14 @@ impl Desk {
     pub fn funding_view(&self) -> Option<Entity<Funding>> {
         match &self.screen {
             Screen::Connected { funding, .. } => Some(funding.clone()),
+            Screen::Connect(_) => None,
+        }
+    }
+
+    /// The History view, when an account is connected.
+    pub fn history_view(&self) -> Option<Entity<History>> {
+        match &self.screen {
+            Screen::Connected { history, .. } => Some(history.clone()),
             Screen::Connect(_) => None,
         }
     }

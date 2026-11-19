@@ -143,6 +143,7 @@ mod tests {
             realised: d(realised),
             fee: d(fee),
             id: time_ms,
+            ..Fill::blank()
         }
     }
 

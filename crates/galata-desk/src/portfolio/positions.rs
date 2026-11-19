@@ -315,8 +315,9 @@ impl Portfolio {
             .iter()
             .map(|p| position_row(p, self.position_buttons(p), self.tpsl_cell(p)))
             .collect();
+        let keys = holdings.positions.iter().map(position_keys).collect();
         self.positions.update(cx, |t, cx| {
-            t.delegate_mut().set_rows(rows);
+            t.delegate_mut().set_keyed_rows(rows, keys);
             t.refresh(cx);
         });
     }

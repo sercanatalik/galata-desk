@@ -28,9 +28,17 @@ struct Recorded {
 impl Transport for Recorded {
     async fn post(&self, body: Value) -> Result<Vec<u8>, VenueError> {
         let kind = body["type"].as_str().unwrap().to_string();
-        let name = match body.get("dex").and_then(Value::as_str) {
-            Some(dex) => format!("{kind}_{dex}"),
-            None => kind,
+        // A per-coin query is answered from `<type>_<coin>`, the coin's
+        // prefix colon written as an underscore (`activeAssetData_xyz_NVDA`).
+        let name = match (
+            body.get("dex").and_then(Value::as_str),
+            body.get("coin").and_then(Value::as_str),
+        ) {
+            (Some(dex), _) => format!("{kind}_{dex}"),
+            (None, Some(coin)) if kind == "activeAssetData" => {
+                format!("{kind}_{}", coin.replace(':', "_"))
+            }
+            _ => kind,
         };
         self.asked.lock().unwrap().push(body);
         Ok(fixture(&name))
@@ -223,6 +231,175 @@ fn user_fills_decode_with_side_price_size_time_and_realised_pnl() {
 }
 
 #[test]
+fn a_fill_says_what_it_did_who_took_and_which_order() {
+    use galata_desk_core::market::fills::Fill;
+    use galata_desk_core::venue::UserFill;
+    let fills: Vec<Fill> = decode::<Vec<UserFill>>("userFills", &fixture("userFills"))
+        .unwrap()
+        .into_iter()
+        .map(Fill::from)
+        .collect();
+    let pnut = fills.iter().find(|f| f.coin == "PNUT").unwrap();
+    assert_eq!(pnut.dir, "Close Short");
+    assert!(pnut.taker);
+    assert_eq!(pnut.oid, 608_255_639_822);
+    assert!(pnut.hash.starts_with("0x4e5ba955"));
+    // A maker fill that opened a position, and one that closed one.
+    let useless = fills.iter().find(|f| f.coin == "USELESS").unwrap();
+    assert_eq!(useless.dir, "Open Long");
+    assert!(!useless.taker);
+    let snx = fills.iter().find(|f| f.coin == "SNX").unwrap();
+    assert_eq!(snx.dir, "Close Long");
+    // A builder-dex fill keeps its dex in the coin.
+    let nvda = fills.iter().find(|f| f.coin == "xyz:NVDA").unwrap();
+    assert_eq!(nvda.dir, "Open Long");
+    assert!(nvda.taker);
+}
+
+#[test]
+fn order_history_lists_each_change_of_status_newest_first() {
+    use galata_desk_core::venue::HistoricalOrder;
+    let rows: Vec<HistoricalOrder> =
+        decode("historicalOrders", &fixture("historicalOrders")).unwrap();
+    assert_eq!(rows.len(), 6);
+    assert!(
+        rows.windows(2)
+            .all(|w| w[0].status_timestamp >= w[1].status_timestamp)
+    );
+    // One order that rested and then filled is two rows.
+    let nvda: Vec<&HistoricalOrder> = rows
+        .iter()
+        .filter(|r| r.order.oid == 610_305_538_201)
+        .collect();
+    let statuses: Vec<&str> = nvda.iter().map(|r| r.status.as_str()).collect();
+    assert_eq!(statuses, ["filled", "open"]);
+    assert_eq!(nvda[0].order.coin, "xyz:NVDA");
+    // A trigger order that triggered.
+    let stop = rows.iter().find(|r| r.status == "triggered").unwrap();
+    assert!(stop.order.is_trigger);
+    assert_eq!(stop.order.order_type, "Stop Market");
+    assert!(stop.order.trigger_condition.starts_with("Price above"));
+    // A reduce-only cancel, as the venue words it.
+    let cancelled = rows
+        .iter()
+        .find(|r| r.status == "reduceOnlyCanceled" && r.order.coin == "xyz:ANT")
+        .unwrap();
+    assert!(cancelled.order.reduce_only);
+    // A main-dex order.
+    assert!(rows.iter().any(|r| r.order.coin == "BTC"));
+}
+
+#[test]
+fn an_order_status_this_build_has_not_met_still_decodes() {
+    use galata_desk_core::venue::HistoricalOrder;
+    let rows: Vec<HistoricalOrder> = decode(
+        "historicalOrders",
+        br#"[{"order":{"coin":"BTC","side":"B","limitPx":"60000.0","sz":"0.0","oid":9,"timestamp":1795100000000,"triggerCondition":"N/A","isTrigger":false,"triggerPx":"0.0","children":[],"isPositionTpsl":false,"reduceOnly":false,"orderType":"Limit","origSz":"0.1","tif":"Gtc","cloid":null},"status":"someNewStatus","statusTimestamp":1795100000001}]"#,
+    )
+    .unwrap();
+    assert_eq!(rows[0].status, "someNewStatus");
+    let empty: Vec<HistoricalOrder> = decode("historicalOrders", b"[]").unwrap();
+    assert!(empty.is_empty());
+}
+
+#[test]
+fn funding_payments_decode_signed_with_how_many_hours_each_holds() {
+    use galata_desk_core::venue::UserFundingRow;
+    let rows: Vec<UserFundingRow> = decode("userFunding", &fixture("userFunding")).unwrap();
+    assert_eq!(rows.len(), 3);
+    assert!(rows.windows(2).all(|w| w[0].time <= w[1].time));
+    // Received on the main dex, by a short.
+    let btc = rows.iter().find(|r| r.delta.coin == "BTC").unwrap();
+    assert!(btc.delta.usdc > Decimal::ZERO);
+    assert!(btc.delta.szi < Decimal::ZERO);
+    assert_eq!(btc.delta.n_samples, 1);
+    // Paid on a builder dex, by a long.
+    let meta = rows.iter().find(|r| r.delta.coin == "xyz:META").unwrap();
+    assert_eq!(meta.delta.usdc.to_string(), "-0.054547");
+    assert!(meta.delta.szi > Decimal::ZERO);
+    // An older row summed over a day.
+    let spcx = rows.iter().find(|r| r.delta.coin == "xyz:SPCX").unwrap();
+    assert_eq!(spcx.delta.n_samples, 24);
+    assert_eq!(spcx.delta.funding_rate.to_string(), "0.000003962");
+}
+
+#[test]
+fn ledger_rows_decode_by_type_and_keep_the_unknown() {
+    use galata_desk_core::venue::{LedgerDelta, LedgerRow};
+    let rows: Vec<LedgerRow> = decode(
+        "userNonFundingLedgerUpdates",
+        &fixture("userNonFundingLedgerUpdates"),
+    )
+    .unwrap();
+    assert_eq!(rows.len(), 14);
+    assert!(rows.windows(2).all(|w| w[0].time <= w[1].time));
+    assert!(rows.iter().all(|r| r.hash.starts_with("0x")));
+    let find = |f: fn(&LedgerDelta) -> bool| rows.iter().find(|r| f(&r.delta)).unwrap();
+    // A deposit has no fee to report.
+    let deposit = find(|d| matches!(d, LedgerDelta::Deposit { .. }));
+    assert_eq!(deposit.delta, LedgerDelta::Deposit { usdc: dec("100.0") });
+    assert!(matches!(
+        find(|d| matches!(d, LedgerDelta::Withdraw { .. })).delta,
+        LedgerDelta::Withdraw { .. }
+    ));
+    let LedgerDelta::AccountClassTransfer { to_perp, .. } =
+        find(|d| matches!(d, LedgerDelta::AccountClassTransfer { .. })).delta
+    else {
+        unreachable!()
+    };
+    assert!(to_perp);
+    let LedgerDelta::Send {
+        source_dex, token, ..
+    } = &find(|d| matches!(d, LedgerDelta::Send { .. })).delta
+    else {
+        unreachable!()
+    };
+    assert_eq!(source_dex, "spot");
+    assert_eq!(token, "UPUMP");
+    let LedgerDelta::VaultWithdraw {
+        requested_usd,
+        net_withdrawn_usd,
+        ..
+    } = find(|d| matches!(d, LedgerDelta::VaultWithdraw { .. })).delta
+    else {
+        unreachable!()
+    };
+    assert_eq!(requested_usd, net_withdrawn_usd);
+    for typed in [
+        |d: &LedgerDelta| matches!(d, LedgerDelta::InternalTransfer { .. }),
+        |d: &LedgerDelta| matches!(d, LedgerDelta::SubAccountTransfer { .. }),
+        |d: &LedgerDelta| matches!(d, LedgerDelta::SpotTransfer { .. }),
+        |d: &LedgerDelta| matches!(d, LedgerDelta::VaultCreate { .. }),
+        |d: &LedgerDelta| matches!(d, LedgerDelta::VaultDeposit { .. }),
+        |d: &LedgerDelta| matches!(d, LedgerDelta::VaultDistribution { .. }),
+    ] {
+        assert!(rows.iter().any(|r| typed(&r.delta)));
+    }
+    // Types read as `Other`, under their own names.
+    let mut others: Vec<&str> = rows
+        .iter()
+        .filter_map(|r| match &r.delta {
+            LedgerDelta::Other { kind, .. } => Some(kind.as_str()),
+            _ => None,
+        })
+        .collect();
+    others.sort();
+    assert_eq!(others, ["cStakingTransfer", "liquidation", "spotGenesis"]);
+
+    // A type never seen is kept, with its fields.
+    let unseen: Vec<LedgerRow> = decode(
+        "userNonFundingLedgerUpdates",
+        br#"[{"time":1795100000000,"hash":"0xab","delta":{"type":"borrowLend","token":"USDC","amount":"5.0"}}]"#,
+    )
+    .unwrap();
+    let LedgerDelta::Other { kind, fields } = &unseen[0].delta else {
+        panic!("{:?}", unseen[0].delta)
+    };
+    assert_eq!(kind, "borrowLend");
+    assert_eq!(fields["amount"], "5.0");
+}
+
+#[test]
 fn a_fill_without_a_fee_is_an_error_not_a_free_fill() {
     use galata_desk_core::venue::UserFill;
     let result: Result<Vec<UserFill>, _> = decode(
@@ -261,4 +438,50 @@ fn a_role_answer_says_whose_api_wallet_an_address_is() {
     assert_eq!((user.role.as_str(), user.data), ("user", None));
     let missing: UserRole = decode("userRole", br#"{"role":"missing"}"#).unwrap();
     assert_eq!(missing.role, "missing");
+}
+
+#[test]
+fn what_an_account_can_trade_in_a_market_is_read() {
+    // Recorded on mainnet for a public account that trades HYPE at 20x.
+    let hype: ActiveAsset = decode("activeAssetData", &fixture("activeAssetData_HYPE")).unwrap();
+    assert_eq!(hype.leverage.value, 20);
+    assert_eq!(hype.leverage.mode, MarginMode::Cross);
+    assert_eq!(hype.max_size(true), dec("928851.47"));
+    assert_eq!(hype.max_size(false), dec("930454.47"));
+    assert_eq!(hype.available(true), dec("3073987.4973909999"));
+    assert_eq!(hype.mark_px, dec("66.189"));
+
+    // The same account on a builder dex, where it holds no collateral:
+    // nothing can be traded there.
+    let nvda: ActiveAsset =
+        decode("activeAssetData", &fixture("activeAssetData_xyz_NVDA")).unwrap();
+    assert_eq!(nvda.leverage.value, 10);
+    assert!(nvda.max_size(true).is_zero() && nvda.max_size(false).is_zero());
+}
+
+#[tokio::test]
+async fn the_active_asset_is_asked_for_one_user_and_coin() {
+    let transport = Recorded::default();
+    let info = Info::new(transport.clone());
+    let nvda = info.active_asset(USER, "xyz:NVDA").await.unwrap();
+    assert_eq!(nvda.leverage.value, 10);
+    let asked = transport.asked.lock().unwrap();
+    assert_eq!(
+        asked[0],
+        serde_json::json!({ "type": "activeAssetData", "user": USER, "coin": "xyz:NVDA" })
+    );
+}
+
+#[test]
+fn an_hourly_funding_payment_with_null_samples_counts_as_one_hour() {
+    use galata_desk_core::venue::UserFundingRow;
+    // As the venue answers today: `nSamples` is `null`, not left out.
+    let rows: Vec<UserFundingRow> = decode(
+        "userFunding",
+        br#"[{"time":1794751200060,"hash":"0x0000000000000000000000000000000000000000000000000000000000000000","delta":{"type":"funding","coin":"ETH","usdc":"-0.068805","szi":"5.4579","fundingRate":"0.0000068858","nSamples":null}},
+             {"time":1794754800000,"hash":"0x00","delta":{"type":"funding","coin":"BTC","usdc":"0.01","szi":"-0.1","fundingRate":"0.00001"}}]"#,
+    )
+    .unwrap();
+    assert_eq!(rows[0].delta.n_samples, 1);
+    assert_eq!(rows[1].delta.n_samples, 1);
 }

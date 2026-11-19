@@ -22,7 +22,7 @@ use galata_desk_core::rust_decimal::prelude::ToPrimitive;
 use galata_desk_core::trade::sign::Tpsl;
 use galata_desk_core::venue::Http;
 use galata_desk_core::venue::Side;
-use gpui_kit::component::button::{Button, ButtonVariants};
+use gpui_kit::component::button::{Button, ButtonCustomVariant, ButtonVariants};
 use gpui_kit::component::chart::CandlestickChart;
 use gpui_kit::component::input::{Input, InputEvent, InputState};
 use gpui_kit::component::menu::{DropdownMenu, PopupMenuItem};
@@ -53,7 +53,9 @@ const SOFT: u32 = 0xd8d3c8;
 const GAP: f32 = 8.;
 /// The market panel: a fixed height above the tiles, its detail column on
 /// the left and the chart taking the rest.
-const PANEL_HEIGHT: f32 = 344.;
+// Tall enough for the detail's figures and the Buy and Sell buttons under
+// them.
+const PANEL_HEIGHT: f32 = 388.;
 const DETAIL_WIDTH: f32 = 280.;
 /// The chart's plot, and the column of price labels beside it.
 const PLOT_HEIGHT: f32 = 266.;
@@ -1050,7 +1052,11 @@ impl Markets {
                 .unwrap_or_default();
             h_flex()
                 .size_full()
-                .child(self.detail(tile, position.as_ref()))
+                .child(self.detail(
+                    tile,
+                    position.as_ref(),
+                    (!tile.unavailable).then(|| self.trade_buttons(&market, cx)),
+                ))
                 .child(self.chart(tile, candles, &grouped, &levels, since, cx.reduce_motion()))
                 .into_any_element()
         };
@@ -1066,8 +1072,56 @@ impl Markets {
         )
     }
 
-    /// The panel's left side: everything the venue says about the market now.
-    fn detail(&self, tile: &Tile, position: Option<&PositionRow>) -> AnyElement {
+    /// Buy / Long and Sell / Short for the selected market: each opens the
+    /// order ticket on that side. Trading's guards are explained in the
+    /// ticket, so these are not disabled by them.
+    fn trade_buttons(&self, market: &MarketId, cx: &mut Context<Self>) -> AnyElement {
+        let side = |id: &'static str, label: &'static str, buy: bool, cx: &mut Context<Self>| {
+            // The button's colour paints as a tint, with its words in the
+            // full colour: blue for buying, orange for selling.
+            let ground = if buy {
+                Palette::gain()
+            } else {
+                Palette::loss()
+            };
+            let hover = ground.opacity(0.3);
+            let market = market.clone();
+            let name = format!("{} {}", if buy { "Buy" } else { "Sell" }, market.ticker());
+            Button::new(id)
+                .flex_1()
+                .label(label)
+                .custom(
+                    ButtonCustomVariant::new(cx)
+                        .color(ground)
+                        .foreground(ground)
+                        .hover(hover)
+                        .active(hover),
+                )
+                .accessibility_label(name)
+                .on_click(cx.listener(move |this, _, window, cx| {
+                    let market = market.clone();
+                    this.portfolio.update(cx, |portfolio, cx| {
+                        portfolio.open_ticket(market, buy, window, cx)
+                    });
+                }))
+        };
+        h_flex()
+            .mt_auto()
+            .pt_2()
+            .gap_2()
+            .child(side("trade-buy", "Buy / Long", true, cx))
+            .child(side("trade-sell", "Sell / Short", false, cx))
+            .into_any_element()
+    }
+
+    /// The panel's left side: everything the venue says about the market now,
+    /// with the Buy and Sell buttons under it.
+    fn detail(
+        &self,
+        tile: &Tile,
+        position: Option<&PositionRow>,
+        trade: Option<AnyElement>,
+    ) -> AnyElement {
         let market = &tile.market;
         let pending = |w: f32, h: f32| ui::placeholder(px(w), px(h)).into_any_element();
         let row = |name: &str, value: AnyElement| {
@@ -1210,6 +1264,7 @@ impl Markets {
                             .child(f::pnl_rounded(p.signed_value())),
                     )
             }))
+            .children(trade)
             .into_any_element()
     }
 
@@ -1405,6 +1460,21 @@ fn remove_button(ix: usize, market: &MarketId, cx: &mut Context<Markets>) -> But
 
 impl Render for Markets {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        // A screenshot run's order ticket opens once the selected market has
+        // a price.
+        #[cfg(feature = "shot")]
+        if let Some(market) = self.selected().cloned()
+            && let Some(mid) = self
+                .snapshot
+                .tiles
+                .iter()
+                .find(|t| t.market == market)
+                .and_then(|t| t.live.as_ref())
+                .map(|l| l.last)
+        {
+            self.portfolio
+                .update(cx, |p, cx| p.stage_ticket_shot(market, mid, window, cx));
+        }
         let padding = 12.;
         let width = f32::from(window.viewport_size().width) - 2. * padding;
         let columns = (((width + GAP) / (TILE_MIN + GAP)).floor() as u16).max(1);

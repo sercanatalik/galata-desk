@@ -36,6 +36,13 @@ order are the SDK's own. They are:
 - `modify_trigger`: a `batchModify` whose new order is a market stop-loss.
 
 The MessagePack bytes are the SDK's `msgpack.packb` of the action.
+
+Two more were added for the order ticket, made the same way:
+
+- `open_ioc_buy`: a buy that is not reduce-only (`r: false`), IOC, on asset 4.
+- `entry_with_tpsl`: a GTC buy followed by its market take-profit and
+  stop-loss. Both are reduce-only sells sized to the entry, with grouping
+  `normalTpsl`.
 The example `signing` makes the same check against the live venue.
 
 `fundingHistory_BTC.json` and `fundingHistory_xyz_NVDA.json` were recorded on
@@ -92,3 +99,54 @@ A third probe run on testnet BTC (asset 3) the same day showed:
 - Closing the whole of a position worth $4.89 at market was allowed, so the
   $10 minimum binds only a partial close.
 - A position TP/SL was gone once the position was closed.
+
+`activeAssetData_HYPE.json` and `activeAssetData_xyz_NVDA.json` were recorded
+from mainnet on 2026-11-18 for the public account the other fixtures use.
+`maxTradeSzs` and `availableToTrade` are given as [buy, sell]. On `xyz` the
+account can trade nothing, because a builder dex keeps its own collateral.
+
+The probe's `--open` mode, run by the user on testnet BTC on 2026-11-18,
+showed how the venue takes an entry with its own take-profit and stop-loss
+(grouping `normalTpsl`):
+
+- The answer has one status per order sent: the entry's (`filled`, with
+  `totalSz` and `avgPx`), then `"waitingForTrigger"` for each trigger.
+- **Triggers sized to the entry** are listed as plain trigger orders
+  (`isPositionTpsl: false`, `sz` the entry's size).
+- **Triggers sized `"0"`** become the position's TP/SL (`isPositionTpsl:
+  true`, `sz: "0.0"`).
+- Either way, both triggers were gone once the bought size was sold back.
+
+## Account history
+
+Probed on mainnet on 2026-11-19 with public accounts (traders named by
+`recentTrades`, and the HLP vault), for the History section:
+
+- **`historicalOrders` cannot be paged.** It returns the latest 2000 rows,
+  newest first by `statusTimestamp`, and ignores `startTime` and `endTime`:
+  asking with `endTime` set to the oldest row's time returned the same
+  newest 2000. One row is kept per change of status, so 2000 rows held 1246
+  distinct orders for one account.
+- **`userNonFundingLedgerUpdates` pages forward by time.** From
+  `startTime: 0` it returned 2000 rows, oldest first, for the HLP vault:
+  the cap is 2000 per answer.
+- **A deposit reports no fee.** Its delta is `{"type": "deposit", "usdc"}`
+  only. A withdrawal's carries `fee`, as do `internalTransfer`, `spotTransfer`,
+  `send` and `vaultCreate`.
+- **Ledger types met:** `deposit`, `withdraw`, `accountClassTransfer`
+  (`toPerp`), `internalTransfer`, `subAccountTransfer`, `send` (with
+  `sourceDex`, `destinationDex`, `token`, `usdcValue`), `spotTransfer`,
+  `vaultCreate`, `vaultDeposit`, `vaultWithdraw` (`requestedUsd`,
+  `netWithdrawnUsd`, `commission`, `closingCost`), `vaultDistribution`,
+  `cStakingTransfer`, `spotGenesis` and `liquidation`. `userNonFundingLedgerUpdates.json`
+  holds one recorded row of each.
+- **`userFunding`** returns at most 500 rows per answer, oldest first from
+  `startTime`, each `{time, hash, delta: {type: "funding", coin, usdc, szi,
+  fundingRate, nSamples}}`. Builder-dex payments (`xyz:…`) come without a
+  `dex` field.
+- **Older funding payments come summed by day.** A row at midnight with
+  `nSamples: 24` stands for that day's 24 hourly payments, with
+  `fundingRate` their average; recent rows have `nSamples: 1`. A count of
+  payments sums `nSamples`, not rows. `userFunding.json` holds three
+  recorded rows: a main-dex payment received, and a builder-dex payment
+  paid and one received, one of them summed.

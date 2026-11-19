@@ -91,6 +91,16 @@ pub fn pencil_icon() -> gpui_kit::component::Icon {
     gpui_kit::component::Icon::default().data(include_bytes!("../../../assets/icons/pencil.svg"))
 }
 
+/// A door with an arrow out: disconnect.
+pub fn log_out_icon() -> gpui_kit::component::Icon {
+    gpui_kit::component::Icon::default().data(include_bytes!("../../../assets/icons/log-out.svg"))
+}
+
+/// An arrow down to a tray: export.
+pub fn download_icon() -> gpui_kit::component::Icon {
+    gpui_kit::component::Icon::default().data(include_bytes!("../../../assets/icons/download.svg"))
+}
+
 /// A list with a cross: cancel all.
 pub fn list_cross_icon() -> gpui_kit::component::Icon {
     gpui_kit::component::Icon::default().data(include_bytes!("../../../assets/icons/list-x.svg"))
