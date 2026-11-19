@@ -5,6 +5,7 @@ mod desk;
 mod funding;
 mod grid;
 mod history;
+mod market_about;
 mod market_tile;
 mod markets;
 mod portfolio;

@@ -485,3 +485,46 @@ fn an_hourly_funding_payment_with_null_samples_counts_as_one_hour() {
     assert_eq!(rows[0].delta.n_samples, 1);
     assert_eq!(rows[1].delta.n_samples, 1);
 }
+
+#[test]
+fn a_dex_in_full_names_its_deployer_oracle_setters_and_market_parameters() {
+    let dexs: Vec<Option<DexInfo>> = decode("perpDexs", &fixture("perpDexs_full")).unwrap();
+    // The main dex comes first, as null.
+    assert!(dexs[0].is_none());
+    let xyz = dexs.iter().flatten().find(|d| d.name == "xyz").unwrap();
+    assert_eq!(xyz.full_name, "XYZ");
+    assert!(xyz.deployer.as_deref().is_some_and(|d| d.starts_with("0x")));
+    // No named updater: the oracle is set by a sub-deployer.
+    assert_eq!(xyz.oracle_updater, None);
+    assert!(!xyz.oracle_setters().is_empty());
+    assert!(xyz.oi_cap("xyz:NVDA").is_some_and(|c| c > Decimal::ZERO));
+    assert!(xyz.funding_multiplier("xyz:NVDA").is_some());
+    assert_eq!(xyz.oi_cap("xyz:NOPE"), None);
+    let flx = dexs.iter().flatten().find(|d| d.name == "flx").unwrap();
+    assert_eq!(flx.full_name, "Felix Exchange");
+    // The named updater is listed once though it is also a sub-deployer.
+    let setters = flx.oracle_setters();
+    assert_eq!(setters[0], flx.oracle_updater.clone().unwrap());
+    assert_eq!(
+        setters
+            .iter()
+            .filter(|s| s.eq_ignore_ascii_case(&setters[0]))
+            .count(),
+        1
+    );
+    // The trimmed fixture, with names only, still decodes.
+    let trimmed: Vec<Option<DexInfo>> = decode("perpDexs", &fixture("perpDexs")).unwrap();
+    assert!(trimmed.iter().flatten().all(|d| d.oi_caps.is_empty()));
+}
+
+#[test]
+fn a_market_annotation_decodes_and_a_main_dex_market_has_none() {
+    let ant: Option<PerpAnnotation> =
+        decode("perpAnnotation", &fixture("perpAnnotation_xyz_ANT")).unwrap();
+    let ant = ant.unwrap();
+    assert_eq!(ant.category.as_deref(), Some("preipo"));
+    assert!(ant.description.unwrap().contains("Anthropic, PBC"));
+    assert_eq!(ant.keywords, vec!["anthropic", "claude"]);
+    let btc: Option<PerpAnnotation> = decode("perpAnnotation", b"null").unwrap();
+    assert_eq!(btc, None);
+}

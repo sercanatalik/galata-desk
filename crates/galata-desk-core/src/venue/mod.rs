@@ -283,6 +283,24 @@ impl<T: Transport> Info<T> {
             .await
     }
 
+    /// Every builder dex in full: deployer, oracle setters and per-market
+    /// parameters. The main dex is not in it.
+    pub async fn dex_infos(&self) -> Result<Vec<DexInfo>, VenueError> {
+        let dexs: Vec<Option<DexInfo>> =
+            self.ask("perpDexs", json!({ "type": "perpDexs" })).await?;
+        Ok(dexs.into_iter().flatten().collect())
+    }
+
+    /// What the venue says about one market, by its coin name (`xyz:ANT`).
+    /// `None` for a market without one, as on the main dex.
+    pub async fn perp_annotation(&self, coin: &str) -> Result<Option<PerpAnnotation>, VenueError> {
+        self.ask(
+            "perpAnnotation",
+            json!({ "type": "perpAnnotation", "coin": coin }),
+        )
+        .await
+    }
+
     /// What `address` is to the venue: an account, an API wallet acting for
     /// one, or nothing it knows.
     pub async fn user_role(&self, address: &str) -> Result<UserRole, VenueError> {

@@ -1822,7 +1822,7 @@ fn a_screen_reader_hears_the_tiles_figures(cx: &mut TestAppContext) {
         assert_eq!(
             window.find(("tile", 0usize)).label(),
             Some(
-                "HYPE, last 100, -2.70%, -2.5 standard deviations from the period average, \
+                "HYPE, Crypto, last 100, -2.70%, -2.5 standard deviations from the period average, \
                  position +$57k, 30-day PNL -$1,538, year-to-date PNL -$1,538, all-time PNL -$1,538"
             )
         );

@@ -1,6 +1,7 @@
 //! Markets, as distinct from the account: what a perpetual market is doing
 //! now and over a period. Public data only; nothing here knows an address.
 
+pub mod about;
 pub mod candles;
 pub mod feed;
 pub mod fill_history;

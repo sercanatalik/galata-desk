@@ -38,6 +38,7 @@ use gpui_kit::{
 };
 
 use crate::Core;
+use crate::market_about::AboutBook;
 use crate::market_tile::{self, ColourBy};
 use crate::portfolio::Portfolio;
 use crate::theme::{MONO, Palette};
@@ -53,9 +54,9 @@ const SOFT: u32 = 0xd8d3c8;
 const GAP: f32 = 8.;
 /// The market panel: a fixed height above the tiles, its detail column on
 /// the left and the chart taking the rest.
-// Tall enough for the detail's figures and the Buy and Sell buttons under
-// them.
-const PANEL_HEIGHT: f32 = 388.;
+// Tall enough for the detail's name line, figures and the Buy and Sell
+// buttons under them.
+const PANEL_HEIGHT: f32 = 406.;
 const DETAIL_WIDTH: f32 = 280.;
 /// The chart's plot, and the column of price labels beside it.
 const PLOT_HEIGHT: f32 = 266.;
@@ -98,6 +99,8 @@ pub struct Markets {
     search: Entity<InputState>,
     /// Something the user should know that is not about the venue.
     warning: Option<SharedString>,
+    /// What each watched market is: company, kind, deployer, oracle.
+    about: AboutBook,
     opened_at: Instant,
     _watch: Task<()>,
     _subscriptions: Vec<Subscription>,
@@ -214,6 +217,7 @@ impl Markets {
             picker_open: false,
             search,
             warning: None,
+            about: AboutBook::default(),
             opened_at: Instant::now(),
             _watch: watch,
             _subscriptions: subscriptions,
@@ -226,12 +230,103 @@ impl Markets {
         this
     }
 
+    /// Ask the venue what each watched market is, once per session. A main
+    /// dex market has nothing to ask: it is crypto, its oracle the
+    /// validators'. A failed answer is asked again a minute later.
+    fn want_about(&mut self, cx: &mut Context<Self>) {
+        let markets: Vec<MarketId> = self
+            .snapshot
+            .tiles
+            .iter()
+            .map(|t| t.market.clone())
+            .collect();
+        for market in markets {
+            if market.dex().is_empty() && self.about.get(&market).is_none() {
+                self.about
+                    .put(market, galata_desk_core::market::about::About::main_dex());
+            }
+        }
+        // The headless tests do not reach the venue.
+        if cfg!(test) {
+            return;
+        }
+        let core = Core::get(cx);
+        let runtime = core.runtime.clone();
+        let info = galata_desk_core::venue::Info::new(Http::at(core.info_url()));
+        if !self.about.dexes_asked {
+            self.about.dexes_asked = true;
+            let (runtime, info) = (runtime.clone(), info.clone());
+            cx.spawn(async move |this, cx| {
+                let answer = runtime.spawn(async move { info.dex_infos().await }).await;
+                let _ = this.update(cx, |this, cx| match answer {
+                    Ok(Ok(dexes)) => {
+                        this.about.put_dexes(dexes);
+                        cx.notify();
+                    }
+                    _ => this.retry_about(None, cx),
+                });
+            })
+            .detach();
+        }
+        let wanted: Vec<MarketId> = self
+            .snapshot
+            .tiles
+            .iter()
+            .filter(|t| !t.unavailable && !t.market.dex().is_empty())
+            .map(|t| t.market.clone())
+            .filter(|m| self.about.get(m).is_none() && !self.about.asked.contains(m))
+            .collect();
+        for market in wanted {
+            self.about.asked.insert(market.clone());
+            let (runtime, info) = (runtime.clone(), info.clone());
+            cx.spawn(async move |this, cx| {
+                let coin = market.coin().to_string();
+                let answer = runtime
+                    .spawn(async move { info.perp_annotation(&coin).await })
+                    .await;
+                let _ = this.update(cx, |this, cx| match answer {
+                    Ok(Ok(annotation)) => {
+                        let about = galata_desk_core::market::about::About::of(
+                            &annotation.unwrap_or_default(),
+                            market.ticker(),
+                        );
+                        this.about.put(market, about);
+                        cx.notify();
+                    }
+                    _ => this.retry_about(Some(market), cx),
+                });
+            })
+            .detach();
+        }
+    }
+
+    /// Forget that `market` (or, for `None`, the dexes) was asked for, a
+    /// minute from now, so the next draw asks again.
+    fn retry_about(&mut self, market: Option<MarketId>, cx: &mut Context<Self>) {
+        cx.spawn(async move |this, cx| {
+            cx.background_executor()
+                .timer(Duration::from_secs(60))
+                .await;
+            let _ = this.update(cx, |this, cx| {
+                match market {
+                    Some(m) => {
+                        this.about.asked.remove(&m);
+                    }
+                    None => this.about.dexes_asked = false,
+                }
+                cx.notify();
+            });
+        })
+        .detach();
+    }
+
     /// `GALATA_DESK_SHOT_STATE=section=markets,mperiod=week,colour=funding,select=xyz:NVDA,picker=1`
     #[cfg(feature = "shot")]
     fn preselect(&mut self) {
         let state = std::env::var("GALATA_DESK_SHOT_STATE").unwrap_or_default();
         for (key, value) in state.split(',').filter_map(|kv| kv.split_once('=')) {
             match key {
+                "about" => self.about.open_at_start = value == "1",
                 "mperiod" => {
                     let period = match value {
                         "3m" => MarketPeriod::Min3,
@@ -763,6 +858,11 @@ impl Markets {
         let position = account.position(&market);
         let held = position.flatten().is_some();
         let by_funding = self.sort == SortBy::Funding;
+        let headline = self
+            .about
+            .get(&market)
+            .and_then(|a| a.headline())
+            .map(str::to_string);
 
         let header = h_flex()
             .gap(px(6.))
@@ -775,10 +875,23 @@ impl Markets {
             .when(held, |d| {
                 d.child(div().size(px(7.)).rounded_full().bg(Palette::amber()))
             })
-            .child(div().flex_1());
+            .child(
+                div()
+                    .flex_1()
+                    .min_w_0()
+                    .overflow_hidden()
+                    .whitespace_nowrap()
+                    .text_ellipsis()
+                    .text_size(px(11.))
+                    .text_color(gpui_kit::rgb(SOFT))
+                    .children(headline.clone()),
+            );
 
         let soft = gpui_kit::rgb(SOFT);
         let mut name = market.ticker().to_string();
+        if let Some(h) = &headline {
+            name.push_str(&format!(", {h}"));
+        }
         let body: AnyElement = if tile.unavailable {
             v_flex()
                 .flex_1()
@@ -1179,6 +1292,7 @@ impl Markets {
                     .when(position.is_some(), |d| {
                         d.child(div().size(px(7.)).rounded_full().bg(Palette::amber()))
                     })
+                    .child(self.about.button(market))
                     .child(div().flex_1())
                     .children(tile.max_leverage.map(|l| {
                         div()
@@ -1188,6 +1302,26 @@ impl Markets {
                             .child(format!("up to {l}x"))
                     })),
             )
+            .children(self.about.get(market).and_then(|a| {
+                let line = [a.name.clone(), a.category.clone()]
+                    .into_iter()
+                    .flatten()
+                    .collect::<Vec<_>>()
+                    .join(" \u{b7} ");
+                (!line.is_empty()).then(|| {
+                    div()
+                        .id("market-about-line")
+                        .flex_shrink_0()
+                        .text_size(px(12.))
+                        .text_color(Palette::muted())
+                        .overflow_hidden()
+                        .whitespace_nowrap()
+                        .text_ellipsis()
+                        .aria_label(line.clone())
+                        .child(line)
+                        .test_support()
+                })
+            }))
             .child(
                 h_flex()
                     .gap_3()
@@ -1460,6 +1594,7 @@ fn remove_button(ix: usize, market: &MarketId, cx: &mut Context<Markets>) -> But
 
 impl Render for Markets {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        self.want_about(cx);
         // A screenshot run's order ticket opens once the selected market has
         // a price.
         #[cfg(feature = "shot")]

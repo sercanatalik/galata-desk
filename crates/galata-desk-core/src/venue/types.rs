@@ -653,3 +653,74 @@ impl ActiveAsset {
         self.available_to_trade[if buy { 0 } else { 1 }]
     }
 }
+
+/// What the venue says about a market beyond its figures. Builder-dex markets
+/// carry one; the main dex's do not. Every field may be missing.
+#[derive(Debug, Clone, PartialEq, Default, Deserialize)]
+#[serde(rename_all = "camelCase", default)]
+pub struct PerpAnnotation {
+    /// `stocks`, `preipo`, `commodities`, `indices`, `crypto`, and others.
+    pub category: Option<String>,
+    /// A sentence or few on what the market references.
+    pub description: Option<String>,
+    /// The name the venue's own app shows, which may differ from the ticker:
+    /// `xyz:CL` shows as `WTIOIL`.
+    pub display_name: Option<String>,
+    pub keywords: Vec<String>,
+}
+
+/// One perpetuals dex as the venue describes it: who deployed it, who sets
+/// its oracle prices, and its per-market parameters. The main dex is `None`
+/// in the venue's list and so has none of this.
+#[derive(Debug, Clone, PartialEq, Default, Deserialize)]
+#[serde(rename_all = "camelCase", default)]
+pub struct DexInfo {
+    /// The short name in coin names: `xyz`.
+    pub name: String,
+    /// What the deployer calls it: `XYZ`, `Felix Exchange`.
+    pub full_name: String,
+    pub deployer: Option<String>,
+    /// The address that pushes oracle prices, when the deployer names one.
+    pub oracle_updater: Option<String>,
+    /// Addresses the deployer lets act for it, by action: `setOracle`,
+    /// `registerAsset`, and others.
+    pub sub_deployers: Vec<(String, Vec<String>)>,
+    /// Each market's cap on open interest in USD.
+    #[serde(rename = "assetToStreamingOiCap")]
+    pub oi_caps: Vec<(String, Decimal)>,
+    /// Each market's multiplier on the funding rate.
+    #[serde(rename = "assetToFundingMultiplier")]
+    pub funding_multipliers: Vec<(String, Decimal)>,
+}
+
+impl DexInfo {
+    /// Who may set the oracle price: the named updater, then any address
+    /// allowed to `setOracle`, each once.
+    pub fn oracle_setters(&self) -> Vec<String> {
+        let mut out: Vec<String> = self.oracle_updater.iter().cloned().collect();
+        for (action, addresses) in &self.sub_deployers {
+            if action == "setOracle" {
+                for a in addresses {
+                    if !out.iter().any(|o| o.eq_ignore_ascii_case(a)) {
+                        out.push(a.clone());
+                    }
+                }
+            }
+        }
+        out
+    }
+
+    pub fn oi_cap(&self, coin: &str) -> Option<Decimal> {
+        self.oi_caps
+            .iter()
+            .find(|(c, _)| c == coin)
+            .map(|(_, v)| *v)
+    }
+
+    pub fn funding_multiplier(&self, coin: &str) -> Option<Decimal> {
+        self.funding_multipliers
+            .iter()
+            .find(|(c, _)| c == coin)
+            .map(|(_, v)| *v)
+    }
+}
