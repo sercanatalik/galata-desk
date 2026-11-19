@@ -1203,7 +1203,17 @@ impl Markets {
                             .text_color(Palette::amber_text())
                             .child("Your position"),
                     )
-                    .child(div().font_family(MONO).child(signed_size(p)))
+                    .child(
+                        h_flex()
+                            .gap(px(6.))
+                            .font_family(MONO)
+                            .child(
+                                div()
+                                    .text_color(gpui_kit::rgb(SOFT))
+                                    .child(signed_size(p)),
+                            )
+                            .child(f::pnl_rounded(signed_value(p))),
+                    )
             }))
             .into_any_element()
     }
