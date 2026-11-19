@@ -1299,6 +1299,84 @@ fn the_chart_area_shows_loading_then_failed_then_the_chart(cx: &mut TestAppConte
 }
 
 #[gpui_kit::test]
+fn the_accounts_open_orders_are_levels_on_the_selected_markets_chart(cx: &mut TestAppContext) {
+    let (window, desk, _dir) = open_with(cx, Some(&["BTC", "ETH"]));
+    let markets = go_to_markets(window, &desk, cx);
+    cx.update_window(window.into(), |_, window, cx| {
+        // The candles run from 99 to 141.
+        markets.update(cx, |view, cx| {
+            view.set_snapshot(charted("BTC", &["BTC", "ETH"], 40), cx)
+        });
+        window.render_frame(cx);
+        assert!(window.try_find(("order-level", 0usize)).is_none());
+
+        let take_profit = OrderRow {
+            kind: "Take Profit Market".into(),
+            remaining: Decimal::ZERO,
+            trigger_px: Some(160.into()),
+            tpsl: Some(galata_desk_core::trade::sign::Tpsl::Tp),
+            ..a_limit(2, "BTC", Side::Sell, "0", "0")
+        };
+        let portfolio = desk.read(cx).portfolio_view().unwrap();
+        portfolio.update(cx, |view, cx| {
+            view.set_orders(
+                vec![
+                    a_limit(1, "BTC", Side::Buy, "0.5", "110"),
+                    take_profit,
+                    // Another market's order is not this chart's.
+                    a_limit(3, "ETH", Side::Buy, "2", "120"),
+                ],
+                cx,
+            )
+        });
+        markets.update(cx, |_, cx| cx.notify());
+        window.render_frame(cx);
+
+        // Inside the range: a line and a tag at its price, which says what
+        // the order is.
+        assert!(window.try_find(("order-line", 0usize)).is_some());
+        assert_eq!(
+            text_at(window, ("order-level", 0usize)).as_deref(),
+            Some("Limit \u{b7} Buy 0.5 BTC at 110")
+        );
+        // Above it, the take-profit's trigger: a tag at the top edge, and
+        // no line.
+        assert!(window.try_find(("order-line", 1usize)).is_none());
+        assert!(window.try_find(("order-level", 1usize)).is_none());
+        assert_eq!(
+            text_at(window, "order-above").as_deref(),
+            Some("Take Profit Market \u{b7} Sell the position at 160, above the chart")
+        );
+        assert!(window.try_find(("order-level", 2usize)).is_none());
+        assert!(window.try_find("order-below").is_none());
+
+        // Several beyond an edge share one tag, which counts them and names
+        // the nearest.
+        portfolio.update(cx, |view, cx| {
+            view.set_orders(
+                vec![
+                    a_limit(1, "BTC", Side::Sell, "0.5", "170"),
+                    a_limit(2, "BTC", Side::Sell, "0.5", "150"),
+                    a_limit(3, "BTC", Side::Buy, "0.5", "90"),
+                ],
+                cx,
+            )
+        });
+        markets.update(cx, |_, cx| cx.notify());
+        window.render_frame(cx);
+        assert_eq!(
+            text_at(window, "order-above").as_deref(),
+            Some("2 orders above the chart. The nearest: Limit \u{b7} Sell 0.5 BTC at 150")
+        );
+        assert_eq!(
+            text_at(window, "order-below").as_deref(),
+            Some("Limit \u{b7} Buy 0.5 BTC at 90, below the chart")
+        );
+    })
+    .unwrap();
+}
+
+#[gpui_kit::test]
 fn the_accounts_fills_are_marked_on_the_selected_markets_chart(cx: &mut TestAppContext) {
     let (window, desk, _dir) = open_with(cx, Some(&["BTC", "ETH"]));
     let markets = go_to_markets(window, &desk, cx);

@@ -548,6 +548,12 @@ impl Portfolio {
         self.holdings().map(|h| h.positions.as_slice())
     }
 
+    /// The account's open orders, once they have loaded. The Markets chart
+    /// draws their levels.
+    pub fn orders(&self) -> Option<&[OrderRow]> {
+        self.snapshot.orders.data.as_deref()
+    }
+
     /// The current funding rates, as last refreshed. The Funding section
     /// draws from them.
     pub fn rates(

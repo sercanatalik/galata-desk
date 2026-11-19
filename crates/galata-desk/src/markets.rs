@@ -16,10 +16,12 @@ use galata_desk_core::market::pnl::{self, MarketPnl, WindowPnl};
 use galata_desk_core::market::sort::{self, SortBy};
 use galata_desk_core::market::watchlist::{AddError, LIMIT, Watchlist};
 use galata_desk_core::market::{Interval, MarketId, MarketPeriod};
-use galata_desk_core::model::PositionRow;
+use galata_desk_core::model::{OrderRow, PositionRow};
 use galata_desk_core::rust_decimal::Decimal;
 use galata_desk_core::rust_decimal::prelude::ToPrimitive;
+use galata_desk_core::trade::sign::Tpsl;
 use galata_desk_core::venue::Http;
+use galata_desk_core::venue::Side;
 use gpui_kit::component::button::{Button, ButtonVariants};
 use gpui_kit::component::chart::CandlestickChart;
 use gpui_kit::component::input::{Input, InputEvent, InputState};
@@ -27,6 +29,7 @@ use gpui_kit::component::menu::{DropdownMenu, PopupMenuItem};
 use gpui_kit::component::plot::scale::{Scale, ScaleBand};
 use gpui_kit::component::skeleton::Skeleton;
 use gpui_kit::component::tab::TabBar;
+use gpui_kit::component::tooltip::Tooltip;
 use gpui_kit::component::{Sizable, h_flex, v_flex};
 use gpui_kit::prelude::*;
 use gpui_kit::{
@@ -1038,10 +1041,17 @@ impl Markets {
                 ),
                 _ => (Vec::new(), None),
             };
+            // The account's open orders in this market, as levels.
+            let levels = self
+                .portfolio
+                .read(cx)
+                .orders()
+                .map(|all| order_levels(all, &market))
+                .unwrap_or_default();
             h_flex()
                 .size_full()
                 .child(self.detail(tile, position.as_ref()))
-                .child(self.chart(tile, candles, &grouped, since, cx.reduce_motion()))
+                .child(self.chart(tile, candles, &grouped, &levels, since, cx.reduce_motion()))
                 .into_any_element()
         };
 
@@ -1209,6 +1219,7 @@ impl Markets {
         tile: &Tile,
         candles: Option<&[Candle]>,
         grouped: &[CandleFills],
+        levels: &[OrderLevel],
         since: Option<u64>,
         // The system asks for reduced motion: placeholders hold still.
         still: bool,
@@ -1306,7 +1317,7 @@ impl Markets {
             }
             Some(candles) => (
                 "chart",
-                candle_chart(candles, tile.live.as_ref().map(|l| l.last), grouped),
+                candle_chart(candles, tile.live.as_ref().map(|l| l.last), grouped, levels),
             ),
         };
         let drawn = state == "chart";
@@ -1589,6 +1600,95 @@ fn clock(at: SystemTime) -> String {
     DateTime::<Local>::from(at).format("%H:%M:%S").to_string()
 }
 
+/// How strong an order's line is where it meets the price axis.
+const ORDER_LINE_STRENGTH: f32 = 0.4;
+/// An order's price tag on the axis, in pixels.
+const ORDER_TAG_HEIGHT: f32 = 18.;
+
+/// An open order's price on the chart.
+#[derive(Clone, Debug, PartialEq)]
+struct OrderLevel {
+    price: Decimal,
+    buy: bool,
+    /// Named on its line: a take-profit or stop-loss.
+    mark: Option<&'static str>,
+    /// Its tag's tooltip: the order in full.
+    detail: String,
+}
+
+impl OrderLevel {
+    fn colour(&self) -> gpui_kit::Hsla {
+        if self.buy {
+            Palette::gain()
+        } else {
+            Palette::loss()
+        }
+    }
+}
+
+/// An order's tag on the price axis, or the tag for those beyond an edge.
+struct OrderTag {
+    id: gpui_kit::ElementId,
+    text: String,
+    /// What a screen reader says for it.
+    spoken: String,
+    /// Its tooltip.
+    detail: String,
+    colour: gpui_kit::Hsla,
+    /// Where it belongs: its price's height on the plot.
+    centre: f32,
+}
+
+/// Move tags, given by their tops in order down the plot, apart so none
+/// overlaps the next, keeping them within `0..=max`.
+fn spread(tops: &mut [f32], pitch: f32, max: f32) {
+    for t in tops.iter_mut() {
+        *t = t.clamp(0., max);
+    }
+    for i in 1..tops.len() {
+        tops[i] = tops[i].max(tops[i - 1] + pitch);
+    }
+    if let Some(last) = tops.last_mut() {
+        *last = last.min(max);
+    }
+    for i in (0..tops.len().saturating_sub(1)).rev() {
+        tops[i] = tops[i].min(tops[i + 1] - pitch);
+    }
+    for t in tops.iter_mut() {
+        *t = t.max(0.);
+    }
+}
+
+/// The account's open orders in `market`, as levels on its chart. A trigger
+/// order sits at its trigger price.
+fn order_levels(orders: &[OrderRow], market: &MarketId) -> Vec<OrderLevel> {
+    orders
+        .iter()
+        .filter(|o| o.market == market.ticker() && o.dex == market.dex())
+        .map(|o| {
+            let buy = matches!(o.side, Side::Buy);
+            let side = if buy { "Buy" } else { "Sell" };
+            let price = o.trigger_px.unwrap_or(o.price);
+            let sized = !o.remaining.is_zero();
+            let mark = o.tpsl.map(|t| match t {
+                Tpsl::Tp => "TP",
+                Tpsl::Sl => "SL",
+            });
+            let size = if sized {
+                f::size(o.remaining, &o.market)
+            } else {
+                "the position".to_string()
+            };
+            OrderLevel {
+                price,
+                buy,
+                mark,
+                detail: format!("{} \u{b7} {side} {size} at {}", o.kind, f::price(price)),
+            }
+        })
+        .collect()
+}
+
 /// One candle as the chart draws and reads it.
 #[derive(Clone)]
 struct Bar {
@@ -1773,7 +1873,12 @@ fn plot_y(value: f64, low: f64, high: f64) -> f32 {
 
 /// The candlestick chart with what the kit does not draw: a price axis, a
 /// time axis, and a line at the last price.
-fn candle_chart(candles: &[Candle], last: Option<Decimal>, grouped: &[CandleFills]) -> AnyElement {
+fn candle_chart(
+    candles: &[Candle],
+    last: Option<Decimal>,
+    grouped: &[CandleFills],
+    levels: &[OrderLevel],
+) -> AnyElement {
     let span_ms = match (candles.first(), candles.last()) {
         (Some(first), Some(last)) => last.open_ms.saturating_sub(first.open_ms),
         _ => 0,
@@ -1874,18 +1979,173 @@ fn candle_chart(candles: &[Candle], last: Option<Decimal>, grouped: &[CandleFill
         })
         .collect();
 
-    // Five price labels, evenly spaced from the high down to the low.
-    let labels = (0..5).map(|i| {
+    // The open orders, by where each sits against the candles' range. One
+    // outside it has no line; those above, and those below, share a tag at
+    // that edge.
+    let mut inside: Vec<(usize, &OrderLevel, f32)> = Vec::new();
+    let (mut above, mut below): (Vec<&OrderLevel>, Vec<&OrderLevel>) = (Vec::new(), Vec::new());
+    for (i, level) in levels.iter().enumerate() {
+        let value = f64_of(level.price);
+        if value > high_f {
+            above.push(level);
+        } else if value < low_f {
+            below.push(level);
+        } else {
+            inside.push((i, level, plot_y(value, low_f, high_f)));
+        }
+    }
+    // A line fades in from the left and is strongest at the axis, so the
+    // candles stay clear and the level reads where its price is. Only a
+    // take-profit or stop-loss is named on it: the colour says buy or sell.
+    let order_lines: Vec<AnyElement> = inside
+        .iter()
+        .map(|(i, level, y)| {
+            let colour = level.colour();
+            div()
+                .id(("order-line", *i))
+                .absolute()
+                .left_0()
+                .right_0()
+                .top(px(*y))
+                .h(px(1.))
+                .bg(gpui_kit::linear_gradient(
+                    90.,
+                    gpui_kit::linear_color_stop(colour.opacity(0.), 0.),
+                    gpui_kit::linear_color_stop(colour.opacity(ORDER_LINE_STRENGTH), 1.),
+                ))
+                .children(level.mark.map(|mark| {
+                    div()
+                        .absolute()
+                        .right(px(6.))
+                        .bottom(px(2.))
+                        .text_size(px(10.5))
+                        .font_weight(gpui_kit::FontWeight::SEMIBOLD)
+                        .text_color(colour.opacity(0.8))
+                        .child(mark)
+                }))
+                .test_support()
+                .into_any_element()
+        })
+        .collect();
+
+    // Each order's price on the axis, in its side's colour; pointing at it
+    // says what the order is. Tags that would overlap are moved apart.
+    let edge = |levels: &[&OrderLevel], up: bool| -> Option<OrderTag> {
+        let nearest = if up {
+            levels.iter().min_by_key(|l| l.price)
+        } else {
+            levels.iter().max_by_key(|l| l.price)
+        }?;
+        let (arrow, side) = if up {
+            ("\u{25b2}", "above")
+        } else {
+            ("\u{25bc}", "below")
+        };
+        let one = levels.len() == 1;
+        let colour = if levels.iter().all(|l| l.buy == nearest.buy) {
+            nearest.colour()
+        } else {
+            Palette::muted()
+        };
+        let detail = if one {
+            nearest.detail.clone()
+        } else {
+            format!(
+                "{} orders {side} the chart. The nearest: {}",
+                levels.len(),
+                nearest.detail
+            )
+        };
+        Some(OrderTag {
+            id: if up { "order-above" } else { "order-below" }.into(),
+            text: if one {
+                format!("{arrow} {}", f::price_like(nearest.price, like))
+            } else {
+                format!("{arrow} {}", levels.len())
+            },
+            spoken: if one {
+                format!("{detail}, {side} the chart")
+            } else {
+                detail.clone()
+            },
+            detail,
+            colour,
+            centre: if up { 0. } else { PLOT_HEIGHT },
+        })
+    };
+    let mut tags: Vec<OrderTag> = inside
+        .iter()
+        .map(|(i, level, y)| OrderTag {
+            id: ("order-level", *i).into(),
+            text: f::price_like(level.price, like),
+            spoken: level.detail.clone(),
+            detail: level.detail.clone(),
+            colour: level.colour(),
+            centre: *y,
+        })
+        .chain(edge(&above, true))
+        .chain(edge(&below, false))
+        .collect();
+    tags.sort_by(|a, b| a.centre.total_cmp(&b.centre));
+    let mut tops: Vec<f32> = tags
+        .iter()
+        .map(|t| t.centre - ORDER_TAG_HEIGHT / 2.)
+        .collect();
+    spread(
+        &mut tops,
+        ORDER_TAG_HEIGHT + 1.,
+        PLOT_HEIGHT - ORDER_TAG_HEIGHT,
+    );
+    let tag_ys: Vec<f32> = tops.iter().map(|t| t + ORDER_TAG_HEIGHT / 2.).collect();
+    let order_tags: Vec<AnyElement> = tags
+        .into_iter()
+        .zip(tops)
+        .map(|(tag, top)| {
+            let detail = tag.detail;
+            div()
+                .id(tag.id)
+                .absolute()
+                .left(px(4.))
+                .top(px(top))
+                .h(px(ORDER_TAG_HEIGHT))
+                .px(px(5.))
+                .flex()
+                .items_center()
+                .rounded(px(4.))
+                .border_1()
+                .border_color(tag.colour.opacity(0.3))
+                .bg(tag.colour.opacity(0.14))
+                .font_family(MONO)
+                .text_size(px(11.))
+                .text_color(tag.colour)
+                .whitespace_nowrap()
+                .child(tag.text)
+                .tooltip(move |window, cx| Tooltip::new(detail.clone()).build(window, cx))
+                .aria_label(tag.spoken)
+                .test_support()
+                .into_any_element()
+        })
+        .collect();
+
+    // Five price labels, evenly spaced from the high down to the low, less
+    // any an order's tag would cover.
+    let labels = (0..5).filter_map(|i| {
         let value = high_f - (high_f - low_f) * i as f64 / 4.;
+        let y = plot_y(value, low_f, high_f);
+        if tag_ys.iter().any(|t| (t - y).abs() < ORDER_TAG_HEIGHT - 3.) {
+            return None;
+        }
         let text = f::price_like(Decimal::try_from(value).unwrap_or_default(), like);
-        div()
-            .absolute()
-            .right_0()
-            .top(px(plot_y(value, low_f, high_f) - 7.))
-            .font_family(MONO)
-            .text_size(px(11.))
-            .text_color(Palette::muted())
-            .child(text)
+        Some(
+            div()
+                .absolute()
+                .right_0()
+                .top(px(y - 7.))
+                .font_family(MONO)
+                .text_size(px(11.))
+                .text_color(Palette::muted())
+                .child(text),
+        )
     });
 
     // Five times along the bottom, from the oldest candle to the newest.
@@ -1912,6 +2172,9 @@ fn candle_chart(candles: &[Candle], last: Option<Decimal>, grouped: &[CandleFill
                         .min_w_0()
                         .h(px(PLOT_HEIGHT))
                         .child(chart)
+                        // The account's open orders, beneath the fills and
+                        // the last price.
+                        .children(order_lines)
                         // The account's fills: a B under the candle where
                         // it bought, an S above the candle where it sold.
                         .children(marks)
@@ -1932,7 +2195,8 @@ fn candle_chart(candles: &[Candle], last: Option<Decimal>, grouped: &[CandleFill
                         .w(px(PRICE_AXIS_WIDTH))
                         .h(px(PLOT_HEIGHT))
                         .flex_shrink_0()
-                        .children(labels),
+                        .children(labels)
+                        .children(order_tags),
                 ),
         )
         .child(
