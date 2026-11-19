@@ -45,6 +45,16 @@ impl PositionRow {
     pub fn is_long(&self) -> bool {
         self.size >= Decimal::ZERO
     }
+
+    /// The position's value with the side as its sign: negative for a short.
+    /// The venue reports `value` unsigned.
+    pub fn signed_value(&self) -> Decimal {
+        if self.is_long() {
+            self.value.abs()
+        } else {
+            -self.value.abs()
+        }
+    }
 }
 
 /// Which account a balance sits in.

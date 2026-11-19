@@ -32,7 +32,14 @@ fn open(
     cx: &mut TestAppContext,
     remembered: bool,
 ) -> (WindowHandle<Root>, Entity<Desk>, tempfile::TempDir) {
-    open_sized(cx, remembered, size(px(1320.), px(860.)))
+    open_sized(
+        cx,
+        remembered,
+        size(
+            px(crate::DEFAULT_WINDOW_WIDTH),
+            px(crate::DEFAULT_WINDOW_HEIGHT),
+        ),
+    )
 }
 
 fn open_sized(
@@ -1649,7 +1656,7 @@ fn position_and_pnl_wait_for_the_account_and_never_show_zeros(cx: &mut TestAppCo
 }
 
 #[gpui_kit::test]
-fn the_legend_explains_the_bar_and_says_when_pnl_is_partial(cx: &mut TestAppContext) {
+fn the_legend_says_when_pnl_is_partial(cx: &mut TestAppContext) {
     let (window, desk, _dir) = open_with(cx, Some(&["BTC"]));
     let markets = go_to_markets(window, &desk, cx);
     cx.update_window(window.into(), |_, window, cx| {
@@ -1664,16 +1671,9 @@ fn the_legend_explains_the_bar_and_says_when_pnl_is_partial(cx: &mut TestAppCont
         );
         markets.update(cx, |_, cx| cx.notify());
         window.render_frame(cx);
-        assert!(
-            text_at(window, "legend-bar")
-                .unwrap()
-                .starts_with("Bar: period low to high")
-        );
-        assert!(
-            text_at(window, "legend-strip")
-                .unwrap()
-                .starts_with("Position and PNL: yours")
-        );
+        // The legend keeps to the colour scale and the held-position dot.
+        assert!(window.try_find("legend-bar").is_none());
+        assert!(window.try_find("legend-strip").is_none());
         assert!(window.try_find("pnl-since").is_none());
         assert_eq!(
             text_at(window, ("tile-all", 0usize)).as_deref(),

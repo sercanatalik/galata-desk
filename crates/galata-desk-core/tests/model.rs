@@ -85,6 +85,19 @@ fn positions_span_dexes_largest_first() {
 }
 
 #[test]
+fn a_short_positions_value_is_negative() {
+    let h = world().holdings();
+    let btc = h.positions.iter().find(|p| p.market == "BTC").unwrap();
+    assert!(
+        btc.value > Decimal::ZERO,
+        "the venue reports value unsigned"
+    );
+    assert_eq!(btc.signed_value(), -btc.value);
+    let nvda = h.positions.iter().find(|p| p.market == "NVDA").unwrap();
+    assert_eq!(nvda.signed_value(), nvda.value);
+}
+
+#[test]
 fn a_position_is_numbered_for_actions_once_its_dexs_markets_are_known() {
     let w = world();
     let h = w.holdings();

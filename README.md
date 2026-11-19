@@ -38,7 +38,7 @@ The account shown is one of Hyperliquid's own public vaults.
 | | |
 |---|---|
 | ![Portfolio: account value, breakdown, PNL chart and positions](assets/screenshots/portfolio.png) | ![Markets: the selected market's detail and candlestick chart above heatmap tiles](assets/screenshots/markets.png) |
-| **Portfolio.** Summary, breakdown, PNL chart, and the positions table with its Close and TP/SL controls. The footer is beneath. | **Markets.** The panel on a 1-hour chart with the account's fills marked B and S, above tiles coloured by change. |
+| **Portfolio.** Summary, breakdown, PNL chart, and the positions table with its Close and TP/SL controls. The footer is beneath. | **Markets.** The panel, with Buy and Sell, on a 1-hour chart with the account's fills marked B and S, above tiles coloured by change. |
 
 <img src="assets/screenshots/connect.png" alt="The connect page in a browser" width="420">
 

@@ -1046,7 +1046,7 @@ fn position_row(p: &PositionRow, buttons: Cell, tpsl: Cell) -> Vec<Cell> {
     vec![
         market,
         Cell::new(f::size(p.size, &p.market), side),
-        Cell::text(f::usd(p.value)),
+        Cell::new(f::usd(p.signed_value()), side),
         Cell::text(f::price(p.entry)),
         Cell::text(
             p.mark

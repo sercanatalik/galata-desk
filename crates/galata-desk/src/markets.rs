@@ -41,9 +41,9 @@ use crate::theme::{MONO, Palette};
 use crate::ui;
 
 /// A tile is at least this wide; the grid fits as many columns as that allows.
-const TILE_MIN: f32 = 196.;
+const TILE_MIN: f32 = 230.;
 /// Tall enough for the price, the range bar and the account's strip.
-const TILE_HEIGHT: f32 = 136.;
+const TILE_HEIGHT: f32 = 156.;
 /// The lighter grey of a tile's secondary figures. Readable on the strongest
 /// tile colour (see `market_tile`'s contrast test).
 const SOFT: u32 = 0xd8d3c8;
@@ -574,17 +574,6 @@ impl Markets {
                     .child(div().size(px(7.)).rounded_full().bg(Palette::amber()))
                     .child("You hold a position"),
             )
-            .child("Click a tile to chart it")
-            .child(legend_line(
-                "legend-bar",
-                "Bar: period low to high; band: average \u{b1}1\u{3c3}; tick: last price",
-                Palette::muted(),
-            ))
-            .child(legend_line(
-                "legend-strip",
-                "Position and PNL: yours in that market, in US dollars",
-                Palette::muted(),
-            ))
             .children(account.reaches_from.map(|from| {
                 legend_line(
                     "pnl-since",
@@ -805,7 +794,7 @@ impl Markets {
             let placement = stats.zip(last).map(|(s, last)| s.placement(last));
             let pnl = account.pnl(&market);
             let position_text = position.map(|p| match p {
-                Some(p) => f::usd_k_signed(signed_value(p)),
+                Some(p) => f::usd_k_signed(p.signed_value()),
                 None => DASH.to_string(),
             });
             let window_text = |w: fn(&MarketPnl) -> Option<WindowPnl>| {
@@ -1207,12 +1196,8 @@ impl Markets {
                         h_flex()
                             .gap(px(6.))
                             .font_family(MONO)
-                            .child(
-                                div()
-                                    .text_color(gpui_kit::rgb(SOFT))
-                                    .child(signed_size(p)),
-                            )
-                            .child(f::pnl_rounded(signed_value(p))),
+                            .child(div().text_color(gpui_kit::rgb(SOFT)).child(signed_size(p)))
+                            .child(f::pnl_rounded(p.signed_value())),
                     )
             }))
             .into_any_element()
@@ -1494,15 +1479,6 @@ impl Render for Markets {
 }
 
 const DASH: &str = "\u{2014}";
-
-/// A position's value, signed by its side: negative for a short.
-fn signed_value(position: &PositionRow) -> Decimal {
-    if position.size < Decimal::ZERO {
-        -position.value.abs()
-    } else {
-        position.value.abs()
-    }
-}
 
 /// The tile's range bar: the period's low to high, the usual band, a tick at
 /// the last price, and how far that is from the average.

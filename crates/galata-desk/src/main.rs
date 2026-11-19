@@ -28,6 +28,9 @@ use gpui_kit::{App, Bounds, Global, WindowBounds, WindowOptions, px, size};
 /// panel and one whole row of tiles both fit beneath the toolbar and legend.
 pub const MIN_WINDOW_WIDTH: f32 = 1080.;
 pub const MIN_WINDOW_HEIGHT: f32 = 704.;
+/// The window opens at this size unless `GALATA_DESK_SIZE` says otherwise.
+pub const DEFAULT_WINDOW_WIDTH: f32 = 1480.;
+pub const DEFAULT_WINDOW_HEIGHT: f32 = 960.;
 
 /// What every screen shares: the runtime that does the I/O, and the app's
 /// directory on disk.
@@ -167,7 +170,7 @@ fn main() {
                     let (w, h) = v.split_once('x')?;
                     Some((w.parse().ok()?, h.parse().ok()?))
                 })
-                .unwrap_or((1320., 860.));
+                .unwrap_or((DEFAULT_WINDOW_WIDTH, DEFAULT_WINDOW_HEIGHT));
             let bounds = Bounds::centered(None, size(px(width), px(height)), cx);
             // A screenshot run draws offscreen: its window stays hidden and
             // takes no focus, so it cannot get in the way of other work.
