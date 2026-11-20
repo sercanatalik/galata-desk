@@ -122,9 +122,8 @@ is connected in Settings. The watcher sends Telegram alerts for the account
 while the desk is closed. The desk only shows and edits what it alerts on.
 It never sends an alert itself.
 
-- **Health**: when the watcher last checked the account, its last error, and
-  which account and network it watches. A warning shows once it hasn't
-  checked for three minutes.
+From the top:
+
 - **Call levels**: add, edit, delete and re-arm. A new level points away from
   the last price ("above" or "below") unless you choose. A level fires once,
   then waits to be re-armed.
@@ -132,7 +131,12 @@ It never sends an alert itself.
   ticker. When on, each TP or SL order that fills sends an alert.
 - **Near liquidation**: the distance, from 2% to 50%. Liquidation alerts
   can't be switched off.
-- **Alert history**: what the watcher sent, newest first, marked late or not
+- **Health**: one line at the bottom: when the watcher last checked the
+  account, which account and network it watches, the configuration version
+  and its last error. It turns amber once the watcher hasn't checked for three
+  minutes.
+- **Alert history**: hidden until you press "Alert history (N)" on the health
+  line. It lists what the watcher sent, newest first, marked late or not
   delivered where that applies.
 
 Each change is saved with the configuration version it was based on. If the

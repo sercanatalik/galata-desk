@@ -45,6 +45,8 @@ pub struct WatcherSection {
     near_liq: Entity<InputState>,
     /// The outcome of the last edit, and whether it is a problem.
     message: Option<(SharedString, bool)>,
+    /// The alert history is listed only when asked for.
+    show_history: bool,
     _changes: [Subscription; 2],
 }
 
@@ -68,6 +70,7 @@ impl WatcherSection {
             editing: None,
             near_liq,
             message: None,
+            show_history: false,
             _changes: [on_add, link_changes],
         };
         this.on_snapshot(&link, window, cx);
@@ -287,66 +290,91 @@ impl WatcherSection {
         })
     }
 
-    fn health_panel(&self, now: u64, cx: &mut Context<Self>) -> AnyElement {
+    /// The watcher's health on one line, with the button that shows the
+    /// alert history.
+    fn health_line(&self, now: u64, cx: &mut Context<Self>) -> AnyElement {
         let s = self.snapshot(cx);
         let (state, attention) = self.health_state(now, cx);
-        let config = s.config.config();
-        let other = self.other_account(cx);
-        let kv = |name: &str, value: String| {
-            v_flex()
-                .gap(px(2.))
-                .child(ui::label(name.to_uppercase()))
-                .child(div().font_family(MONO).text_size(px(12.5)).child(value))
+        let colour = if attention {
+            Palette::amber()
+        } else {
+            Palette::gain()
         };
+        let config = s.config.config();
         let health = s.health.clone();
+        let sent = s.alerts.len();
+        let other = self.other_account(cx);
+        let part = |text: String| div().text_color(Palette::muted()).child(text);
+        let dot = || div().text_color(Palette::line()).child("\u{b7}");
+        let last_check = health
+            .as_ref()
+            .and_then(|h| h.last_ok_ms)
+            .map(|t| format!("last check {}", ago(now, t)))
+            .unwrap_or_else(|| "never checked".into());
+        let watching = config
+            .map(|c| {
+                format!(
+                    "{} \u{b7} {}",
+                    short_address(&c.address),
+                    c.network.label().to_lowercase()
+                )
+            })
+            .unwrap_or_else(|| "not configured".into());
+        let error = match health.as_ref().and_then(|h| h.last_error.clone()) {
+            Some(e) => match health.as_ref().and_then(|h| h.last_error_ms) {
+                Some(t) => format!("last error {e} ({})", ago(now, t)),
+                None => format!("last error {e}"),
+            },
+            None => "no errors".into(),
+        };
+        let label = if self.show_history {
+            "Hide alert history".to_string()
+        } else {
+            format!("Alert history ({sent})")
+        };
         ui::panel()
-            .px_5()
-            .py_4()
-            .gap_3()
+            .id("watcher-health-line")
+            .border_color(if attention || s.problem.is_some() {
+                Palette::amber().opacity(0.5)
+            } else {
+                Palette::line()
+            })
+            .px_4()
+            .py_2()
+            .gap_2()
             .child(
                 h_flex()
-                    .gap_6()
+                    .gap_2()
                     .flex_wrap()
+                    .items_center()
+                    .text_size(px(12.5))
                     .child(
                         div()
                             .id("watcher-health")
-                            .px_2()
-                            .rounded(px(999.))
-                            .text_size(px(12.5))
                             .font_weight(gpui_kit::FontWeight::SEMIBOLD)
-                            .text_color(if attention { Palette::amber() } else { Palette::gain() })
-                            .bg(if attention { Palette::amber() } else { Palette::gain() }.opacity(0.12))
+                            .text_color(colour)
                             .child(state)
                             .test_support(),
                     )
-                    .child(kv(
-                        "Last check",
-                        health
-                            .as_ref()
-                            .and_then(|h| h.last_ok_ms)
-                            .map(|t| ago(now, t))
-                            .unwrap_or_else(|| "never".into()),
-                    ))
-                    .child(kv(
-                        "Watching",
-                        config
-                            .map(|c| format!("{} \u{b7} {}", short_address(&c.address), c.network.label().to_lowercase()))
-                            .unwrap_or_else(|| "not configured".into()),
-                    ))
-                    .child(kv(
-                        "Config",
-                        config.map(|c| format!("version {}", c.version)).unwrap_or_else(|| "\u{2014}".into()),
-                    ))
-                    .child(kv(
-                        "Last error",
-                        match health.as_ref().and_then(|h| h.last_error.clone()) {
-                            Some(e) => match health.as_ref().and_then(|h| h.last_error_ms) {
-                                Some(t) => format!("{e} ({})", ago(now, t)),
-                                None => e,
-                            },
-                            None => "none".into(),
-                        },
-                    )),
+                    .child(dot())
+                    .child(part(last_check))
+                    .child(dot())
+                    .child(div().font_family(MONO).child(watching))
+                    .when_some(config, |d, c| {
+                        d.child(dot()).child(part(format!("config v{}", c.version)))
+                    })
+                    .child(dot())
+                    .child(part(error))
+                    .child(div().flex_1())
+                    .child(
+                        Button::new("alert-history")
+                            .small()
+                            .label(label)
+                            .on_click(cx.listener(|this, _, _, cx| {
+                                this.show_history = !this.show_history;
+                                cx.notify();
+                            })),
+                    ),
             )
             .when_some(other, |d, address| {
                 d.child(ui::notice(format!(
@@ -483,8 +511,8 @@ impl WatcherSection {
             .child(ui::label(
                 "Each fires once when the price crosses it, judged on the minute's high and low, then waits to be re-armed. Armed levels are drawn on the Markets chart.",
             ))
+            .child(div().pb_2().child(self.add.clone()))
             .children(rows)
-            .child(div().pt_2().child(self.add.clone()))
             .into_any_element()
     }
 
@@ -563,12 +591,13 @@ impl WatcherSection {
             .enumerate()
             .map(|(ix, a)| alert_row(ix, &a, now));
         ui::panel()
+            .id("alert-history-list")
             .px_5()
-            .py_4()
+            .py_3()
             .gap_1()
-            .child(heading("ALERT HISTORY"))
             .when(empty, |d| d.child(ui::label("Nothing sent yet.")))
             .children(rows)
+            .test_support()
             .into_any_element()
     }
 }
@@ -684,7 +713,6 @@ impl gpui_kit::Render for WatcherSection {
                             })
                             .child(text)
                     }))
-                    .child(self.health_panel(now, cx))
                     .child(self.levels_panel(editable, cx))
                     .child(
                         h_flex()
@@ -703,7 +731,8 @@ impl gpui_kit::Render for WatcherSection {
                                     .child(self.liquidation_panel(editable, cx)),
                             ),
                     )
-                    .child(self.history_panel(now, cx)),
+                    .child(self.health_line(now, cx))
+                    .when(self.show_history, |d| d.child(self.history_panel(now, cx))),
             )
             .test_support()
     }
@@ -711,6 +740,10 @@ impl gpui_kit::Render for WatcherSection {
 
 #[cfg(test)]
 impl WatcherSection {
+    pub fn history_shown(&self) -> bool {
+        self.show_history
+    }
+
     pub fn add_form(&self) -> Entity<LevelForm> {
         self.add.clone()
     }

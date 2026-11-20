@@ -762,7 +762,9 @@ fn a_change_elsewhere_or_a_refusal_is_reported_and_nothing_overwritten(cx: &mut 
 }
 
 #[gpui_kit::test]
-fn the_alert_history_lists_late_and_undelivered_alerts(cx: &mut TestAppContext) {
+fn the_alert_history_is_hidden_until_asked_for_and_lists_late_and_undelivered_alerts(
+    cx: &mut TestAppContext,
+) {
     let mut snapshot = answered(ConfigState::Read(recorded_config()), now());
     let recorded: serde_json::Value = serde_json::from_str(include_str!(
         "../../../galata-desk-core/tests/fixtures/watcher/alerts.json"
@@ -771,16 +773,47 @@ fn the_alert_history_lists_late_and_undelivered_alerts(cx: &mut TestAppContext) 
     snapshot.alerts = serde_json::from_value(recorded["alerts"].clone()).unwrap();
     let (window, desk, _link, _dir) = open_with_watcher(cx, snapshot);
     let section = go_to_watcher(cx, window, &desk);
-    cx.update_window(window.into(), |_, window, cx| {
-        window.render_frame(cx);
-        let _ = section;
+    let shown = |cx: &mut TestAppContext| {
+        cx.update_window(window.into(), |_, window, cx| {
+            window.render_frame(cx);
+            window.try_find(("alert", 0usize)).is_some()
+        })
+        .unwrap()
+    };
+    assert!(!shown(cx), "hidden when the section opens");
+    assert!(cx.update(|cx| !section.read(cx).history_shown()));
+
+    click(cx, window, "alert-history");
+    assert!(shown(cx));
+    cx.update_window(window.into(), |_, window, _| {
         // Newest first: the late, undelivered stop-loss, then the level.
-        assert!(window.try_find(("alert", 0usize)).is_some());
         assert!(window.try_find(("alert", 1usize)).is_some());
         assert!(window.try_find(("alert-late", 0usize)).is_some());
         assert!(window.try_find(("alert-undelivered", 0usize)).is_some());
         assert!(window.try_find(("alert-late", 1usize)).is_none());
         assert!(window.try_find(("alert-delivered", 1usize)).is_some());
+        // Listed below the health line.
+        let line = window.find("watcher-health").bounds();
+        let list = window.find("alert-history-list").bounds();
+        assert!(list.origin.y > line.origin.y);
+    })
+    .unwrap();
+
+    click(cx, window, "alert-history");
+    assert!(!shown(cx), "a second press hides it");
+}
+
+#[gpui_kit::test]
+fn call_levels_come_first_and_the_health_line_last(cx: &mut TestAppContext) {
+    let (window, desk, _link, _dir) = configured(cx);
+    let _section = go_to_watcher(cx, window, &desk);
+    cx.update_window(window.into(), |_, window, cx| {
+        window.render_frame(cx);
+        let level = window.find(("level-delete", 0usize)).bounds();
+        let stops = window.find("stop-alerts").bounds();
+        let health = window.find("watcher-health").bounds();
+        assert!(level.origin.y < stops.origin.y, "levels above stop alerts");
+        assert!(stops.origin.y < health.origin.y, "health line last");
     })
     .unwrap();
 }
