@@ -26,9 +26,7 @@
   ],
   "near_liquidation_pct": "15",
   "network": "mainnet",
-  "stop_alerts": {
-    "SOL": false
-  },
+  "stop_alerts": false,
   "telegram_chat": "123456789",
   "version": 1
 }

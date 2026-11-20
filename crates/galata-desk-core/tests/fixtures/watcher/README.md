@@ -9,7 +9,7 @@ address is the example `0x…aa`.
 
 | File | Answer to |
 |---|---|
-| `config.json` | `GET /config`, 200, `ETag: "1"`: one fired and one armed level, a `stop_alerts` entry, a digest |
+| `config.json` | `GET /config`, 200, `ETag: "1"`: one fired and one armed level, stop alerts off, a digest |
 | `no_config.json` | `GET /config` before the first write, 404, `ETag: "0"` |
 | `health.json` | `GET /health`, with a last error |
 | `alerts.json` | `GET /alerts?since=0`: a late, undelivered stop-loss and a delivered level alert |

@@ -128,8 +128,8 @@ It never sends an alert itself.
 - **Call levels**: add, edit, delete and re-arm. A new level points away from
   the last price ("above" or "below") unless you choose. A level fires once,
   then waits to be re-armed.
-- **Stop alerts**: take-profit and stop-loss alerts, on or off per ticker. A
-  ticker with no setting is on.
+- **Stop alerts**: one switch for take-profit and stop-loss alerts on every
+  ticker. When on, each TP or SL order that fills sends an alert.
 - **Near liquidation**: the distance, from 2% to 50%. Liquidation alerts
   can't be switched off.
 - **Alert history**: what the watcher sent, newest first, marked late or not

@@ -130,7 +130,7 @@ async fn two_quick_saves_both_land_in_order() {
         ))
     });
     let second = f.save(|c| {
-        c.stop_alerts.insert("ETH".into(), false);
+        c.stop_alerts = true;
     });
     let (a, b) = tokio::join!(first, second);
     assert_eq!(a.unwrap().version, 2);
@@ -151,7 +151,7 @@ async fn two_quick_saves_both_land_in_order() {
         s.config.config().is_some_and(|c| c.version == 3)
     })
     .await;
-    assert!(!s.config.config().unwrap().stop_alerts_on("ETH"));
+    assert!(s.config.config().unwrap().stop_alerts);
 }
 
 #[tokio::test]

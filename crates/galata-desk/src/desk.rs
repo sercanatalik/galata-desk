@@ -131,12 +131,11 @@ impl Desk {
         let core = Core::get(cx);
         let token = core.secrets.get(WATCHER_TOKEN_NAME).ok().flatten();
         let (link, section) = match (&self.screen, core.watcher_url.clone(), token) {
-            (Screen::Connected { portfolio, .. }, Some(url), Some(token)) => {
+            (Screen::Connected { .. }, Some(url), Some(token)) => {
                 let link = WatcherLink::start(url, token, cx);
-                let portfolio = portfolio.clone();
                 let section = {
                     let link = link.clone();
-                    cx.new(|cx| WatcherSection::new(link, portfolio, window, cx))
+                    cx.new(|cx| WatcherSection::new(link, window, cx))
                 };
                 (Some(link), Some(section))
             }

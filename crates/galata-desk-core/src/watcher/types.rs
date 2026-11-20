@@ -28,9 +28,9 @@ pub struct WatcherConfig {
     pub network: Network,
     /// Percent, 2 to 50.
     pub near_liquidation_pct: Decimal,
-    /// Take-profit and stop-loss alerts by ticker. A ticker not listed is on.
-    #[serde(default)]
-    pub stop_alerts: BTreeMap<String, bool>,
+    /// Take-profit and stop-loss fill alerts, for every ticker at once.
+    #[serde(default = "on", deserialize_with = "switch")]
+    pub stop_alerts: bool,
     #[serde(default)]
     pub levels: Vec<Level>,
     /// Every other field, as read.
@@ -38,12 +38,26 @@ pub struct WatcherConfig {
     pub rest: Map<String, Value>,
 }
 
-impl WatcherConfig {
-    /// Whether take-profit and stop-loss alerts are on for `ticker`.
-    pub fn stop_alerts_on(&self, ticker: &str) -> bool {
-        self.stop_alerts.get(ticker).copied().unwrap_or(true)
-    }
+fn on() -> bool {
+    true
+}
 
+/// `true` or `false`; an earlier watcher's per-ticker map reads as on unless
+/// it switched some ticker off.
+fn switch<'de, D: serde::Deserializer<'de>>(d: D) -> Result<bool, D::Error> {
+    #[derive(Deserialize)]
+    #[serde(untagged)]
+    enum Either {
+        One(bool),
+        ByTicker(BTreeMap<String, bool>),
+    }
+    Ok(match Either::deserialize(d)? {
+        Either::One(on) => on,
+        Either::ByTicker(m) => m.values().all(|on| *on),
+    })
+}
+
+impl WatcherConfig {
     /// The levels still waiting to fire in `market` (`BTC`, `xyz:NVDA`).
     pub fn armed_in<'a>(&'a self, market: &'a str) -> impl Iterator<Item = &'a Level> + 'a {
         self.levels
@@ -205,7 +219,7 @@ mod tests {
         assert_eq!(config.version, 1);
         assert_eq!(config.levels[0].fired(), Some(1_795_127_520_000));
         assert!(config.levels[1].is_armed());
-        assert!(!config.stop_alerts_on("SOL") && config.stop_alerts_on("BTC"));
+        assert!(!config.stop_alerts);
 
         let mut expected = read;
         expected.as_object_mut().unwrap().remove("version");
@@ -251,6 +265,22 @@ mod tests {
         let written = serde_json::to_value(&config.levels[0]).unwrap();
         assert_eq!(written["state"], json!("armed"));
         assert!(written.get("fired_at").is_none());
+    }
+
+    #[test]
+    fn stop_alerts_are_one_switch_on_when_absent() {
+        let mut read: Value = serde_json::from_str(CONFIG).unwrap();
+        let on = |read: &Value| {
+            serde_json::from_value::<WatcherConfig>(read.clone())
+                .unwrap()
+                .stop_alerts
+        };
+        read.as_object_mut().unwrap().remove("stop_alerts");
+        assert!(on(&read));
+        read["stop_alerts"] = json!({});
+        assert!(on(&read), "an earlier watcher's empty map");
+        read["stop_alerts"] = json!({"SOL": false});
+        assert!(!on(&read));
     }
 
     #[test]

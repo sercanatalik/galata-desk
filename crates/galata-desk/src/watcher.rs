@@ -6,8 +6,6 @@
 //! sends one. While the watcher can't be reached, the section shows what it
 //! last read, marked stale, and offers no edits.
 
-use std::collections::BTreeSet;
-
 use galata_desk_core::format::{self as f, short_address};
 use galata_desk_core::rust_decimal::Decimal;
 use galata_desk_core::watcher::{
@@ -25,7 +23,6 @@ use gpui_kit::{
 
 use crate::Core;
 use crate::level_form::{LevelForm, LevelFormEvent};
-use crate::portfolio::Portfolio;
 use crate::theme::{MONO, Palette};
 use crate::ui;
 use crate::watcher_link::{STALLED_MS, WatcherLink, ago, now_ms};
@@ -43,22 +40,16 @@ struct Editing {
 
 pub struct WatcherSection {
     link: Entity<WatcherLink>,
-    portfolio: Entity<Portfolio>,
     add: Entity<LevelForm>,
     editing: Option<Editing>,
     near_liq: Entity<InputState>,
     /// The outcome of the last edit, and whether it is a problem.
     message: Option<(SharedString, bool)>,
-    _changes: [Subscription; 3],
+    _changes: [Subscription; 2],
 }
 
 impl WatcherSection {
-    pub fn new(
-        link: Entity<WatcherLink>,
-        portfolio: Entity<Portfolio>,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) -> Self {
+    pub fn new(link: Entity<WatcherLink>, window: &mut Window, cx: &mut Context<Self>) -> Self {
         let add = cx.new(|cx| LevelForm::open("add-level", link.clone(), window, cx));
         let near_liq = cx.new(|cx| InputState::new(window, cx).placeholder("15"));
         let on_add = cx.subscribe(&add, |this, _, event, cx| {
@@ -71,15 +62,13 @@ impl WatcherSection {
             this.on_snapshot(&link, window, cx);
             cx.notify();
         });
-        let portfolio_changes = cx.observe(&portfolio, |_, _, cx| cx.notify());
         let mut this = Self {
             link: link.clone(),
-            portfolio,
             add,
             editing: None,
             near_liq,
             message: None,
-            _changes: [on_add, link_changes, portfolio_changes],
+            _changes: [on_add, link_changes],
         };
         this.on_snapshot(&link, window, cx);
         this
@@ -227,19 +216,13 @@ impl WatcherSection {
         );
     }
 
-    fn set_stop_alerts(&mut self, ticker: String, on: bool, cx: &mut Context<Self>) {
+    fn set_stop_alerts(&mut self, on: bool, cx: &mut Context<Self>) {
         let done = if on {
             "Stop alerts on."
         } else {
             "Stop alerts off."
         };
-        self.save(
-            move |c| {
-                c.stop_alerts.insert(ticker, on);
-            },
-            done,
-            cx,
-        );
+        self.save(move |c| c.stop_alerts = on, done, cx);
     }
 
     fn save_near_liq(&mut self, cx: &mut Context<Self>) {
@@ -263,36 +246,6 @@ impl WatcherSection {
             return;
         };
         self.save(move |c| c.near_liquidation_pct = pct, "Distance saved.", cx);
-    }
-
-    /// Tickers with a position or a stop alert setting, by the watcher's
-    /// name for them (`BTC`, `xyz:NVDA`).
-    fn stop_tickers(&self, cx: &gpui_kit::App) -> Vec<(String, Option<bool>)> {
-        let config = self.snapshot(cx).config.config();
-        let mut tickers: BTreeSet<String> = self
-            .portfolio
-            .read(cx)
-            .positions()
-            .unwrap_or_default()
-            .iter()
-            .map(|p| {
-                if p.dex.is_empty() {
-                    p.market.clone()
-                } else {
-                    format!("{}:{}", p.dex, p.market)
-                }
-            })
-            .collect();
-        if let Some(c) = config {
-            tickers.extend(c.stop_alerts.keys().cloned());
-        }
-        tickers
-            .into_iter()
-            .map(|t| {
-                let setting = config.and_then(|c| c.stop_alerts.get(&t).copied());
-                (t, setting)
-            })
-            .collect()
     }
 
     /// The account the watcher watches, when it is not the connected one.
@@ -536,48 +489,45 @@ impl WatcherSection {
     }
 
     fn stops_panel(&self, editable: bool, cx: &mut Context<Self>) -> AnyElement {
-        let rows = self
-            .stop_tickers(cx)
-            .into_iter()
-            .enumerate()
-            .map(|(ix, (ticker, setting))| {
-                let on = setting.unwrap_or(true);
-                let words = match setting {
-                    None => "on (default)",
-                    Some(true) => "on",
-                    Some(false) => "off",
-                };
-                let t = ticker.clone();
-                h_flex()
-                    .gap_3()
-                    .py(px(4.))
-                    .child(div().flex_1().child(ticker.clone()))
-                    .child(
-                        div()
-                            .text_size(px(12.5))
-                            .text_color(Palette::muted())
-                            .child(words),
-                    )
-                    .child(
-                        Switch::new(("stop", ix))
-                            .checked(on)
-                            .disabled(!editable)
-                            .accessibility_label(format!("Stop alerts for {ticker}"))
-                            .on_click(cx.listener(move |this, on: &bool, _, cx| {
-                                this.set_stop_alerts(t.clone(), *on, cx)
-                            })),
-                    )
-            });
+        let on = self.stop_alerts_on(cx);
         ui::panel()
             .px_5()
             .py_4()
             .gap_2()
             .child(heading("STOP ALERTS"))
             .child(ui::label(
-                "Take-profit and stop-loss fills, by ticker. A ticker with no setting is on.",
+                "An alert each time a take-profit or stop-loss order fills, on every ticker.",
             ))
-            .children(rows)
+            .child(
+                h_flex()
+                    .gap_3()
+                    .py(px(4.))
+                    .child(div().flex_1().child("Take-profit and stop-loss fills"))
+                    .child(
+                        div()
+                            .text_size(px(12.5))
+                            .text_color(Palette::muted())
+                            .child(if on { "on" } else { "off" }),
+                    )
+                    .child(
+                        Switch::new("stop-alerts")
+                            .checked(on)
+                            .disabled(!editable)
+                            .accessibility_label("Take-profit and stop-loss alerts")
+                            .on_click(
+                                cx.listener(|this, on: &bool, _, cx| this.set_stop_alerts(*on, cx)),
+                            ),
+                    ),
+            )
             .into_any_element()
+    }
+
+    /// The switch's state: the watcher's, or on before it has been read.
+    fn stop_alerts_on(&self, cx: &gpui_kit::App) -> bool {
+        self.snapshot(cx)
+            .config
+            .config()
+            .is_none_or(|c| c.stop_alerts)
     }
 
     fn liquidation_panel(&self, editable: bool, cx: &mut Context<Self>) -> AnyElement {
@@ -781,8 +731,8 @@ impl WatcherSection {
         self.stale_banner(now_ms(), cx)
     }
 
-    pub fn stop_rows(&self, cx: &gpui_kit::App) -> Vec<(String, Option<bool>)> {
-        self.stop_tickers(cx)
+    pub fn stop_alerts_shown(&self, cx: &gpui_kit::App) -> bool {
+        self.stop_alerts_on(cx)
     }
 
     pub fn set_near_liq_text(&self, text: &str, window: &mut Window, cx: &mut Context<Self>) {

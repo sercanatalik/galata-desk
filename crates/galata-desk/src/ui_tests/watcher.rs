@@ -33,7 +33,7 @@ pub const URL: &str = "http://127.0.0.1:8790";
 pub const TOKEN: &str = "watcher-token-SECRET-42";
 
 /// The configuration recorded from the real watcher: one fired and one
-/// armed level, SOL's stop alerts off, watching the example address `0x…aa`.
+/// armed level, stop alerts off, watching the example address `0x…aa`.
 pub fn recorded_config() -> WatcherConfig {
     let mut config: WatcherConfig = serde_json::from_str(include_str!(
         "../../../galata-desk-core/tests/fixtures/watcher/config.json"
@@ -634,41 +634,18 @@ fn a_new_level_takes_its_direction_from_the_last_price(cx: &mut TestAppContext) 
 }
 
 #[gpui_kit::test]
-fn stop_alerts_read_by_ticker_and_switch(cx: &mut TestAppContext) {
+fn stop_alerts_are_one_switch_for_every_ticker(cx: &mut TestAppContext) {
     let (window, desk, link, _dir) = configured(cx);
-    let portfolio = cx.update(|cx| desk.read(cx).portfolio_view().unwrap());
-    cx.update(|cx| {
-        portfolio.update(cx, |p, cx| {
-            p.set_positions(
-                vec![
-                    super::position("BTC", "", 1000),
-                    super::position("ETH", "", 500),
-                ],
-                cx,
-            )
-        })
-    });
     let section = go_to_watcher(cx, window, &desk);
-    cx.update(|cx| {
-        assert_eq!(
-            section.read(cx).stop_rows(cx),
-            vec![
-                ("BTC".into(), None),
-                ("ETH".into(), None),
-                ("SOL".into(), Some(false))
-            ]
-        );
-    });
-    // Row 1 is ETH: switch it off.
-    click(cx, window, ("stop", 1usize));
+    cx.update(|cx| assert!(!section.read(cx).stop_alerts_shown(cx)));
+    click(cx, window, "stop-alerts");
     cx.update(|cx| {
         let saved = link.read(cx).saved.last().unwrap().clone();
-        assert!(!saved.stop_alerts_on("ETH"));
-        assert_eq!(
-            section.read(cx).stop_rows(cx)[1],
-            ("ETH".into(), Some(false))
-        );
+        assert!(saved.stop_alerts);
+        assert!(section.read(cx).stop_alerts_shown(cx));
     });
+    click(cx, window, "stop-alerts");
+    cx.update(|cx| assert!(!link.read(cx).saved.last().unwrap().stop_alerts));
 }
 
 #[gpui_kit::test]
