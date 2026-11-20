@@ -88,7 +88,8 @@ A heatmap of the markets you watch, up to 40.
   are drawn on the chart as dashed amber lines tagged **Alert**.
   Right-clicking the chart offers **Alert at** the price under the pointer,
   and right-clicking a tile offers **Alert for** that market, with the price
-  set to its last price.
+  set to its last price. Cancel, ×, Esc or a click outside closes that form
+  without saving.
 
 ### Funding
 

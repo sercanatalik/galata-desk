@@ -34,7 +34,7 @@ use gpui_kit::component::{Sizable, h_flex, v_flex};
 use gpui_kit::prelude::*;
 use gpui_kit::{
     AnyElement, Context, Entity, FocusHandle, KeyDownEvent, SharedString, Subscription, Task,
-    TestSupportExt, Window, deferred, div, px,
+    TestSupportExt, Window, anchored, deferred, div, px,
 };
 
 use crate::Core;
@@ -113,6 +113,9 @@ pub struct Markets {
     call_problem: Option<SharedString>,
     /// The "Alert for <market>…" form, open under that market's tile.
     tile_form: Option<(MarketId, Entity<crate::level_form::LevelForm>, Subscription)>,
+    /// Where each tile was last drawn, in window coordinates, so the alert
+    /// form can open above its tile when there is no room below.
+    tile_bounds: TileBounds,
     _watch: Task<()>,
     _subscriptions: Vec<Subscription>,
 }
@@ -235,6 +238,7 @@ impl Markets {
             plot: PlotPointer::default(),
             call_problem: None,
             tile_form: None,
+            tile_bounds: TileBounds::default(),
             _watch: watch,
             _subscriptions: subscriptions,
         };
@@ -331,8 +335,16 @@ impl Markets {
                 cx.notify();
             },
         );
+        form.update(cx, |f, cx| f.focus_price(window, cx));
         self.tile_form = Some((market, form, closing));
         cx.notify();
+    }
+
+    /// Close the tile's alert form without saving.
+    pub fn close_tile_form(&mut self, cx: &mut Context<Self>) {
+        if self.tile_form.take().is_some() {
+            cx.notify();
+        }
     }
 
     /// Ask the venue what each watched market is, once per session. A main
@@ -1156,9 +1168,23 @@ impl Markets {
         let hover_market = market.clone();
         let click_market = market.clone();
         let key_market = market.clone();
+        let bounds_store = self.tile_bounds.clone();
+        let bounds_market = market.clone();
         let tile_element = div()
             .id(("tile", ix))
             .relative()
+            .child(
+                gpui_kit::canvas(
+                    move |b, _, _| {
+                        bounds_store.borrow_mut().insert(bounds_market.clone(), b);
+                    },
+                    |_, _, _, _| {},
+                )
+                .absolute()
+                .top_0()
+                .left_0()
+                .size_full(),
+            )
             .h(px(TILE_HEIGHT))
             .cursor_pointer()
             .track_focus(&handle)
@@ -1204,21 +1230,45 @@ impl Markets {
                     .as_ref()
                     .filter(|(m, _, _)| *m == market)
                     .map(|(_, form, _)| {
+                        // Under the tile, or above it when the window has
+                        // no room below; kept inside the window's edges.
+                        let target = self
+                            .tile_bounds
+                            .borrow()
+                            .get(&market)
+                            .copied()
+                            .unwrap_or_default();
                         deferred(
-                            div()
-                                .id("tile-alert-form")
-                                .absolute()
-                                .top(px(TILE_HEIGHT + 6.))
-                                .left_0()
-                                .w(px(640.))
-                                .p_3()
-                                .rounded(px(8.))
-                                .border_1()
-                                .border_color(Palette::amber())
-                                .bg(Palette::panel())
-                                .shadow_lg()
-                                .child(form.clone())
-                                .test_support(),
+                            anchored()
+                                .attach(target, gpui_kit::Anchor::BottomLeft)
+                                .anchor(gpui_kit::Anchor::TopLeft)
+                                .offset(gpui_kit::point(px(0.), px(6.)))
+                                .snap_to_window_with_margin(px(8.))
+                                .child(
+                                    div()
+                                        .id("tile-alert-form")
+                                        .w(px(460.))
+                                        .p_3()
+                                        .rounded(px(8.))
+                                        .border_1()
+                                        .border_color(Palette::amber())
+                                        .bg(Palette::panel())
+                                        .shadow_lg()
+                                        .child(form.clone())
+                                        // Esc, or a click anywhere else, closes it.
+                                        .capture_key_down(cx.listener(
+                                            |this, e: &gpui_kit::KeyDownEvent, _, cx| {
+                                                if e.keystroke.key == "escape" {
+                                                    this.close_tile_form(cx);
+                                                    cx.stop_propagation();
+                                                }
+                                            },
+                                        ))
+                                        .on_mouse_down_out(
+                                            cx.listener(|this, _, _, cx| this.close_tile_form(cx)),
+                                        )
+                                        .test_support(),
+                                ),
                         )
                         .with_priority(2)
                     }),
@@ -2278,6 +2328,9 @@ struct Calls {
 
 /// Where the pointer is over the plot, and the plot's price range, kept as
 /// the chart draws and the pointer moves, for "Alert at <price>".
+type TileBounds =
+    std::rc::Rc<std::cell::RefCell<HashMap<MarketId, gpui_kit::Bounds<gpui_kit::Pixels>>>>;
+
 #[derive(Clone, Default)]
 struct PlotPointer {
     /// From the plot's top.

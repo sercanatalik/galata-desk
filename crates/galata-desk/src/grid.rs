@@ -321,12 +321,6 @@ impl Grid {
         self.order.get(row_ix).and_then(|&ix| self.rows.get(ix))
     }
 
-    /// The column sorted by and which way, for tests.
-    #[cfg(test)]
-    pub fn sorted_by(&self) -> Option<(usize, ColumnSort)> {
-        self.sort.filter(|(_, s)| *s != ColumnSort::Default)
-    }
-
     /// A column's cells as drawn, top to bottom, for tests.
     #[cfg(test)]
     pub fn column_texts(&self, col_ix: usize) -> Vec<String> {

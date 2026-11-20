@@ -1124,3 +1124,114 @@ fn a_tile_offers_no_alert_when_the_watcher_cannot_take_one(cx: &mut TestAppConte
     })
     .unwrap();
 }
+
+#[gpui_kit::test]
+fn a_tiles_alert_form_closes_by_cancel_close_escape_or_a_click_outside(cx: &mut TestAppContext) {
+    let coins = [
+        "BTC", "ETH", "SOL", "HYPE", "DOGE", "XRP", "AVAX", "LINK", "SUI", "TON", "ADA", "DOT",
+    ];
+    let (window, desk, link, dir) =
+        open_with_watcher(cx, answered(ConfigState::Read(chart_config()), now()));
+    Store::at(dir.path())
+        .save_watchlist(&super::watchlist(&coins))
+        .unwrap();
+    let markets = super::go_to_markets(window, &desk, cx);
+    cx.update_window(window.into(), |_, window, cx| {
+        markets.update(cx, |view, cx| {
+            view.set_snapshot(super::charted("BTC", &coins, 40), cx)
+        });
+        window.render_frame(cx);
+    })
+    .unwrap();
+    let form_shown = |cx: &mut TestAppContext, window: WindowHandle<Root>| {
+        cx.update_window(window.into(), |_, window, cx| {
+            window.render_frame(cx);
+            window.try_find("tile-alert-form").is_some()
+        })
+        .unwrap()
+    };
+
+    let open = |cx: &mut TestAppContext| {
+        // The last tile, on the bottom row.
+        right_click_tile(cx, window, 11);
+        click_menu_item(cx, window, 0);
+        assert!(form_shown(cx, window), "opened");
+    };
+    open(cx);
+    click(cx, window, "tile-alert-cancel");
+    assert!(!form_shown(cx, window), "Cancel closes it");
+
+    open(cx);
+    click(cx, window, "tile-alert-close");
+    assert!(!form_shown(cx, window), "the close button closes it");
+
+    open(cx);
+    cx.update_window(window.into(), |_, window, cx| window.press("escape", cx))
+        .unwrap();
+    cx.run_until_parked();
+    assert!(!form_shown(cx, window), "Esc closes it");
+
+    open(cx);
+    click(cx, window, ("tile", 0usize));
+    assert!(!form_shown(cx, window), "a click elsewhere closes it");
+
+    cx.update(|cx| assert!(link.read(cx).saved.is_empty(), "nothing saved"));
+}
+
+#[gpui_kit::test]
+fn a_tiles_alert_form_opens_above_the_tile_when_there_is_no_room_below(cx: &mut TestAppContext) {
+    let coins = [
+        "BTC", "ETH", "SOL", "HYPE", "DOGE", "XRP", "AVAX", "LINK", "SUI", "TON", "ADA", "DOT",
+    ];
+    let (window, desk, _link, dir) =
+        open_with_watcher(cx, answered(ConfigState::Read(chart_config()), now()));
+    Store::at(dir.path())
+        .save_watchlist(&super::watchlist(&coins))
+        .unwrap();
+    let markets = super::go_to_markets(window, &desk, cx);
+    cx.update_window(window.into(), |_, window, cx| {
+        markets.update(cx, |view, cx| {
+            view.set_snapshot(super::charted("BTC", &coins, 40), cx)
+        });
+        window.render_frame(cx);
+    })
+    .unwrap();
+    // Make the window end just under the last tile.
+    let last_bottom = cx
+        .update_window(window.into(), |_, window, _| {
+            window.find(("tile", 11usize)).bounds().bottom()
+        })
+        .unwrap();
+    cx.simulate_window_resize(
+        window.into(),
+        gpui_kit::size(gpui_kit::px(1320.), last_bottom + gpui_kit::px(20.)),
+    );
+    cx.run_until_parked();
+    let measure = |cx: &mut TestAppContext, ix: usize| {
+        right_click_tile(cx, window, ix);
+        click_menu_item(cx, window, 0);
+        cx.update_window(window.into(), |_, window, cx| {
+            window.render_frame(cx);
+            let tile = window.find(("tile", ix)).bounds();
+            let form = window.find("tile-alert-form").bounds();
+            let view = window.viewport_size();
+            (tile, form, view)
+        })
+        .unwrap()
+    };
+
+    let (tile, form, view) = measure(cx, 11);
+    assert!(
+        form.bottom() <= tile.top(),
+        "above the bottom-row tile: {form:?} {tile:?}"
+    );
+    assert!(form.bottom() <= view.height && form.top() >= gpui_kit::px(0.));
+    assert!(form.right() <= view.width, "inside the window's right edge");
+    click(cx, window, "tile-alert-cancel");
+
+    let (tile, form, _) = measure(cx, 0);
+    assert!(
+        form.top() >= tile.bottom(),
+        "below a tile with room under it"
+    );
+}

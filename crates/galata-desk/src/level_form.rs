@@ -169,23 +169,17 @@ impl LevelForm {
         .detach();
     }
 
+    /// Put the cursor in the price, so the form takes keys at once.
+    pub fn focus_price(&self, window: &mut Window, cx: &mut Context<Self>) {
+        self.price.update(cx, |i, cx| i.focus(window, cx));
+    }
+
     /// The form, with its controls available only while `enabled`.
     pub fn render_form(&self, enabled: bool, cx: &mut Context<Self>) -> gpui_kit::AnyElement {
-        let auto = match self.auto_direction(cx) {
-            Some(d) => format!("Auto ({})", d.label()),
-            None => "Auto".to_string(),
-        };
-        let choice =
-            |id: SharedString, label: String, value: Option<Direction>, cx: &mut Context<Self>| {
-                let chosen = self.direction == value;
-                let button = Button::new(id).small().label(label).disabled(!enabled);
-                let button = if chosen {
-                    button.primary()
-                } else {
-                    button.ghost()
-                };
-                button.on_click(cx.listener(move |this, _, _, cx| this.choose(value, cx)))
-            };
+        if self.cancellable {
+            return self.render_popover(enabled, cx);
+        }
+        let choices = self.direction_choices(enabled, cx);
         v_flex()
             .gap(px(6.))
             .child(
@@ -203,19 +197,7 @@ impl LevelForm {
                             .into_any_element(),
                     })
                     .child(div().w(px(120.)).child(Input::new(&self.price).small()))
-                    .child(choice(self.id("auto"), auto, None, cx))
-                    .child(choice(
-                        self.id("above"),
-                        "Above".into(),
-                        Some(Direction::Above),
-                        cx,
-                    ))
-                    .child(choice(
-                        self.id("below"),
-                        "Below".into(),
-                        Some(Direction::Below),
-                        cx,
-                    ))
+                    .child(choices)
                     .child(
                         div()
                             .flex_1()
@@ -233,21 +215,125 @@ impl LevelForm {
                             })
                             .disabled(!enabled || self.saving)
                             .on_click(cx.listener(|this, _, window, cx| this.submit(window, cx))),
-                    )
-                    .when(self.cancellable, |d| {
-                        d.child(
-                            Button::new(self.id("cancel"))
-                                .small()
-                                .label("Cancel")
-                                .on_click(
-                                    cx.listener(|_, _, _, cx| cx.emit(LevelFormEvent::Cancelled)),
-                                ),
-                        )
-                    }),
+                    ),
             )
             .when_some(self.last, |d, last| {
                 d.child(ui::label(format!("Last price {}", f::price(last))))
             })
+            .children(self.message.clone().map(|m| {
+                div()
+                    .text_size(px(12.5))
+                    .text_color(Palette::loss())
+                    .child(m)
+            }))
+            .into_any_element()
+    }
+}
+
+impl LevelForm {
+    fn direction_choices(&self, enabled: bool, cx: &mut Context<Self>) -> gpui_kit::Div {
+        let auto = match self.auto_direction(cx) {
+            Some(d) => format!("Auto ({})", d.label()),
+            None => "Auto".to_string(),
+        };
+        let choice =
+            |id: SharedString, label: String, value: Option<Direction>, cx: &mut Context<Self>| {
+                let chosen = self.direction == value;
+                let button = Button::new(id).small().label(label).disabled(!enabled);
+                let button = if chosen {
+                    button.primary()
+                } else {
+                    button.ghost()
+                };
+                button.on_click(cx.listener(move |this, _, _, cx| this.choose(value, cx)))
+            };
+        h_flex()
+            .gap_1()
+            .child(choice(self.id("auto"), auto, None, cx))
+            .child(choice(
+                self.id("above"),
+                "Above".into(),
+                Some(Direction::Above),
+                cx,
+            ))
+            .child(choice(
+                self.id("below"),
+                "Below".into(),
+                Some(Direction::Below),
+                cx,
+            ))
+    }
+
+    /// The form as a tile's popover: a header naming the market with a
+    /// close button, the price and direction, then the note beside Cancel
+    /// and Save, so closing it is always in sight.
+    fn render_popover(&self, enabled: bool, cx: &mut Context<Self>) -> gpui_kit::AnyElement {
+        let market = self.fixed_market.clone().unwrap_or_default();
+        let choices = self.direction_choices(enabled, cx);
+        v_flex()
+            .gap_2()
+            .child(
+                h_flex()
+                    .gap_3()
+                    .items_center()
+                    .child(
+                        div()
+                            .font_weight(gpui_kit::FontWeight::SEMIBOLD)
+                            .child(format!("Alert for {market}")),
+                    )
+                    .when_some(self.last, |d, last| {
+                        d.child(ui::label(format!("last {}", f::price(last))))
+                    })
+                    .child(div().flex_1())
+                    .child(
+                        Button::new(self.id("close"))
+                            .small()
+                            .ghost()
+                            .label("\u{d7}")
+                            .tooltip("Close (Esc)")
+                            .on_click(
+                                cx.listener(|_, _, _, cx| cx.emit(LevelFormEvent::Cancelled)),
+                            ),
+                    ),
+            )
+            .child(
+                h_flex()
+                    .gap_2()
+                    .items_center()
+                    .child(div().w(px(140.)).child(Input::new(&self.price).small()))
+                    .child(choices),
+            )
+            .child(
+                h_flex()
+                    .gap_2()
+                    .items_center()
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_w(px(120.))
+                            .child(Input::new(&self.note).small()),
+                    )
+                    .child(
+                        Button::new(self.id("cancel"))
+                            .small()
+                            .label("Cancel")
+                            .on_click(
+                                cx.listener(|_, _, _, cx| cx.emit(LevelFormEvent::Cancelled)),
+                            ),
+                    )
+                    .child(
+                        Button::new(self.id("save"))
+                            .small()
+                            .primary()
+                            .label(if self.saving {
+                                "Saving\u{2026}"
+                            } else {
+                                "Save alert"
+                            })
+                            .disabled(!enabled || self.saving)
+                            .on_click(cx.listener(|this, _, window, cx| this.submit(window, cx))),
+                    ),
+            )
             .children(self.message.clone().map(|m| {
                 div()
                     .text_size(px(12.5))
