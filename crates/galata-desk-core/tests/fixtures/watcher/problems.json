@@ -1,0 +1,6 @@
+{
+  "problems": [
+    "`address`: must be 0x followed by 40 hexadecimal characters",
+    "`near_liquidation_pct`: must be a number from 2 to 50"
+  ]
+}

@@ -9,7 +9,7 @@
 use std::fmt;
 use std::net::{Ipv4Addr, Ipv6Addr};
 
-use reqwest::Url;
+use url::Url;
 
 /// A watcher address that passed [`WatcherUrl::parse`]. Shown and stored as
 /// typed, without a trailing slash.
@@ -23,7 +23,9 @@ pub enum WatcherUrlError {
     NoScheme,
     #[error("That is not a web address. Use one like http://127.0.0.1:8790.")]
     NotAnAddress,
-    #[error("Leave the user name and password out of the address. The token goes in its own field.")]
+    #[error(
+        "Leave the user name and password out of the address. The token goes in its own field."
+    )]
     Credentials,
     #[error(
         "Over plain http://, the token would cross the internet unencrypted. Use https://, or this Mac's, a home network or a Tailscale address."
@@ -37,10 +39,11 @@ impl WatcherUrl {
     /// IPv6 range, or a `*.ts.net` name) or `localhost`. Surrounding white
     /// space from a paste is ignored.
     pub fn parse(text: &str) -> Result<Self, WatcherUrlError> {
-        let text = text.trim().trim_end_matches('/');
+        let text = text.trim();
         if !(text.starts_with("http://") || text.starts_with("https://")) {
             return Err(WatcherUrlError::NoScheme);
         }
+        let text = text.trim_end_matches('/');
         let url = Url::parse(text).map_err(|_| WatcherUrlError::NotAnAddress)?;
         if !url.username().is_empty() || url.password().is_some() {
             return Err(WatcherUrlError::Credentials);
@@ -103,7 +106,9 @@ mod tests {
     use super::*;
 
     fn ok(text: &str) -> String {
-        WatcherUrl::parse(text).unwrap_or_else(|e| panic!("{text}: {e}")).to_string()
+        WatcherUrl::parse(text)
+            .unwrap_or_else(|e| panic!("{text}: {e}"))
+            .to_string()
     }
 
     fn refused(text: &str) -> WatcherUrlError {
@@ -148,7 +153,10 @@ mod tests {
 
     #[test]
     fn https_is_accepted_anywhere() {
-        assert_eq!(ok("https://watcher.example.net"), "https://watcher.example.net");
+        assert_eq!(
+            ok("https://watcher.example.net"),
+            "https://watcher.example.net"
+        );
         ok("https://203.0.113.5:8443");
     }
 
@@ -162,18 +170,32 @@ mod tests {
 
     #[test]
     fn credentials_queries_and_garbage_are_refused() {
-        assert_eq!(refused("http://user:pw@127.0.0.1:8790"), WatcherUrlError::Credentials);
-        assert_eq!(refused("http://token@127.0.0.1:8790"), WatcherUrlError::Credentials);
-        assert_eq!(refused("http://127.0.0.1:8790/?a=1"), WatcherUrlError::NotAnAddress);
+        assert_eq!(
+            refused("http://user:pw@127.0.0.1:8790"),
+            WatcherUrlError::Credentials
+        );
+        assert_eq!(
+            refused("http://token@127.0.0.1:8790"),
+            WatcherUrlError::Credentials
+        );
+        assert_eq!(
+            refused("http://127.0.0.1:8790/?a=1"),
+            WatcherUrlError::NotAnAddress
+        );
         assert_eq!(refused("http://"), WatcherUrlError::NotAnAddress);
-        assert_eq!(refused("http://127.0.0.1:99999"), WatcherUrlError::NotAnAddress);
+        assert_eq!(
+            refused("http://127.0.0.1:99999"),
+            WatcherUrlError::NotAnAddress
+        );
     }
 
     #[test]
     fn a_trailing_slash_and_white_space_are_dropped() {
         assert_eq!(ok("  http://127.0.0.1:8790/ \n"), "http://127.0.0.1:8790");
         assert_eq!(
-            WatcherUrl::parse("http://127.0.0.1:8790/").unwrap().route("/config"),
+            WatcherUrl::parse("http://127.0.0.1:8790/")
+                .unwrap()
+                .route("/config"),
             "http://127.0.0.1:8790/config"
         );
     }

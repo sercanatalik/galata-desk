@@ -1,0 +1,7 @@
+{
+  "address": "0x00000000000000000000000000000000000000aa",
+  "config_version": 1,
+  "last_error": "venue: the venue answered HTTP 503",
+  "last_error_ms": 1795130940000,
+  "last_ok_ms": 1795131000000
+}

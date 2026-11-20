@@ -1,0 +1,28 @@
+{
+  "alerts": [
+    {
+      "delivered": false,
+      "detected_ms": 1795121000000,
+      "event_ms": 1795120000000,
+      "id": "sl-9",
+      "kind": "stop_loss",
+      "late": true,
+      "market": "ETH",
+      "price": "3240.5",
+      "side": "sell",
+      "size": "0.5",
+      "text": "ETH stop-loss filled: sold 0.5 at 3,240.5 (late: at 01:46)"
+    },
+    {
+      "delivered": true,
+      "detected_ms": 1795127560000,
+      "event_ms": 1795127520000,
+      "id": "level-btc-support-0",
+      "kind": "level",
+      "late": false,
+      "market": "BTC",
+      "price": "58000",
+      "text": "BTC crossed below 58,000: weekly support"
+    }
+  ]
+}

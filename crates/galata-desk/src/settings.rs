@@ -1,12 +1,14 @@
 //! The settings page: which network the app shows, the API key kept for
-//! each, and whether that key may act on the main network. Nothing here uses
-//! a saved key; the Open orders tab does, through the gate in the core.
+//! each, whether that key may act on the main network, and the connection
+//! to galata-watcher. Nothing here uses a saved key; the Open orders tab
+//! does, through the gate in the core.
 
 use galata_desk_core::api_key::ApiKey;
 use galata_desk_core::connect::Address;
 use galata_desk_core::network::Network;
-use galata_desk_core::secrets::api_key_name;
+use galata_desk_core::secrets::{WATCHER_TOKEN_NAME, api_key_name};
 use galata_desk_core::store::{QuickSizeRule, QuickSizes};
+use galata_desk_core::watcher::{ConfigState, WatcherUrl};
 use gpui_kit::component::button::{Button, ButtonVariants};
 use gpui_kit::component::input::{Input, InputEvent, InputState};
 use gpui_kit::component::switch::Switch;
@@ -20,6 +22,7 @@ use gpui_kit::{
 use crate::Core;
 use crate::theme::{MONO, Palette};
 use crate::ui;
+use crate::watcher_link::{self, WatcherLink};
 
 /// What the page says a saved key is used for.
 pub const KEY_USE: &str = "Mainnet and testnet each have their own key. A saved key is used to place orders, amend and cancel them, close positions, and set take-profit and stop-loss, each time you confirm one, and for nothing else.";
@@ -30,6 +33,9 @@ pub const MAINNET_SWITCH_NOTE: &str = "Lets the saved mainnet key place, amend a
 /// What the page says about quick sizes.
 pub const QUICK_SIZES_NOTE: &str = "The dollar amounts the order ticket offers as Quick buttons. Each is the order's value, not its margin. Up to four, from $10. The same on mainnet and testnet. Saved as you type once every amount is valid; until then the last valid list stays in use.";
 
+/// What the page says about the watcher.
+pub const WATCHER_NOTE: &str = "galata-watcher sends Telegram alerts for this account while the desk is closed. Connect it here to see its health and change its call levels and stop alerts. Its token is kept in the macOS Keychain, never in a file, and is not shown again after saving.";
+
 /// What the page asks of the window.
 pub enum SettingsEvent {
     /// Show this network from now on.
@@ -39,6 +45,9 @@ pub enum SettingsEvent {
     /// Offer these quick sizes in the order ticket. Only a list that keeps
     /// every rule is ever sent.
     QuickSizes(QuickSizes),
+    /// Connect to the watcher at this address, whose token is now in the
+    /// keychain; or, with `None`, forget the watcher.
+    Watcher(Option<WatcherUrl>),
     /// Go back to where the user was.
     Done,
 }
@@ -61,6 +70,19 @@ pub struct Settings {
     /// One field per quick size, in the order the user arranged them.
     quick: Vec<Entity<InputState>>,
     _quick_typing: Vec<Subscription>,
+    /// The watcher's address and token, as typed.
+    watcher_url: Entity<InputState>,
+    watcher_token: Entity<InputState>,
+    /// A watcher token is in the keychain. The token itself is never kept
+    /// here.
+    watcher_token_saved: bool,
+    /// The outcome of the last watcher action, and whether it is a problem.
+    watcher_message: Option<(SharedString, bool)>,
+    /// A connection test is under way.
+    testing: bool,
+    /// The window's connection to the watcher, while it has one.
+    link: Option<Entity<WatcherLink>>,
+    _link_changes: Option<Subscription>,
 }
 
 impl EventEmitter<SettingsEvent> for Settings {}
@@ -72,12 +94,34 @@ impl Settings {
                 .masked(true)
                 .placeholder("0x\u{2026}")
         });
+        let saved_url = Core::get(cx)
+            .watcher_url
+            .as_ref()
+            .map(|u| u.to_string())
+            .unwrap_or_default();
+        let watcher_url = cx.new(|cx| {
+            InputState::new(window, cx)
+                .placeholder("http://127.0.0.1:8790")
+                .default_value(saved_url)
+        });
+        let watcher_token = cx.new(|cx| {
+            InputState::new(window, cx)
+                .masked(true)
+                .placeholder("API token")
+        });
         let mut this = Self {
             key,
             saved: Saved::Nothing,
             message: None,
             quick: Vec::new(),
             _quick_typing: Vec::new(),
+            watcher_url,
+            watcher_token,
+            watcher_token_saved: false,
+            watcher_message: None,
+            testing: false,
+            link: None,
+            _link_changes: None,
         };
         let amounts = Core::get(cx).quick_sizes.amounts().to_vec();
         this.set_quick_fields(&amounts, window, cx);
@@ -110,7 +154,181 @@ impl Settings {
             },
             Err(e) => Saved::Unreadable(e.to_string()),
         };
+        self.watcher_token_saved = matches!(core.secrets.get(WATCHER_TOKEN_NAME), Ok(Some(_)));
         cx.notify();
+    }
+
+    /// Use this connection to the watcher, or none. The window calls this
+    /// whenever its connection changes.
+    pub fn set_link(&mut self, link: Option<Entity<WatcherLink>>, cx: &mut Context<Self>) {
+        self._link_changes = link.as_ref().map(|l| cx.observe(l, |_, _, cx| cx.notify()));
+        self.link = link;
+        cx.notify();
+    }
+
+    /// The watcher is connected: an address is saved and its token is in the
+    /// keychain.
+    fn watcher_saved(&self, cx: &gpui_kit::App) -> bool {
+        self.watcher_token_saved && Core::get(cx).watcher_url.is_some()
+    }
+
+    fn save_watcher(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let url = match WatcherUrl::parse(&self.watcher_url.read(cx).value()) {
+            Ok(url) => url,
+            Err(e) => {
+                self.watcher_message = Some((format!("Not saved: {e}").into(), true));
+                cx.notify();
+                return;
+            }
+        };
+        let token = self.watcher_token.read(cx).value().trim().to_string();
+        if token.is_empty() && !self.watcher_token_saved {
+            self.watcher_message = Some(("Not saved: enter the watcher's API token.".into(), true));
+            cx.notify();
+            return;
+        }
+        if !token.is_empty()
+            && let Err(e) = Core::get(cx).secrets.set(WATCHER_TOKEN_NAME, &token)
+        {
+            self.watcher_message = Some((format!("Not saved: {e}.").into(), true));
+            cx.notify();
+            return;
+        }
+        // The token is in the keychain now and should be nowhere else.
+        self.watcher_token
+            .update(cx, |input, cx| input.set_value(String::new(), window, cx));
+        self.watcher_token_saved = true;
+        self.watcher_message = Some(("Saved. The token is in the keychain.".into(), false));
+        cx.emit(SettingsEvent::Watcher(Some(url)));
+        cx.notify();
+    }
+
+    fn remove_watcher(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if let Err(e) = Core::get(cx).secrets.delete(WATCHER_TOKEN_NAME) {
+            self.watcher_message = Some((format!("Not removed: {e}.").into(), true));
+            cx.notify();
+            return;
+        }
+        self.watcher_token_saved = false;
+        self.watcher_url
+            .update(cx, |input, cx| input.set_value(String::new(), window, cx));
+        self.watcher_message = Some((
+            "Removed. The token is deleted from the keychain.".into(),
+            false,
+        ));
+        cx.emit(SettingsEvent::Watcher(None));
+        cx.notify();
+    }
+
+    /// Ask the watcher for its health and configuration with the address
+    /// and token as they are now: typed, or else saved. Changes nothing.
+    fn test_watcher(&mut self, cx: &mut Context<Self>) {
+        let typed = self.watcher_url.read(cx).value().to_string();
+        let url = match WatcherUrl::parse(&typed) {
+            Ok(url) => url,
+            Err(e) => {
+                self.watcher_message = Some((e.to_string().into(), true));
+                cx.notify();
+                return;
+            }
+        };
+        let typed_token = self.watcher_token.read(cx).value().trim().to_string();
+        let token = if typed_token.is_empty() {
+            Core::get(cx).secrets.get(WATCHER_TOKEN_NAME).ok().flatten()
+        } else {
+            Some(typed_token)
+        };
+        let Some(token) = token else {
+            self.watcher_message = Some(("Enter the watcher's API token to test it.".into(), true));
+            cx.notify();
+            return;
+        };
+        self.testing = true;
+        self.watcher_message = Some(("Testing\u{2026}".into(), false));
+        cx.notify();
+        #[cfg(not(test))]
+        {
+            let runtime = Core::get(cx).runtime.clone();
+            let client = galata_desk_core::watcher::Client::new(url.clone(), token);
+            let asking = runtime.spawn(async move {
+                let health = client.health().await?;
+                Ok((health, client.config().await))
+            });
+            cx.spawn(async move |this, cx| {
+                let answer = asking
+                    .await
+                    .unwrap_or(Err(galata_desk_core::watcher::WatcherError::Unreachable));
+                let _ = this.update(cx, |this, cx| this.finish_test(&url, answer, cx));
+            })
+            .detach();
+        }
+        #[cfg(test)]
+        let _ = (url, token);
+    }
+
+    fn finish_test(
+        &mut self,
+        url: &WatcherUrl,
+        answer: Result<
+            (
+                galata_desk_core::watcher::Health,
+                Result<
+                    galata_desk_core::watcher::WatcherConfig,
+                    galata_desk_core::watcher::WatcherError,
+                >,
+            ),
+            galata_desk_core::watcher::WatcherError,
+        >,
+        cx: &mut Context<Self>,
+    ) {
+        let (text, problem) = watcher_link::describe_test(url, answer, watcher_link::now_ms());
+        self.testing = false;
+        self.watcher_message = Some((text.into(), problem));
+        cx.notify();
+    }
+
+    /// Point the watcher at the connected account.
+    fn watch_account(&mut self, cx: &mut Context<Self>) {
+        let (Some(link), Some(account)) = (self.link.clone(), Core::get(cx).store.account()) else {
+            return;
+        };
+        let address = account.address.as_str().to_lowercase();
+        let saving = link.update(cx, |link, cx| link.save(move |c| c.address = address, cx));
+        cx.spawn(async move |this, cx| {
+            let outcome = saving.await;
+            let _ = this.update(cx, |this, cx| {
+                this.watcher_message = Some(match outcome {
+                    Ok(_) => ("The watcher now watches this account.".into(), false),
+                    Err(e) => (e.to_string().into(), true),
+                });
+                cx.notify();
+            });
+        })
+        .detach();
+    }
+
+    /// The account the watcher watches, when it is not the connected one.
+    fn watching_another(&self, cx: &gpui_kit::App) -> Option<String> {
+        let account = Core::get(cx).store.account()?;
+        let config = self
+            .link
+            .as_ref()?
+            .read(cx)
+            .snapshot()
+            .config
+            .config()?
+            .clone();
+        (!config
+            .address
+            .eq_ignore_ascii_case(account.address.as_str()))
+        .then_some(config.address)
+    }
+
+    /// The watcher answers but has never been configured.
+    fn watcher_unconfigured(&self, cx: &gpui_kit::App) -> bool {
+        self.link
+            .as_ref()
+            .is_some_and(|l| l.read(cx).snapshot().config == ConfigState::Missing)
     }
 
     fn save(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -547,6 +765,112 @@ impl Settings {
             ))
             .into_any_element()
     }
+
+    fn watcher_panel(&self, cx: &mut Context<Self>) -> AnyElement {
+        let saved = self.watcher_saved(cx);
+        let saved_url = Core::get(cx).watcher_url.as_ref().map(|u| u.to_string());
+        let account_connected = Core::get(cx).store.account().is_some();
+        let configured = self
+            .link
+            .as_ref()
+            .is_some_and(|l| l.read(cx).snapshot().config.config().is_some());
+        let test_button = Button::new("test-watcher")
+            .small()
+            .label("Test connection")
+            .disabled(self.testing)
+            .on_click(cx.listener(|this, _, _, cx| this.test_watcher(cx)));
+        let body: AnyElement = if saved {
+            h_flex()
+                .gap_3()
+                .px_3()
+                .py(px(10.))
+                .border_1()
+                .border_color(Palette::line())
+                .rounded(px(8.))
+                .child(
+                    v_flex()
+                        .flex_1()
+                        .min_w_0()
+                        .gap(px(3.))
+                        .child(
+                            h_flex()
+                                .flex_wrap()
+                                .gap_2()
+                                .child("Connected \u{b7}")
+                                .child(
+                                    div().font_family(MONO).child(saved_url.unwrap_or_default()),
+                                ),
+                        )
+                        .child(ui::label("Token saved in the keychain.")),
+                )
+                .child(test_button)
+                .when(account_connected && configured, |d| {
+                    d.child(
+                        Button::new("watch-account")
+                            .small()
+                            .label("Watch this account")
+                            .on_click(cx.listener(|this, _, _, cx| this.watch_account(cx))),
+                    )
+                })
+                .child(
+                    Button::new("remove-watcher")
+                        .small()
+                        .label("Remove")
+                        .on_click(
+                            cx.listener(|this, _, window, cx| this.remove_watcher(window, cx)),
+                        ),
+                )
+                .into_any_element()
+        } else {
+            v_flex()
+                .gap(px(4.))
+                .child(ui::label("Address"))
+                .child(Input::new(&self.watcher_url))
+                .child(ui::label("API token"))
+                .child(
+                    h_flex()
+                        .gap_3()
+                        .child(div().flex_1().child(Input::new(&self.watcher_token)))
+                        .child(test_button)
+                        .child(
+                            Button::new("save-watcher")
+                                .primary()
+                                .label("Save")
+                                .on_click(
+                                    cx.listener(|this, _, window, cx| {
+                                        this.save_watcher(window, cx)
+                                    }),
+                                ),
+                        ),
+                )
+                .into_any_element()
+        };
+        ui::panel()
+            .px_5()
+            .py_4()
+            .gap_3()
+            .child(Self::heading("WATCHER"))
+            .child(ui::label(WATCHER_NOTE))
+            .child(body)
+            .when_some(self.watching_another(cx), |d, address| {
+                d.child(ui::notice(format!(
+                    "The watcher watches {}, not the connected account.",
+                    galata_desk_core::format::short_address(&address)
+                )))
+            })
+            .when(self.watcher_unconfigured(cx), |d| {
+                d.child(ui::notice(
+                    "The watcher has no configuration yet. Write its first one, with its Telegram chat, as galata-watcher's README shows.",
+                ))
+            })
+            .children(self.watcher_message.clone().map(|(text, problem)| {
+                div()
+                    .text_size(px(12.5))
+                    .text_color(if problem { Palette::loss() } else { Palette::muted() })
+                    .child(text)
+            }))
+            .into_any_element()
+    }
 }
 
 impl Render for Settings {
@@ -581,7 +905,8 @@ impl Render for Settings {
                         .child(self.network_panel(cx))
                         .child(self.key_panel(cx))
                         .child(self.trading_panel(cx))
-                        .child(self.quick_panel(cx)),
+                        .child(self.quick_panel(cx))
+                        .child(self.watcher_panel(cx)),
                 ),
             )
             .test_support()
@@ -659,5 +984,64 @@ impl Settings {
     /// The last message, and whether it reports a problem.
     pub fn message(&self) -> Option<(String, bool)> {
         self.message.as_ref().map(|(t, p)| (t.to_string(), *p))
+    }
+
+    /// Type the watcher's address and token.
+    pub fn set_watcher_text(
+        &self,
+        url: &str,
+        token: &str,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.watcher_url
+            .update(cx, |input, cx| input.set_value(url.to_string(), window, cx));
+        self.watcher_token.update(cx, |input, cx| {
+            input.set_value(token.to_string(), window, cx)
+        });
+    }
+
+    pub fn watcher_token_text(&self, cx: &gpui_kit::App) -> String {
+        self.watcher_token.read(cx).value().to_string()
+    }
+
+    /// The last watcher message, and whether it reports a problem.
+    pub fn watcher_message(&self) -> Option<(String, bool)> {
+        self.watcher_message
+            .as_ref()
+            .map(|(t, p)| (t.to_string(), *p))
+    }
+
+    /// Answer the connection test as the watcher would have.
+    pub fn answer_test(
+        &mut self,
+        answer: Result<
+            (
+                galata_desk_core::watcher::Health,
+                Result<
+                    galata_desk_core::watcher::WatcherConfig,
+                    galata_desk_core::watcher::WatcherError,
+                >,
+            ),
+            galata_desk_core::watcher::WatcherError,
+        >,
+        cx: &mut Context<Self>,
+    ) {
+        let url = WatcherUrl::parse(&self.watcher_url.read(cx).value()).unwrap();
+        self.finish_test(&url, answer, cx);
+    }
+
+    pub fn is_testing(&self) -> bool {
+        self.testing
+    }
+
+    /// The other account the panel says the watcher watches, if it says so.
+    pub fn notice_other_account(&self, cx: &gpui_kit::App) -> Option<String> {
+        self.watching_another(cx)
+    }
+
+    /// The panel says the watcher needs its first configuration.
+    pub fn notice_unconfigured(&self, cx: &gpui_kit::App) -> bool {
+        self.watcher_unconfigured(cx)
     }
 }

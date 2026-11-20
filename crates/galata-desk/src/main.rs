@@ -5,6 +5,7 @@ mod desk;
 mod funding;
 mod grid;
 mod history;
+mod level_form;
 mod market_about;
 mod market_tile;
 mod markets;
@@ -16,6 +17,8 @@ mod theme;
 mod ui;
 #[cfg(test)]
 mod ui_tests;
+mod watcher;
+mod watcher_link;
 
 use std::sync::Arc;
 
@@ -52,6 +55,9 @@ pub struct Core {
     /// The order ticket's Quick buttons. Chosen in settings; always a list
     /// that keeps every rule.
     pub quick_sizes: QuickSizes,
+    /// Where galata-watcher answers, when one is connected in settings. Its
+    /// token is read from `secrets` when needed, never kept here.
+    pub watcher_url: Option<galata_desk_core::watcher::WatcherUrl>,
     /// `GALATA_DESK_INFO_URL` points the app at another info endpoint, for
     /// development. It is used whatever the network.
     pub info_override: Option<String>,
@@ -95,6 +101,7 @@ impl Core {
             network: self.network,
             allow_mainnet_trading: self.allow_mainnet_trading,
             quick_sizes: self.quick_sizes.clone(),
+            watcher_url: self.watcher_url.clone(),
         }
     }
 }
@@ -167,6 +174,7 @@ fn main() {
                 network: settings.network,
                 allow_mainnet_trading: settings.allow_mainnet_trading,
                 quick_sizes: settings.quick_sizes,
+                watcher_url: settings.watcher_url,
                 info_override: std::env::var("GALATA_DESK_INFO_URL").ok(),
                 ws_override: std::env::var("GALATA_DESK_WS_URL").ok(),
             });

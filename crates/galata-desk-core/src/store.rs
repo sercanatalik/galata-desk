@@ -1,6 +1,7 @@
 //! What the app keeps between launches: which account it shows, and its
 //! configuration. Never a key, a seed phrase or a wallet session.
 
+use crate::watcher::WatcherUrl;
 use std::io::Write;
 use std::path::{Path, PathBuf};
 
@@ -76,6 +77,9 @@ pub struct Settings {
     pub allow_mainnet_trading: bool,
     /// The order ticket's Quick buttons, the same on both networks.
     pub quick_sizes: QuickSizes,
+    /// Where galata-watcher answers, when one is connected. Its token is in
+    /// the keychain, never here.
+    pub watcher_url: Option<WatcherUrl>,
 }
 
 /// The order ticket's quick sizes: one to four whole US dollar amounts, each
@@ -212,6 +216,11 @@ struct SettingsRecord {
         deserialize_with = "amounts_or_none"
     )]
     quick_sizes: Option<Vec<u64>>,
+    /// Absent in files written before the watcher existed, or with none
+    /// connected. An address that no longer passes the check is dropped on
+    /// its own.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    watcher_url: Option<String>,
 }
 
 fn amounts_or_none<'de, D: serde::Deserializer<'de>>(d: D) -> Result<Option<Vec<u64>>, D::Error> {
@@ -315,6 +324,10 @@ impl Store {
                     .as_deref()
                     .and_then(QuickSizes::from_amounts)
                     .unwrap_or_default(),
+                watcher_url: record
+                    .watcher_url
+                    .as_deref()
+                    .and_then(|u| WatcherUrl::parse(u).ok()),
             })
             .unwrap_or_default()
     }
@@ -325,6 +338,10 @@ impl Store {
             network: settings.network,
             mainnet_trading: settings.allow_mainnet_trading,
             quick_sizes: Some(settings.quick_sizes.amounts().to_vec()),
+            watcher_url: settings
+                .watcher_url
+                .as_ref()
+                .map(|u| u.as_str().to_string()),
         };
         let text = serde_json::to_string_pretty(&record).expect("the record serialises");
         self.write_whole(SETTINGS_FILE, &text)
@@ -546,6 +563,7 @@ mod tests {
                 network: Network::Testnet,
                 allow_mainnet_trading: false,
                 quick_sizes: QuickSizes::default(),
+                watcher_url: None,
             }
         );
         let on = Settings {
@@ -706,6 +724,56 @@ mod tests {
     }
 
     #[test]
+    fn a_watcher_address_is_remembered_and_an_older_file_has_none() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::at(dir.path());
+        std::fs::write(
+            dir.path().join(SETTINGS_FILE),
+            r#"{"v":1,"network":"testnet","mainnet_trading":true,"quick_sizes":[2000]}"#,
+        )
+        .unwrap();
+        let old = store.settings();
+        assert_eq!(old.watcher_url, None);
+        assert_eq!(old.network, Network::Testnet);
+
+        let settings = Settings {
+            watcher_url: Some(WatcherUrl::parse("http://127.0.0.1:8790").unwrap()),
+            ..old
+        };
+        store.save_settings(&settings).unwrap();
+        assert_eq!(store.settings(), settings);
+        let text = std::fs::read_to_string(dir.path().join(SETTINGS_FILE)).unwrap();
+        assert!(
+            text.contains(r#""watcher_url": "http://127.0.0.1:8790""#),
+            "{text}"
+        );
+
+        // Removing the watcher drops the field from the file.
+        store
+            .save_settings(&Settings {
+                watcher_url: None,
+                ..settings
+            })
+            .unwrap();
+        let text = std::fs::read_to_string(dir.path().join(SETTINGS_FILE)).unwrap();
+        assert!(!text.contains("watcher_url"), "{text}");
+    }
+
+    #[test]
+    fn a_stored_watcher_address_that_fails_the_check_is_dropped_alone() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::at(dir.path());
+        std::fs::write(
+            dir.path().join(SETTINGS_FILE),
+            r#"{"v":1,"network":"testnet","watcher_url":"http://203.0.113.5:8790"}"#,
+        )
+        .unwrap();
+        let settings = store.settings();
+        assert_eq!(settings.watcher_url, None);
+        assert_eq!(settings.network, Network::Testnet);
+    }
+
+    #[test]
     fn settings_without_quick_sizes_load_the_default_and_keep_the_rest() {
         let dir = tempfile::tempdir().unwrap();
         let store = Store::at(dir.path());
@@ -720,6 +788,7 @@ mod tests {
                 network: Network::Testnet,
                 allow_mainnet_trading: true,
                 quick_sizes: QuickSizes::default(),
+                watcher_url: None,
             }
         );
     }
@@ -760,6 +829,7 @@ mod tests {
             network: Network::Testnet,
             allow_mainnet_trading: false,
             quick_sizes: QuickSizes::check(&["20000", "2000"]).unwrap(),
+            watcher_url: None,
         };
         store.save_settings(&settings).unwrap();
         assert_eq!(store.settings(), settings);
@@ -783,6 +853,7 @@ mod tests {
                 network: Network::Testnet,
                 allow_mainnet_trading: true,
                 quick_sizes: QuickSizes::check(&["2000"]).unwrap(),
+                watcher_url: None,
             })
             .unwrap();
         let text = std::fs::read_to_string(dir.path().join(SETTINGS_FILE)).unwrap();

@@ -18,6 +18,9 @@ use crate::markets::Markets;
 use crate::portfolio::{Portfolio, PortfolioEvent};
 use crate::settings::{Settings, SettingsEvent};
 use crate::theme::Palette;
+use crate::watcher::WatcherSection;
+use crate::watcher_link::WatcherLink;
+use galata_desk_core::secrets::WATCHER_TOKEN_NAME;
 
 /// What is shown while an account is connected.
 #[derive(Clone, Copy, PartialEq, Debug)]
@@ -26,6 +29,8 @@ pub enum Section {
     Markets,
     Funding,
     History,
+    /// Offered only while a watcher is connected.
+    Watcher,
 }
 
 enum Screen {
@@ -52,6 +57,12 @@ pub struct Desk {
     /// The settings page, while it is open over the current screen. The
     /// screen underneath is kept, so closing settings returns to it as it was.
     settings: Option<(Entity<Settings>, Subscription)>,
+    /// The connection to galata-watcher: held while an account is connected
+    /// and a watcher is saved in settings, and never otherwise, so with
+    /// nothing saved no request goes to any watcher.
+    watcher: Option<Entity<WatcherLink>>,
+    /// The Watcher section, for as long as there is a connection to show.
+    watcher_section: Option<Entity<WatcherSection>>,
 }
 
 impl Desk {
@@ -65,7 +76,10 @@ impl Desk {
         let mut this = Self {
             screen,
             settings: None,
+            watcher: None,
+            watcher_section: None,
         };
+        this.reconnect_watcher(window, cx);
         #[cfg(feature = "shot")]
         if std::env::var("GALATA_DESK_SHOT_STATE")
             .unwrap_or_default()
@@ -87,9 +101,77 @@ impl Desk {
             SettingsEvent::Network(network) => this.set_network(*network, window, cx),
             SettingsEvent::MainnetTrading(allowed) => this.set_mainnet_trading(*allowed, cx),
             SettingsEvent::QuickSizes(list) => this.set_quick_sizes(list.clone(), cx),
+            SettingsEvent::Watcher(url) => this.set_watcher(url.clone(), window, cx),
             SettingsEvent::Done => this.close_settings(cx),
         });
+        let link = self.watcher.clone();
+        view.update(cx, |view, cx| view.set_link(link, cx));
         self.settings = Some((view, events));
+        cx.notify();
+    }
+
+    /// Connect to this watcher from now on, or to none, and remember it.
+    fn set_watcher(
+        &mut self,
+        url: Option<galata_desk_core::watcher::WatcherUrl>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        cx.global_mut::<Core>().watcher_url = url;
+        let core = Core::get(cx);
+        // A choice that could not be saved still applies until the app quits.
+        let _ = core.store.save_settings(&core.settings());
+        self.reconnect_watcher(window, cx);
+    }
+
+    /// Hold a connection to the saved watcher while an account is connected,
+    /// a new one each time this is called, and none otherwise; and hand it to
+    /// every view that shows the watcher.
+    fn reconnect_watcher(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let core = Core::get(cx);
+        let token = core.secrets.get(WATCHER_TOKEN_NAME).ok().flatten();
+        let (link, section) = match (&self.screen, core.watcher_url.clone(), token) {
+            (Screen::Connected { portfolio, .. }, Some(url), Some(token)) => {
+                let link = WatcherLink::start(url, token, cx);
+                let portfolio = portfolio.clone();
+                let section = {
+                    let link = link.clone();
+                    cx.new(|cx| WatcherSection::new(link, portfolio, window, cx))
+                };
+                (Some(link), Some(section))
+            }
+            _ => (None, None),
+        };
+        self.set_watcher_link(link, section, cx);
+    }
+
+    /// Hand `link` to every view that shows the watcher. Without one, the
+    /// Watcher section goes, and the window leaves it if it was shown.
+    fn set_watcher_link(
+        &mut self,
+        link: Option<Entity<WatcherLink>>,
+        section: Option<Entity<WatcherSection>>,
+        cx: &mut Context<Self>,
+    ) {
+        self.watcher = link.clone();
+        self.watcher_section = section;
+        if self.watcher_section.is_none()
+            && let Screen::Connected { section, .. } = &mut self.screen
+            && *section == Section::Watcher
+        {
+            *section = Section::Portfolio;
+        }
+        if let Some((settings, _)) = &self.settings {
+            let link = link.clone();
+            settings.update(cx, |view, cx| view.set_link(link, cx));
+        }
+        if let Screen::Connected {
+            markets: Some(markets),
+            ..
+        } = &self.screen
+        {
+            markets.update(cx, |view, cx| view.set_watcher(link, cx));
+        }
         cx.notify();
     }
 
@@ -144,6 +226,7 @@ impl Desk {
             && let Some(account) = Core::get(cx).store.account()
         {
             self.screen = Self::portfolio(account, window, cx);
+            self.reconnect_watcher(window, cx);
         }
         // Each network has its own API key.
         if let Some((settings, _)) = &self.settings {
@@ -232,7 +315,22 @@ impl Desk {
     }
 
     pub fn show(&mut self, to: Section, window: &mut Window, cx: &mut Context<Self>) {
+        if to == Section::Watcher && self.watcher_section.is_none() {
+            return;
+        }
+        let opening_markets = matches!(&self.screen, Screen::Connected { markets: None, .. })
+            && to == Section::Markets;
         Self::open_section(&mut self.screen, to, window, cx);
+        // A Markets view made just now learns of the watcher.
+        if opening_markets
+            && let Screen::Connected {
+                markets: Some(markets),
+                ..
+            } = &self.screen
+        {
+            let link = self.watcher.clone();
+            markets.update(cx, |view, cx| view.set_watcher(link, cx));
+        }
         cx.notify();
     }
 
@@ -240,7 +338,7 @@ impl Desk {
         self.screen = Screen::Connect(ConnectState::Idle {
             notice: notice.map(|n| n.to_string().into()),
         });
-        cx.notify();
+        self.set_watcher_link(None, None, cx);
     }
 
     /// Forget the account and go back to the connect screen. Dropping the
@@ -346,6 +444,7 @@ impl Desk {
                 let account = Account::proven_now(address);
                 let stored = Core::get(cx).store.remember(&account);
                 self.screen = Self::portfolio(account, window, cx);
+                self.reconnect_watcher(window, cx);
                 if let (Err(error), Screen::Connected { portfolio, .. }) = (stored, &self.screen) {
                     portfolio.update(cx, |view, cx| {
                         view.warn(
@@ -427,6 +526,10 @@ impl Render for Desk {
                 markets,
                 ..
             } => {
+                let mut names = vec!["Portfolio", "Markets", "Funding", "History"];
+                if self.watcher_section.is_some() {
+                    names.push("Watcher");
+                }
                 let switch = TabBar::new("sections")
                     .segmented()
                     .small()
@@ -435,17 +538,19 @@ impl Render for Desk {
                         Section::Markets => 1,
                         Section::Funding => 2,
                         Section::History => 3,
+                        Section::Watcher => 4,
                     })
                     .on_click(cx.listener(|this, ix: &usize, window, cx| {
                         let to = match *ix {
                             0 => Section::Portfolio,
                             1 => Section::Markets,
                             2 => Section::Funding,
-                            _ => Section::History,
+                            3 => Section::History,
+                            _ => Section::Watcher,
                         };
                         this.show(to, window, cx);
                     }))
-                    .children(["Portfolio", "Markets", "Funding", "History"]);
+                    .children(names);
                 let account = portfolio.update(cx, |view, cx| view.account_controls(cx));
                 // The current section says how fresh it is; the account is
                 // the same in both.
@@ -473,6 +578,10 @@ impl Render for Desk {
                     (Section::History, _) => (
                         portfolio.update(cx, |view, cx| view.freshness(cx)),
                         history.clone().into_any_element(),
+                    ),
+                    (Section::Watcher, _) if self.watcher_section.is_some() => (
+                        portfolio.update(cx, |view, cx| view.freshness(cx)),
+                        self.watcher_section.clone().unwrap().into_any_element(),
                     ),
                     _ => (
                         portfolio.update(cx, |view, cx| view.freshness(cx)),
@@ -550,6 +659,16 @@ impl Desk {
             Screen::Connected { markets, .. } => markets.clone(),
             Screen::Connect(_) => None,
         }
+    }
+
+    /// The connection to the watcher, while there is one.
+    pub fn watcher_link(&self) -> Option<Entity<WatcherLink>> {
+        self.watcher.clone()
+    }
+
+    /// The Watcher section, while a watcher is connected.
+    pub fn watcher_section(&self) -> Option<Entity<WatcherSection>> {
+        self.watcher_section.clone()
     }
 
     /// Which section is shown, when an account is connected.

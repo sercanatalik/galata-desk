@@ -31,6 +31,10 @@ pub fn api_key_name(network: Network) -> &'static str {
     }
 }
 
+/// The name galata-watcher's API token is kept under. One for all networks:
+/// a watcher watches one network of its own.
+pub const WATCHER_TOKEN_NAME: &str = "watcher-api-token";
+
 /// Secrets held in memory for the life of the process.
 #[derive(Default)]
 pub struct MemorySecrets(Mutex<HashMap<String, String>>);

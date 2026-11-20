@@ -25,7 +25,7 @@ use galata_desk_core::venue::Side;
 use gpui_kit::component::button::{Button, ButtonCustomVariant, ButtonVariants};
 use gpui_kit::component::chart::CandlestickChart;
 use gpui_kit::component::input::{Input, InputEvent, InputState};
-use gpui_kit::component::menu::{DropdownMenu, PopupMenuItem};
+use gpui_kit::component::menu::{ContextMenuExt, DropdownMenu, PopupMenu, PopupMenuItem};
 use gpui_kit::component::plot::scale::{Scale, ScaleBand};
 use gpui_kit::component::skeleton::Skeleton;
 use gpui_kit::component::tab::TabBar;
@@ -102,6 +102,17 @@ pub struct Markets {
     /// What each watched market is: company, kind, deployer, oracle.
     about: AboutBook,
     opened_at: Instant,
+    /// The window's connection to galata-watcher, while it has one: its
+    /// armed call levels are drawn on the chart, and new ones added from the
+    /// chart and the tiles.
+    watcher: Option<Entity<crate::watcher_link::WatcherLink>>,
+    _watcher_changes: Option<Subscription>,
+    /// Where the pointer is over the chart, for "Alert at <price>".
+    plot: PlotPointer,
+    /// Why the last call level added from Markets was not saved.
+    call_problem: Option<SharedString>,
+    /// The "Alert for <market>…" form, open under that market's tile.
+    tile_form: Option<(MarketId, Entity<crate::level_form::LevelForm>, Subscription)>,
     _watch: Task<()>,
     _subscriptions: Vec<Subscription>,
 }
@@ -219,6 +230,11 @@ impl Markets {
             warning: None,
             about: AboutBook::default(),
             opened_at: Instant::now(),
+            watcher: None,
+            _watcher_changes: None,
+            plot: PlotPointer::default(),
+            call_problem: None,
+            tile_form: None,
             _watch: watch,
             _subscriptions: subscriptions,
         };
@@ -228,6 +244,95 @@ impl Markets {
         this.feed
             .select(this.watchlist.as_ref().and_then(|w| w.selected().cloned()));
         this
+    }
+
+    /// Use this connection to the watcher, or none. The window calls this
+    /// whenever its connection changes.
+    pub fn set_watcher(
+        &mut self,
+        link: Option<Entity<crate::watcher_link::WatcherLink>>,
+        cx: &mut Context<Self>,
+    ) {
+        self._watcher_changes = link.as_ref().map(|l| cx.observe(l, |_, _, cx| cx.notify()));
+        self.watcher = link;
+        cx.notify();
+    }
+
+    /// The watcher's armed levels in `market`, and whether levels can be
+    /// added: only while it answers, is configured, and watches the network
+    /// shown here.
+    fn calls_in(&self, market: &MarketId, cx: &gpui_kit::App) -> (Vec<CallLevel>, bool) {
+        let Some(link) = &self.watcher else {
+            return (Vec::new(), false);
+        };
+        let snapshot = link.read(cx).snapshot();
+        let Some(config) = snapshot.config.config() else {
+            return (Vec::new(), false);
+        };
+        if config.network != Core::get(cx).network {
+            return (Vec::new(), false);
+        }
+        let levels = config
+            .armed_in(market.coin())
+            .map(|l| CallLevel {
+                price: l.price,
+                note: l.note.clone(),
+            })
+            .collect();
+        (levels, snapshot.editable().is_some())
+    }
+
+    /// Add an armed level in `market` at `price`, its direction from `last`.
+    pub fn add_call(
+        &mut self,
+        market: String,
+        price: Decimal,
+        last: Option<Decimal>,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(link) = self.watcher.clone() else {
+            return;
+        };
+        let adding = link.update(cx, |link, cx| {
+            link.add_level(market, price, None, None, last, cx)
+        });
+        self.call_problem = None;
+        cx.spawn(async move |this, cx| {
+            if let Err(why) = adding.await {
+                let _ = this.update(cx, |this, cx| {
+                    this.call_problem = Some(why.into());
+                    cx.notify();
+                });
+            }
+        })
+        .detach();
+    }
+
+    /// Open the "Alert for <market>…" form under `market`'s tile, its price
+    /// set to `last`. It closes when the level is saved or the user cancels.
+    pub fn open_tile_form(
+        &mut self,
+        market: MarketId,
+        last: Option<Decimal>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(link) = self.watcher.clone() else {
+            return;
+        };
+        let coin = market.coin().to_string();
+        let form = cx.new(|cx| {
+            crate::level_form::LevelForm::for_market("tile-alert", link, coin, last, window, cx)
+        });
+        let closing = cx.subscribe(
+            &form,
+            |this, _, _: &crate::level_form::LevelFormEvent, cx| {
+                this.tile_form = None;
+                cx.notify();
+            },
+        );
+        self.tile_form = Some((market, form, closing));
+        cx.notify();
     }
 
     /// Ask the venue what each watched market is, once per session. A main
@@ -1051,7 +1156,7 @@ impl Markets {
         let hover_market = market.clone();
         let click_market = market.clone();
         let key_market = market.clone();
-        div()
+        let tile_element = div()
             .id(("tile", ix))
             .relative()
             .h(px(TILE_HEIGHT))
@@ -1093,7 +1198,48 @@ impl Markets {
                     .bg(market_tile::background(self.colour, self.period, tile))
                     .child(body),
             )
-            .test_support()
+            // The "Alert for <market>…" form, over what lies below the tile.
+            .children(
+                self.tile_form
+                    .as_ref()
+                    .filter(|(m, _, _)| *m == market)
+                    .map(|(_, form, _)| {
+                        deferred(
+                            div()
+                                .id("tile-alert-form")
+                                .absolute()
+                                .top(px(TILE_HEIGHT + 6.))
+                                .left_0()
+                                .w(px(640.))
+                                .p_3()
+                                .rounded(px(8.))
+                                .border_1()
+                                .border_color(Palette::amber())
+                                .bg(Palette::panel())
+                                .shadow_lg()
+                                .child(form.clone())
+                                .test_support(),
+                        )
+                        .with_priority(2)
+                    }),
+            )
+            .test_support();
+        // Right-click: "Alert for <market>…", while the watcher can take one.
+        if !self.calls_in(&market, cx).1 {
+            return tile_element.into_any_element();
+        }
+        let markets = cx.entity().downgrade();
+        let last = tile.live.as_ref().map(|l| l.last);
+        let label = format!("Alert for {}\u{2026}", market.ticker());
+        tile_element
+            .context_menu(move |menu, _, _| {
+                let (markets, market, label) = (markets.clone(), market.clone(), label.clone());
+                menu.item(PopupMenuItem::new(label).on_click(move |_, window, cx| {
+                    let _ = markets.update(cx, |m, cx| {
+                        m.open_tile_form(market.clone(), last, window, cx)
+                    });
+                }))
+            })
             .into_any_element()
     }
 
@@ -1156,6 +1302,34 @@ impl Markets {
                 ),
                 _ => (Vec::new(), None),
             };
+            // The watcher's armed levels in this market, and the menu that
+            // adds one at the pointer.
+            let calls = {
+                let (levels, can_add) = self.calls_in(&market, cx);
+                let menu: Option<CallMenu> = can_add.then(|| {
+                    let plot = self.plot.clone();
+                    let markets = cx.entity().downgrade();
+                    let coin = market.coin().to_string();
+                    let last = tile.live.as_ref().map(|l| l.last);
+                    std::rc::Rc::new(
+                        move |menu: PopupMenu, _: &mut Window, _: &mut Context<PopupMenu>| {
+                            let Some(price) = plot.price() else {
+                                return menu;
+                            };
+                            let (markets, coin) = (markets.clone(), coin.clone());
+                            menu.item(
+                                PopupMenuItem::new(format!("Alert at {}", f::price(price)))
+                                    .on_click(move |_, _, cx| {
+                                        let _ = markets.update(cx, |m, cx| {
+                                            m.add_call(coin.clone(), price, last, cx)
+                                        });
+                                    }),
+                            )
+                        },
+                    ) as CallMenu
+                });
+                Calls { levels, menu }
+            };
             // The account's open orders in this market, as levels.
             let levels = self
                 .portfolio
@@ -1170,7 +1344,15 @@ impl Markets {
                     position.as_ref(),
                     (!tile.unavailable).then(|| self.trade_buttons(&market, cx)),
                 ))
-                .child(self.chart(tile, candles, &grouped, &levels, since, cx.reduce_motion()))
+                .child(self.chart(
+                    tile,
+                    candles,
+                    &grouped,
+                    &levels,
+                    calls,
+                    since,
+                    cx.reduce_motion(),
+                ))
                 .into_any_element()
         };
 
@@ -1403,12 +1585,14 @@ impl Markets {
     }
 
     /// The panel's right side: the market's candles over the period.
+    #[allow(clippy::too_many_arguments)]
     fn chart(
         &self,
         tile: &Tile,
         candles: Option<&[Candle]>,
         grouped: &[CandleFills],
         levels: &[OrderLevel],
+        calls: Calls,
         since: Option<u64>,
         // The system asks for reduced motion: placeholders hold still.
         still: bool,
@@ -1506,7 +1690,14 @@ impl Markets {
             }
             Some(candles) => (
                 "chart",
-                candle_chart(candles, tile.live.as_ref().map(|l| l.last), grouped, levels),
+                candle_chart(
+                    candles,
+                    tile.live.as_ref().map(|l| l.last),
+                    grouped,
+                    levels,
+                    calls,
+                    &self.plot,
+                ),
             ),
         };
         let drawn = state == "chart";
@@ -2068,6 +2259,178 @@ fn time_label(open_ms: u64, span_ms: u64) -> String {
 /// the lowest value at the bottom edge and the highest [`PLOT_TOP_INSET`]
 /// below the top. The price labels and the last-price line are placed by the
 /// same rule so they sit on the candles.
+/// The menu that adds a call level at the pointer.
+type CallMenu = std::rc::Rc<dyn Fn(PopupMenu, &mut Window, &mut Context<PopupMenu>) -> PopupMenu>;
+
+/// A watcher call level, as the chart draws it.
+#[derive(Clone, Debug, PartialEq)]
+struct CallLevel {
+    price: Decimal,
+    note: Option<String>,
+}
+
+/// What the chart shows of the watcher.
+struct Calls {
+    levels: Vec<CallLevel>,
+    /// Offered only while a level can be added.
+    menu: Option<CallMenu>,
+}
+
+/// Where the pointer is over the plot, and the plot's price range, kept as
+/// the chart draws and the pointer moves, for "Alert at <price>".
+#[derive(Clone, Default)]
+struct PlotPointer {
+    /// From the plot's top.
+    y: std::rc::Rc<std::cell::Cell<Option<f32>>>,
+    bounds: std::rc::Rc<std::cell::Cell<Option<gpui_kit::Bounds<gpui_kit::Pixels>>>>,
+    /// Low, high, and a price at the venue's precision.
+    range: std::rc::Rc<std::cell::Cell<Option<(f64, f64, Decimal)>>>,
+}
+
+impl PlotPointer {
+    fn price(&self) -> Option<Decimal> {
+        let (low, high, like) = self.range.get()?;
+        Some(round_price(price_at(self.y.get()?, low, high), like))
+    }
+
+    fn track(&self, position: gpui_kit::Point<gpui_kit::Pixels>) {
+        if let Some(b) = self.bounds.get() {
+            self.y.set(Some((position.y - b.origin.y) / px(1.)));
+        }
+    }
+}
+
+/// The plot, recording where the pointer is, with the call level menu when
+/// there is one.
+fn plot_area(
+    plot: gpui_kit::Stateful<gpui_kit::Div>,
+    pointer: &PlotPointer,
+    menu: Option<CallMenu>,
+) -> AnyElement {
+    let (on_move, on_down, bounds) = (pointer.clone(), pointer.clone(), pointer.bounds.clone());
+    let plot = plot
+        .child(
+            gpui_kit::canvas(move |b, _, _| bounds.set(Some(b)), |_, _, _, _| {})
+                .absolute()
+                .top_0()
+                .left_0()
+                .size_full(),
+        )
+        .on_mouse_move(move |e: &gpui_kit::MouseMoveEvent, _, _| on_move.track(e.position))
+        .on_mouse_down(
+            gpui_kit::MouseButton::Right,
+            move |e: &gpui_kit::MouseDownEvent, _, _| on_down.track(e.position),
+        )
+        .test_support();
+    match menu {
+        Some(menu) => plot
+            .context_menu(move |m, window, cx| menu(m, window, cx))
+            .into_any_element(),
+        None => plot.into_any_element(),
+    }
+}
+
+/// The price at `y` from the plot's top: the inverse of [`plot_y`].
+fn price_at(y: f32, low: f64, high: f64) -> f64 {
+    let ratio = ((PLOT_HEIGHT - y) / (PLOT_HEIGHT - PLOT_TOP_INSET)).clamp(0., 1.) as f64;
+    low + ratio * (high - low)
+}
+
+/// `value` at the venue's price precision: five significant figures, and no
+/// more decimals than `like`, a price the venue quoted for the market.
+fn round_price(value: f64, like: Decimal) -> Decimal {
+    let d = Decimal::try_from(value).unwrap_or_default();
+    d.round_sf(5)
+        .unwrap_or(d)
+        .round_dp(like.scale())
+        .normalize()
+}
+
+/// The watcher's armed levels, as dashed amber lines tagged "Alert", and a
+/// tag at the edge for those above or below the candles.
+fn call_lines(calls: &[CallLevel], low: f64, high: f64, like: Decimal) -> Vec<AnyElement> {
+    let f64_of = |d: Decimal| d.to_f64().unwrap_or_default();
+    let tag = |text: String| {
+        div()
+            .absolute()
+            .left(px(6.))
+            .px(px(5.))
+            .rounded(px(4.))
+            .bg(Palette::amber().opacity(0.14))
+            .border_1()
+            .border_color(Palette::amber().opacity(0.4))
+            .text_size(px(10.5))
+            .font_weight(gpui_kit::FontWeight::SEMIBOLD)
+            .text_color(Palette::amber())
+            .whitespace_nowrap()
+            .child(text)
+    };
+    let label = |c: &CallLevel| match &c.note {
+        Some(note) => format!("Alert {} \u{b7} {note}", f::price_like(c.price, like)),
+        None => format!("Alert {}", f::price_like(c.price, like)),
+    };
+    let mut out = Vec::new();
+    let (mut above, mut below) = (Vec::new(), Vec::new());
+    for (i, c) in calls.iter().enumerate() {
+        let v = f64_of(c.price);
+        if v > high {
+            above.push(c);
+        } else if v < low {
+            below.push(c);
+        } else {
+            let y = plot_y(v, low, high);
+            out.push(
+                div()
+                    .id(("call-line", i))
+                    .absolute()
+                    .left_0()
+                    .right_0()
+                    .top(px(y))
+                    .h(px(1.))
+                    .overflow_hidden()
+                    .flex()
+                    .gap(px(4.))
+                    .children((0..240).map(|_| {
+                        div()
+                            .flex_shrink_0()
+                            .w(px(6.))
+                            .h(px(1.))
+                            .bg(Palette::amber().opacity(0.85))
+                    }))
+                    .child(tag(label(c)).bottom(px(2.)))
+                    .test_support()
+                    .into_any_element(),
+            );
+        }
+    }
+    let edge = |side: &[&CallLevel], up: bool| -> Option<AnyElement> {
+        let nearest = if up {
+            side.iter().min_by_key(|c| c.price)
+        } else {
+            side.iter().max_by_key(|c| c.price)
+        }?;
+        let text = if side.len() == 1 {
+            format!(
+                "{} {}",
+                if up { "\u{25b2}" } else { "\u{25bc}" },
+                label(nearest)
+            )
+        } else {
+            format!(
+                "{} {} alerts",
+                if up { "\u{25b2}" } else { "\u{25bc}" },
+                side.len()
+            )
+        };
+        let t = tag(text).id(if up { "call-above" } else { "call-below" });
+        let t = if up { t.top(px(2.)) } else { t.bottom(px(2.)) };
+        Some(t.test_support().into_any_element())
+    };
+    out.extend(edge(&above, true));
+    out.extend(edge(&below, false));
+    out
+}
+
 fn plot_y(value: f64, low: f64, high: f64) -> f32 {
     if high <= low {
         return PLOT_HEIGHT / 2.;
@@ -2083,6 +2446,8 @@ fn candle_chart(
     last: Option<Decimal>,
     grouped: &[CandleFills],
     levels: &[OrderLevel],
+    calls: Calls,
+    plot: &PlotPointer,
 ) -> AnyElement {
     let span_ms = match (candles.first(), candles.last()) {
         (Some(first), Some(last)) => last.open_ms.saturating_sub(first.open_ms),
@@ -2116,6 +2481,7 @@ fn candle_chart(
     // Prices are labelled at the precision the venue quotes this market in:
     // a closed candle's, since the live last price can be a finer mid.
     let like = candles.first().map(|c| c.open).unwrap_or(low);
+    plot.range.set(Some((low_f, high_f, like)));
 
     let chart = CandlestickChart::new(bars)
         .id("candles")
@@ -2370,13 +2736,17 @@ fn candle_chart(
             h_flex()
                 .items_start()
                 .gap_2()
-                .child(
+                .child(plot_area(
                     div()
+                        .id("chart-plot")
                         .relative()
                         .flex_1()
                         .min_w_0()
                         .h(px(PLOT_HEIGHT))
                         .child(chart)
+                        // The watcher's call levels, under everything the
+                        // account did.
+                        .children(call_lines(&calls.levels, low_f, high_f, like))
                         // The account's open orders, beneath the fills and
                         // the last price.
                         .children(order_lines)
@@ -2393,7 +2763,9 @@ fn candle_chart(
                                 .h(px(1.))
                                 .bg(Palette::amber().opacity(0.75))
                         })),
-                )
+                    plot,
+                    calls.menu,
+                ))
                 .child(
                     div()
                         .relative()
@@ -2479,5 +2851,50 @@ impl Markets {
             input.set_value(text.to_string(), window, cx)
         });
         cx.notify();
+    }
+}
+
+#[cfg(test)]
+impl Markets {
+    /// The "Alert for <market>…" form, while it is open.
+    pub fn tile_form(&self) -> Option<Entity<crate::level_form::LevelForm>> {
+        self.tile_form.as_ref().map(|(_, f, _)| f.clone())
+    }
+}
+
+#[cfg(test)]
+mod call_level_tests {
+    use super::*;
+
+    #[test]
+    fn the_pointer_height_inverts_the_price_scale() {
+        let (low, high) = (99., 141.);
+        for price in [99., 120., 130., 141.] {
+            let y = plot_y(price, low, high);
+            assert!((price_at(y, low, high) - price).abs() < 1e-3, "{price}");
+        }
+        // Above or below the plot clamps to its range.
+        assert_eq!(price_at(-50., low, high), high);
+        assert_eq!(price_at(PLOT_HEIGHT + 50., low, high), low);
+    }
+
+    #[test]
+    fn a_pointer_price_is_rounded_to_the_venues_precision() {
+        // Whole-number quotes: no decimals.
+        assert_eq!(round_price(130.008, Decimal::from(100)), Decimal::from(130));
+        // Five significant figures.
+        assert_eq!(
+            round_price(62_512.34, Decimal::new(625_001, 1)),
+            Decimal::from(62_512)
+        );
+        assert_eq!(
+            round_price(1.234_567, Decimal::new(12_345, 4)),
+            Decimal::new(12_346, 4)
+        );
+        // No more decimals than the market quotes.
+        assert_eq!(
+            round_price(0.123_456, Decimal::new(123, 3)),
+            Decimal::new(123, 3)
+        );
     }
 }

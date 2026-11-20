@@ -83,6 +83,7 @@ fn open_at(
             network: store_network,
             allow_mainnet_trading: stored.allow_mainnet_trading,
             quick_sizes: stored.quick_sizes,
+            watcher_url: stored.watcher_url,
             // Nothing listens here: every venue request fails at once,
             // whichever network is chosen.
             info_override: Some("http://127.0.0.1:9/info".into()),
@@ -4320,6 +4321,7 @@ fn quick_sizes_are_remembered_across_launches(cx: &mut TestAppContext) {
     Store::at(dir.path())
         .save_settings(&galata_desk_core::store::Settings {
             quick_sizes: QuickSizes::check(&["2000", "20000"]).unwrap(),
+            watcher_url: None,
             ..Default::default()
         })
         .unwrap();
@@ -4627,6 +4629,8 @@ fn the_ticket_offers_the_quick_sizes_chosen_in_settings(cx: &mut TestAppContext)
 }
 
 // ---- The History section -------------------------------------------------
+
+mod watcher;
 
 mod history_section {
     use super::*;

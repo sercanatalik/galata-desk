@@ -84,6 +84,11 @@ A heatmap of the markets you watch, up to 40.
 - Selecting a tile opens a panel with that market's details and a
   candlestick chart. Your own fills are marked on it: **B** where you bought,
   **S** where you sold.
+- With a watcher connected (see **Watcher** below), its armed call levels
+  are drawn on the chart as dashed amber lines tagged **Alert**.
+  Right-clicking the chart offers **Alert at** the price under the pointer,
+  and right-clicking a tile offers **Alert for** that market, with the price
+  set to its last price.
 
 ### Funding
 
@@ -109,6 +114,32 @@ totals for what is listed and **Export CSV**.
 Hyperliquid keeps an account's latest 10,000 fills and 2,000 order updates.
 When the period reaches further back than that, the tab says from when its
 rows are shown.
+
+### Watcher
+
+Shown once [galata-watcher](https://github.com/sercanatalik/galata-watcher)
+is connected in Settings. The watcher sends Telegram alerts for the account
+while the desk is closed. The desk only shows and edits what it alerts on.
+It never sends an alert itself.
+
+- **Health**: when the watcher last checked the account, its last error, and
+  which account and network it watches. A warning shows once it hasn't
+  checked for three minutes.
+- **Call levels**: add, edit, delete and re-arm. A new level points away from
+  the last price ("above" or "below") unless you choose. A level fires once,
+  then waits to be re-armed.
+- **Stop alerts**: take-profit and stop-loss alerts, on or off per ticker. A
+  ticker with no setting is on.
+- **Near liquidation**: the distance, from 2% to 50%. Liquidation alerts
+  can't be switched off.
+- **Alert history**: what the watcher sent, newest first, marked late or not
+  delivered where that applies.
+
+Each change is saved with the configuration version it was based on. If the
+configuration changed elsewhere in the meantime, nothing is overwritten: the
+section shows the newer one and says the change wasn't saved. While the
+watcher can't be reached, the section shows what it last read, marked stale,
+and offers no edits.
 
 ### Footer
 
@@ -222,10 +253,17 @@ address has no portfolio of its own.
   as you type once every amount is valid. Until then the field says what is
   wrong and the last valid list stays in use. **Reset** restores $5k, $10k
   and $25k.
+- **Watcher**: galata-watcher's address and API token. With the watcher
+  running on this Mac, the address is `http://127.0.0.1:8790` and the token
+  is in `galata-watcher/var/secrets/api/api_token`. Plain `http://` is
+  accepted only for this Mac, a home network or Tailscale; anything else
+  must be `https://`. The token is kept in the Keychain and never shown
+  again. **Test connection** says whether the watcher answers and what it
+  watches, and **Watch this account** points it at the connected account.
 
 Other state is in `~/Library/Application Support/galata-desk/`:
 `account.json` (the connected address), `watchlist.json`, `settings.json` (network,
-mainnet switch, quick sizes), and
+mainnet switch, quick sizes, the watcher's address), and
 an optional `config.toml`. No key or seed phrase is ever written there.
 
 **Phone wallets** need a free WalletConnect project id from
@@ -325,7 +363,7 @@ built it.
   position in one step, trailing stops, and transfers.
 - In History: interest, TWAP and Chase histories, and links to a block
   explorer.
-- Spot markets in the Markets section, and alerts.
+- Spot markets in the Markets section.
 - Windows and Linux.
 - Smart-contract wallets, which cannot prove ownership by signature.
 

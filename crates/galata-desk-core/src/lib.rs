@@ -17,4 +17,5 @@ pub mod secrets;
 pub mod store;
 pub mod trade;
 pub mod venue;
+pub mod watcher;
 pub use rust_decimal;

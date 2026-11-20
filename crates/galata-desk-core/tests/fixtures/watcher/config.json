@@ -1,0 +1,34 @@
+{
+  "address": "0x00000000000000000000000000000000000000aa",
+  "digest": {
+    "time": "07:00",
+    "zone": "Europe/Istanbul"
+  },
+  "levels": [
+    {
+      "direction": "below",
+      "fired_at": 1795127520000,
+      "generation": 0,
+      "id": "btc-support",
+      "market": "BTC",
+      "note": "weekly support",
+      "price": "58000",
+      "state": "fired"
+    },
+    {
+      "direction": "above",
+      "generation": 0,
+      "id": "xyz:NVDA-above-210",
+      "market": "xyz:NVDA",
+      "price": "210",
+      "state": "armed"
+    }
+  ],
+  "near_liquidation_pct": "15",
+  "network": "mainnet",
+  "stop_alerts": {
+    "SOL": false
+  },
+  "telegram_chat": "123456789",
+  "version": 1
+}
