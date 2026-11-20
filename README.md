@@ -17,7 +17,7 @@ window.**
 You connect by signing a message in your browser wallet. Nothing is signed
 for trading unless you save an API key and confirm an action.
 
-> **Status: 0.x, macOS only.**
+> **Status: 0.x, macOS only.** Full documentation: <https://sercanatalik.github.io/galata-desk/>
 
 Part of the Galata trading framework, alongside
 [galata-datawatch](https://github.com/sercanatalik/galata-datawatch),

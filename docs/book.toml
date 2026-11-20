@@ -1,0 +1,14 @@
+[book]
+title = "galata-desk"
+description = "A native macOS desktop for one Hyperliquid account."
+authors = ["Sercan Atalik"]
+language = "en"
+src = "src"
+
+[output.html]
+git-repository-url = "https://github.com/sercanatalik/galata-desk"
+edit-url-template = "https://github.com/sercanatalik/galata-desk/edit/main/docs/{path}"
+site-url = "/galata-desk/"
+default-theme = "navy"
+preferred-dark-theme = "navy"
+no-section-label = true
