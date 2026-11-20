@@ -13,6 +13,7 @@ use std::pin::Pin;
 use std::rc::Rc;
 use std::sync::Arc;
 
+use galata_desk_core::market::MarketId;
 use galata_desk_core::trade::rules::{self, Checked, Current, Rule};
 use galata_desk_core::trade::{
     Answer, Holding, Kept, Level, NewOrder, Outcome, Pricing, Standing, Target, TpslNow,
@@ -385,8 +386,9 @@ impl Trading for Staged {
 /// What is being asked of the user before anything is sent.
 pub(super) enum Dialog {
     Cancel(OrderRow),
-    /// The orders it was opened with: exactly these are cancelled.
-    CancelAll(Vec<OrderRow>),
+    /// The orders it was opened with: exactly these are cancelled. With a
+    /// market's name, they are that market's orders only.
+    CancelAll(Vec<OrderRow>, Option<String>),
     Amend {
         order: OrderRow,
         price: Entity<InputState>,
@@ -597,6 +599,61 @@ impl Portfolio {
         self.actions.availability.is_ok() && self.actions.pending.is_none()
     }
 
+    /// Open the cancel confirmation for one order, as its row's Cancel does.
+    pub fn open_cancel(&mut self, oid: u64, window: &mut Window, cx: &mut Context<Self>) {
+        self.press("cancel-order", oid, window, cx);
+    }
+
+    /// The listed orders in `market` that can be acted on.
+    pub fn market_orders(&self, market: &MarketId) -> Vec<OrderRow> {
+        self.cancellable()
+            .into_iter()
+            .filter(|o| o.market == market.ticker() && o.dex == market.dex())
+            .collect()
+    }
+
+    /// Open the confirmation that cancels every listed order in `market`,
+    /// and none in any other.
+    pub fn open_cancel_market(
+        &mut self,
+        market: &MarketId,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if !self.can_act() {
+            return;
+        }
+        let orders = self.market_orders(market);
+        if orders.is_empty() {
+            return;
+        }
+        let name = if market.dex().is_empty() {
+            market.ticker().to_string()
+        } else {
+            format!("{} ({})", market.ticker(), market.dex())
+        };
+        self.open(Dialog::CancelAll(orders, Some(name)), window, cx);
+    }
+
+    /// Whether order and position actions can be used now: they are
+    /// available and none is with the venue.
+    pub fn can_act_now(&self) -> bool {
+        self.can_act()
+    }
+
+    /// Why order actions (or, with `positions`, position actions) cannot be
+    /// used, as a heading and a sentence. `None` while they are available.
+    pub fn actions_blocked(&self, positions: bool) -> Option<(String, String)> {
+        let why = self.actions.availability.as_ref().err()?;
+        let acting = if positions {
+            Acting::Positions
+        } else {
+            Acting::Orders
+        };
+        let (heading, sentence, _) = explain(why, acting);
+        Some((heading, sentence))
+    }
+
     /// The Amend and Cancel buttons of one order's row.
     pub(super) fn order_buttons(&self, o: &OrderRow) -> Cell {
         let doing = self
@@ -702,7 +759,7 @@ impl Portfolio {
         }
         let orders = self.cancellable();
         if !orders.is_empty() {
-            self.open(Dialog::CancelAll(orders), window, cx);
+            self.open(Dialog::CancelAll(orders, None), window, cx);
         }
     }
 
@@ -772,7 +829,7 @@ impl Portfolio {
                     move |answer| report_cancel(&order, answer),
                 );
             }
-            Dialog::CancelAll(orders) => {
+            Dialog::CancelAll(orders, _) => {
                 let reply = self
                     .actions
                     .trading
@@ -1033,13 +1090,9 @@ impl Portfolio {
                     .child(go_button("Cancel order".into(), true, cx))
                     .into_any_element(),
             ),
-            Dialog::CancelAll(orders) => (
+            Dialog::CancelAll(orders, market) => (
                 "cancel-all-dialog",
-                if orders.len() == 1 {
-                    "Cancel the 1 open order?".into()
-                } else {
-                    format!("Cancel all {} open orders?", orders.len())
-                },
+                cancel_all_title(orders.len(), market.as_deref()),
                 v_flex()
                     .gap_3()
                     .child(listing(
@@ -1050,9 +1103,10 @@ impl Portfolio {
                         ("Network", network_badge(network)),
                         ("Signed by", signer()),
                     ]))
-                    .child(note(
-                        "These are the orders listed now, in every market. Any that fill first are refused one by one; the rest are still cancelled.",
-                    ))
+                    .child(note(match market {
+                        None => "These are the orders listed now, in every market. Any that fill first are refused one by one; the rest are still cancelled.".to_string(),
+                        Some(m) => format!("These are the {m} orders listed now; orders in other markets are not touched. Any that fill first are refused one by one; the rest are still cancelled."),
+                    }))
                     .into_any_element(),
                 h_flex()
                     .gap_2()
@@ -1316,6 +1370,16 @@ pub(super) fn signer(wallet: Option<&str>) -> AnyElement {
 }
 
 /// A muted sentence under a dialog's facts.
+/// The Cancel all confirmation's title: every market's orders, or one's.
+fn cancel_all_title(count: usize, market: Option<&str>) -> String {
+    match (market, count) {
+        (None, 1) => "Cancel the 1 open order?".into(),
+        (None, n) => format!("Cancel all {n} open orders?"),
+        (Some(m), 1) => format!("Cancel the 1 open {m} order?"),
+        (Some(m), n) => format!("Cancel all {n} open {m} orders?"),
+    }
+}
+
 pub(super) fn note(text: impl Into<SharedString>) -> AnyElement {
     div()
         .text_size(px(12.5))
@@ -1528,11 +1592,22 @@ impl Portfolio {
         })
     }
 
+    /// The open Cancel all confirmation's title.
+    pub fn cancel_all_heading(&self) -> Option<String> {
+        match &self.actions.dialog {
+            Some(Dialog::CancelAll(orders, market)) => {
+                Some(cancel_all_title(orders.len(), market.as_deref()))
+            }
+            _ => None,
+        }
+    }
+
     /// Which dialog is open: `cancel`, `cancel-all` or `amend`.
     pub fn open_dialog(&self) -> Option<&'static str> {
         self.actions.dialog.as_ref().map(|d| match d {
             Dialog::Cancel(_) => "cancel",
-            Dialog::CancelAll(_) => "cancel-all",
+            Dialog::CancelAll(_, None) => "cancel-all",
+            Dialog::CancelAll(_, Some(_)) => "cancel-market",
             Dialog::Amend { .. } => "amend",
             Dialog::Position(d) => d.name(),
             Dialog::Ticket(_) => "ticket",

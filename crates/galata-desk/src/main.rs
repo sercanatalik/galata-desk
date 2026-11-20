@@ -7,6 +7,7 @@ mod grid;
 mod history;
 mod level_form;
 mod market_about;
+mod market_position;
 mod market_tile;
 mod markets;
 mod portfolio;

@@ -24,6 +24,7 @@ use galata_desk_core::venue::MarginMode;
 
 use crate::Core;
 use crate::desk::{Desk, Section};
+use crate::market_position;
 use crate::markets::Markets;
 
 const ADDRESS: &str = "0x010461c14e146ac35fe42271bdc1134ee31c703a";
@@ -677,10 +678,13 @@ fn a_remembered_watchlist_is_shown_as_it_was_left(cx: &mut TestAppContext) {
 }
 
 #[gpui_kit::test]
-fn no_control_in_the_markets_section_trades(cx: &mut TestAppContext) {
+fn with_nothing_held_the_ticket_is_the_markets_sections_only_trading_control(
+    cx: &mut TestAppContext,
+) {
     let (window, desk, _dir) = open_with(cx, Some(&["BTC", "ETH"]));
     let markets = go_to_markets(window, &desk, cx);
     cx.update_window(window.into(), |_, window, cx| {
+        give_account(&desk, Some(vec![]), None, cx);
         markets.update(cx, |view, cx| view.focus_market("BTC", window, cx));
         window.render_frame(cx);
         for forbidden in [
@@ -689,15 +693,163 @@ fn no_control_in_the_markets_section_trades(cx: &mut TestAppContext) {
         ] {
             assert!(
                 window.find_all_by_label(forbidden).is_empty(),
-                "a `{forbidden}` control is in a read-only section"
+                "a `{forbidden}` control is in the Markets section"
             );
         }
+        // Without a position or orders, the position panel offers nothing.
+        for absent in [
+            "Close BTC position",
+            "Set TP / SL for BTC",
+            "Cancel all BTC orders",
+        ] {
+            assert!(window.try_find_by_label(absent).is_none(), "{absent}");
+        }
+        // The ticket's two buttons are there.
+        assert!(window.try_find_by_label("Buy BTC").is_some());
+        assert!(window.try_find_by_label("Sell BTC").is_some());
         // Activating a tile does nothing but focus it.
         window.click(("tile", 0usize), cx);
         window.press("enter", cx);
         window.render_frame(cx);
         assert_eq!(markets.read(cx).watched(), ["BTC", "ETH"]);
         assert_eq!(desk.read(cx).section(), Some(Section::Markets));
+    })
+    .unwrap();
+}
+
+#[gpui_kit::test]
+fn a_held_market_adds_only_the_position_panels_reducing_controls(cx: &mut TestAppContext) {
+    let staged = Rc::new(Staged::new(Ok(())));
+    let (window, desk, _dir) = open_with(cx, Some(&["xyz:NVDA", "BTC"]));
+    let markets = go_to_markets(window, &desk, cx);
+    let portfolio = cx
+        .update_window(window.into(), |_, window, cx| {
+            let portfolio = desk.read(cx).portfolio_view().unwrap();
+            portfolio.update(cx, |p, cx| {
+                p.use_trading(staged.clone());
+                p.set_orders(vec![level(501, Tpsl::Tp, "160")], cx);
+                p.set_positions(vec![long_nvda()], cx);
+            });
+            markets.update(cx, |view, cx| view.focus_market("xyz:NVDA", window, cx));
+            markets.update(cx, |_, cx| cx.notify());
+            window.render_frame(cx);
+            portfolio
+        })
+        .unwrap();
+    click(cx, window, "orders-header");
+    cx.update_window(window.into(), |_, window, _| {
+        for present in [
+            "Close NVDA position",
+            "Set TP / SL for NVDA",
+            "Cancel all NVDA orders",
+            "Buy NVDA",
+            "Sell NVDA",
+        ] {
+            assert!(window.try_find_by_label(present).is_some(), "{present}");
+        }
+        // Nothing adds to the position or reverses it but the ticket.
+        for forbidden in ["Add", "Increase", "Reverse", "Flip", "Long", "Short"] {
+            assert!(
+                window.find_all_by_label(forbidden).is_empty(),
+                "{forbidden}"
+            );
+        }
+    })
+    .unwrap();
+    // Each opens a confirmation; nothing is sent without it.
+    click(cx, window, "position-close");
+    cx.update_window(window.into(), |_, _, cx| {
+        assert_eq!(portfolio.read(cx).open_dialog(), Some("close-market"));
+    })
+    .unwrap();
+    click(cx, window, "dialog-keep");
+    click(cx, window, "position-tpsl");
+    cx.update_window(window.into(), |_, _, cx| {
+        assert_eq!(portfolio.read(cx).open_dialog(), Some("tpsl"));
+    })
+    .unwrap();
+    click(cx, window, "dialog-keep");
+    assert!(staged.closes.borrow().is_empty());
+    assert!(staged.cancels.borrow().is_empty());
+}
+
+#[gpui_kit::test]
+fn the_panel_is_detail_then_chart_then_position_and_the_detail_has_no_account_figures(
+    cx: &mut TestAppContext,
+) {
+    let (window, desk, _dir) = open_with(cx, Some(&["BTC", "ETH"]));
+    let markets = go_to_markets(window, &desk, cx);
+    cx.update_window(window.into(), |_, window, cx| {
+        markets.update(cx, |view, cx| {
+            view.set_snapshot(charted("BTC", &["BTC", "ETH"], 40), cx)
+        });
+        give_account(&desk, Some(vec![position("BTC", "", 61_619)]), None, cx);
+        markets.update(cx, |view, cx| view.focus_market("BTC", window, cx));
+        markets.update(cx, |_, cx| cx.notify());
+        window.render_frame(cx);
+
+        let detail = window.find("market-detail").bounds();
+        let plot = window.find("chart-plot").bounds();
+        let axis = window.find("chart-price-axis").bounds();
+        let column = window.find("position-panel").bounds();
+        assert!(detail.right() <= plot.left(), "{detail:?} {plot:?}");
+        assert!(axis.right() <= column.left(), "{axis:?} {column:?}");
+
+        // The size is the position panel's, not the detail's.
+        let size = window.find("position-size").bounds();
+        assert!(column.contains(&size.center()), "{size:?} {column:?}");
+        assert!(!detail.contains(&size.center()));
+        let model = markets.read(cx).position_panel().unwrap();
+        let market_position::Holding::Held(held) = model.holding else {
+            panic!("BTC is held")
+        };
+        assert_eq!(held.size, "+1 BTC");
+    })
+    .unwrap();
+}
+
+#[gpui_kit::test]
+fn at_the_smallest_window_the_three_columns_and_the_axes_all_show(cx: &mut TestAppContext) {
+    let smallest = size(px(crate::MIN_WINDOW_WIDTH), px(crate::MIN_WINDOW_HEIGHT));
+    let (window, desk, dir) = open_sized(cx, true, smallest);
+    let coins = ["BTC", "ETH", "SOL", "HYPE", "DOGE"];
+    Store::at(dir.path())
+        .save_watchlist(&watchlist(&coins))
+        .unwrap();
+    let markets = go_to_markets(window, &desk, cx);
+    cx.update_window(window.into(), |_, window, cx| {
+        let mut snapshot = charted("BTC", &coins, 40);
+        snapshot.tiles = priced_snapshot(&coins).tiles;
+        markets.update(cx, |view, cx| view.set_snapshot(snapshot, cx));
+        give_account(&desk, Some(vec![position("BTC", "", 1_000)]), None, cx);
+        markets.update(cx, |view, cx| view.focus_market("BTC", window, cx));
+        markets.update(cx, |_, cx| cx.notify());
+        window.render_frame(cx);
+
+        let panel = window.find("market-panel").bounds();
+        let detail = window.find("market-detail").bounds();
+        let plot = window.find("chart-plot").bounds();
+        let axis = window.find("chart-price-axis").bounds();
+        let times = window.find("chart-time-axis").bounds();
+        let column = window.find("position-panel").bounds();
+        let width = px(crate::MIN_WINDOW_WIDTH);
+        assert!(column.right() <= width && column.right() <= panel.right());
+        assert!(detail.left() >= panel.left());
+        assert!(
+            axis.right() <= column.left(),
+            "the price axis is cut: {axis:?} {column:?}"
+        );
+        assert!(
+            times.bottom() <= panel.bottom(),
+            "the time axis is cut: {times:?} {panel:?}"
+        );
+        assert!(
+            plot.size.width >= px(300.),
+            "the chart is too narrow: {plot:?}"
+        );
+        let tiles = window.find("tiles").bounds();
+        let first = window.find(("tile", 0usize)).bounds();
+        assert!(first.bottom() <= tiles.bottom(), "no whole row of tiles");
     })
     .unwrap();
 }
@@ -5291,4 +5443,607 @@ mod history_section {
         })
         .unwrap();
     }
+}
+
+// ---------------------------------------------------------------------------
+// The Markets position panel opens the Portfolio's own dialogs.
+
+#[gpui_kit::test]
+fn the_position_panel_opens_the_same_close_dialog_as_the_positions_tab(cx: &mut TestAppContext) {
+    let staged = Rc::new(Staged::new(Ok(())));
+    let (window, _desk, view, _dir) = positions_tab(cx, &staged, vec![long_nvda()], vec![]);
+
+    press_position(cx, window, &view, "close-market", 110_000);
+    let from_tab = cx
+        .update_window(window.into(), |_, _, cx| view.read(cx).close_state(cx))
+        .unwrap();
+    click(cx, window, "dialog-keep");
+
+    let nvda = MarketId::from_parts("xyz", "NVDA");
+    on_view(cx, window, &view, |v, w, cx| v.open_close(&nvda, w, cx));
+    cx.update_window(window.into(), |_, _, cx| {
+        let view = view.read(cx);
+        assert_eq!(view.open_dialog(), Some("close-market"));
+        assert_eq!(view.close_state(cx), from_tab);
+        // The whole position to start with.
+        assert_eq!(view.close_state(cx).unwrap().1, "10");
+    })
+    .unwrap();
+}
+
+#[gpui_kit::test]
+fn the_position_panel_opens_tpsl_and_cancel_as_the_tabs_do(cx: &mut TestAppContext) {
+    let staged = Rc::new(Staged::new(Ok(())));
+    let orders = vec![
+        level(501, Tpsl::Tp, "160"),
+        a_limit(1, "NVDA", Side::Buy, "12", "154.20"),
+    ];
+    let (window, _desk, view, _dir) = positions_tab(cx, &staged, vec![long_nvda()], orders);
+    let nvda = MarketId::from_parts("xyz", "NVDA");
+
+    on_view(cx, window, &view, |v, w, cx| v.open_tpsl(&nvda, w, cx));
+    cx.update_window(window.into(), |_, _, cx| {
+        assert_eq!(view.read(cx).open_dialog(), Some("tpsl"));
+    })
+    .unwrap();
+    click(cx, window, "dialog-keep");
+
+    on_view(cx, window, &view, |v, w, cx| v.open_cancel(1, w, cx));
+    cx.update_window(window.into(), |_, _, cx| {
+        assert_eq!(view.read(cx).open_dialog(), Some("cancel"));
+    })
+    .unwrap();
+    // Nothing is sent until confirmed.
+    assert!(staged.cancels.borrow().is_empty());
+    assert!(staged.closes.borrow().is_empty());
+
+    // A market the account holds nothing in opens nothing.
+    click(cx, window, "dialog-keep");
+    let btc = MarketId::new("BTC");
+    on_view(cx, window, &view, |v, w, cx| v.open_close(&btc, w, cx));
+    cx.update_window(window.into(), |_, _, cx| {
+        assert_eq!(view.read(cx).open_dialog(), None);
+    })
+    .unwrap();
+}
+
+#[gpui_kit::test]
+fn cancelling_a_markets_orders_leaves_other_markets_alone(cx: &mut TestAppContext) {
+    let staged = Rc::new(Staged::new(Ok(())));
+    staged
+        .answers
+        .borrow_mut()
+        .push_back(Ok(Answer::Each(vec![Outcome::DONE, Outcome::DONE])));
+    let mut orders = three_orders();
+    orders.push(a_stop(4));
+    let (window, _desk, view, _dir) = orders_tab(cx, &staged, orders);
+    let nvda = MarketId::new("NVDA");
+
+    cx.update_window(window.into(), |_, _, cx| {
+        let oids: Vec<u64> = view
+            .read(cx)
+            .market_orders(&nvda)
+            .iter()
+            .map(|o| o.oid)
+            .collect();
+        assert_eq!(oids, [1, 4]);
+    })
+    .unwrap();
+
+    on_view(cx, window, &view, |v, w, cx| {
+        v.open_cancel_market(&nvda, w, cx)
+    });
+    cx.update_window(window.into(), |_, window, cx| {
+        assert_eq!(view.read(cx).open_dialog(), Some("cancel-market"));
+        assert!(window.try_find("cancel-all-dialog").is_some());
+        assert_eq!(
+            view.read(cx).cancel_all_heading().as_deref(),
+            Some("Cancel all 2 open NVDA orders?")
+        );
+    })
+    .unwrap();
+    assert!(staged.cancels.borrow().is_empty());
+
+    click(cx, window, "dialog-confirm");
+    assert_eq!(
+        *staged.cancels.borrow(),
+        [vec![
+            Target {
+                asset: 110_000,
+                oid: 1
+            },
+            Target {
+                asset: 110_000,
+                oid: 4
+            },
+        ]]
+    );
+
+    // A market with no orders cannot be cancelled.
+    let eth = MarketId::new("ETH");
+    on_view(cx, window, &view, |v, w, cx| {
+        v.open_cancel_market(&eth, w, cx)
+    });
+    cx.update_window(window.into(), |_, _, cx| {
+        assert_eq!(view.read(cx).open_dialog(), None);
+    })
+    .unwrap();
+}
+
+#[gpui_kit::test]
+fn with_mainnet_trading_off_the_panel_is_told_why_and_opens_nothing(cx: &mut TestAppContext) {
+    let staged = Rc::new(Staged::new(Err(Unavailable::MainnetOff)));
+    let (window, _desk, view, _dir) = positions_tab(cx, &staged, vec![long_nvda()], vec![]);
+    cx.update_window(window.into(), |_, _, cx| {
+        let view = view.read(cx);
+        assert!(!view.can_act_now());
+        let (heading, sentence) = view.actions_blocked(true).unwrap();
+        assert_eq!(heading, "Trading on mainnet is switched off");
+        assert!(sentence.contains("Allow trading on mainnet"), "{sentence}");
+    })
+    .unwrap();
+    let nvda = MarketId::from_parts("xyz", "NVDA");
+    on_view(cx, window, &view, |v, w, cx| v.open_close(&nvda, w, cx));
+    on_view(cx, window, &view, |v, w, cx| v.open_tpsl(&nvda, w, cx));
+    cx.update_window(window.into(), |_, _, cx| {
+        assert_eq!(view.read(cx).open_dialog(), None);
+    })
+    .unwrap();
+    assert!(staged.closes.borrow().is_empty());
+}
+
+// ---------------------------------------------------------------------------
+// The Markets position panel.
+
+/// ETH as an action names it, for the panel's tests.
+const ETH_ASSET: Asset = Asset {
+    number: 1,
+    sz_decimals: 4,
+    spot: false,
+};
+
+/// 13.6429 ETH long at 5x cross, as the spec's examples have it.
+fn eth_long_row() -> PositionRow {
+    PositionRow {
+        asset: Some(ETH_ASSET),
+        market: "ETH".into(),
+        dex: String::new(),
+        leverage: 5,
+        mode: MarginMode::Cross,
+        size: dec("13.6429"),
+        value: dec("23715.42"),
+        entry: dec("1733.1"),
+        mark: Some(dec("1738.3")),
+        pnl: dec("70.94"),
+        roe: dec("0.015"),
+        liquidation: Some(dec("1412.6")),
+        margin: dec("4743.08"),
+        funding: dec("-18.42"),
+    }
+}
+
+fn eth_order(
+    oid: u64,
+    kind: &str,
+    tpsl: Option<Tpsl>,
+    side: Side,
+    size: &str,
+    at: &str,
+) -> OrderRow {
+    OrderRow {
+        market: "ETH".into(),
+        dex: String::new(),
+        kind: kind.into(),
+        side,
+        remaining: dec(size),
+        original: dec(size),
+        price: dec(at),
+        trigger_px: tpsl.map(|_| dec(at)),
+        tpsl,
+        amendable: tpsl.is_none(),
+        asset: Some(ETH_ASSET),
+        ..a_limit(oid, "ETH", side, size, at)
+    }
+}
+
+fn eth_orders() -> Vec<OrderRow> {
+    vec![
+        eth_order(
+            11,
+            "Take Profit Market",
+            Some(Tpsl::Tp),
+            Side::Sell,
+            "0",
+            "1900",
+        ),
+        eth_order(12, "Stop Market", Some(Tpsl::Sl), Side::Sell, "0", "1690"),
+        eth_order(13, "Limit", None, Side::Buy, "2", "1720"),
+    ]
+}
+
+fn eth_fill(ago_ms: u64, side: FillSide, size: &str, at: &str, realised: &str, fee: &str) -> Fill {
+    let time_ms = now_ms() - ago_ms;
+    Fill {
+        coin: "ETH".into(),
+        side,
+        price: dec(at),
+        size: dec(size),
+        time_ms,
+        realised: dec(realised),
+        fee: dec(fee),
+        id: time_ms,
+        ..Fill::blank()
+    }
+}
+
+/// Markets on ETH with the account's position, orders and fills as given,
+/// and this stand-in for the gate.
+fn eth_panel(
+    cx: &mut TestAppContext,
+    staged: &Rc<Staged>,
+    positions: Option<Vec<PositionRow>>,
+    orders: Vec<OrderRow>,
+    fills: Option<Fills>,
+) -> (
+    WindowHandle<Root>,
+    Entity<Desk>,
+    Entity<Markets>,
+    Entity<Portfolio>,
+    tempfile::TempDir,
+) {
+    let (window, desk, dir) = open_with(cx, Some(&["ETH", "BTC"]));
+    let markets = go_to_markets(window, &desk, cx);
+    let portfolio = cx
+        .update_window(window.into(), |_, window, cx| {
+            let portfolio = desk.read(cx).portfolio_view().unwrap();
+            portfolio.update(cx, |p, cx| {
+                p.use_trading(staged.clone());
+                p.set_orders(orders, cx);
+                if let Some(positions) = positions {
+                    p.set_positions(positions, cx);
+                }
+                if let Some(fills) = fills {
+                    p.set_fills(fills, cx);
+                }
+            });
+            markets.update(cx, |view, cx| {
+                view.set_snapshot(charted("ETH", &["ETH", "BTC"], 40), cx);
+                view.focus_market("ETH", window, cx);
+            });
+            window.render_frame(cx);
+            portfolio
+        })
+        .unwrap();
+    cx.run_until_parked();
+    cx.update_window(window.into(), |_, window, cx| window.render_frame(cx))
+        .unwrap();
+    (window, desk, markets, portfolio, dir)
+}
+
+#[gpui_kit::test]
+fn the_position_panel_states_the_position_as_the_spec_does(cx: &mut TestAppContext) {
+    let staged = Rc::new(Staged::new(Ok(())));
+    let (window, _desk, _markets, _portfolio, _dir) =
+        eth_panel(cx, &staged, Some(vec![eth_long_row()]), vec![], None);
+    cx.update_window(window.into(), |_, window, _| {
+        for label in [
+            "LONG \u{b7} 5x cross",
+            "size +13.6429 ETH, $23,715",
+            "unrealised +$70.94, +1.50% ROE",
+            "Entry price 1,733.1",
+            "Mark price 1,738.3",
+            "Liquidation price 1,412.6",
+            "Margin $4,743 \u{b7} 5x",
+            "Funding since open -$18.42",
+        ] {
+            assert!(
+                window.try_find_by_label(label).is_some(),
+                "missing `{label}`"
+            );
+        }
+    })
+    .unwrap();
+}
+
+#[gpui_kit::test]
+fn before_positions_arrive_the_panel_shows_placeholders_not_flat(cx: &mut TestAppContext) {
+    let staged = Rc::new(Staged::new(Ok(())));
+    let (window, _desk, markets, _portfolio, _dir) = eth_panel(cx, &staged, None, vec![], None);
+    cx.update_window(window.into(), |_, window, cx| {
+        let model = markets.read(cx).position_panel().unwrap();
+        assert_eq!(model.holding, market_position::Holding::Loading);
+        assert!(window.try_find("position-side").is_none());
+        assert!(window.try_find_by_label("Flat").is_none());
+        assert!(window.try_find("position-flat").is_none());
+    })
+    .unwrap();
+}
+
+#[gpui_kit::test]
+fn flat_says_so_and_offers_no_position_actions(cx: &mut TestAppContext) {
+    let staged = Rc::new(Staged::new(Ok(())));
+    let (window, _desk, _markets, _portfolio, _dir) =
+        eth_panel(cx, &staged, Some(vec![]), vec![], None);
+    cx.update_window(window.into(), |_, window, _| {
+        assert!(window.try_find_by_label("Flat").is_some());
+        assert!(window.try_find("position-flat").is_some());
+        assert!(window.try_find("position-close").is_none());
+        assert!(window.try_find("position-tpsl").is_none());
+    })
+    .unwrap();
+}
+
+#[gpui_kit::test]
+fn the_pnl_breakdown_starts_collapsed_opens_from_the_keyboard_and_stays_open(
+    cx: &mut TestAppContext,
+) {
+    let staged = Rc::new(Staged::new(Ok(())));
+    let fills = walked(vec![eth_fill(
+        3_600_000,
+        FillSide::Sold,
+        "1",
+        "1740",
+        "-180",
+        "6.2",
+    )]);
+    let (window, _desk, markets, _portfolio, _dir) =
+        eth_panel(cx, &staged, Some(vec![eth_long_row()]), vec![], Some(fills));
+    cx.update_window(window.into(), |_, window, cx| {
+        assert_eq!(
+            window.find_by_label("PNL breakdown").expanded(),
+            Some(false)
+        );
+        assert!(window.try_find("pnl-rows").is_none());
+        // The header carries the day's total: -186.20 realised + 70.94 open.
+        let model = markets.read(cx).position_panel().unwrap();
+        assert_eq!(model.day_total(), Some(("-$115".into(), -1)));
+
+        markets.update(cx, |view, cx| view.focus_pnl_header(window, cx));
+        window.press("enter", cx);
+        window.render_frame(cx);
+        assert_eq!(window.find_by_label("PNL breakdown").expanded(), Some(true));
+        assert!(window.try_find("pnl-rows").is_some());
+        assert!(
+            window
+                .try_find_by_label("24 hours: realised -$186, total -$115")
+                .is_some()
+        );
+
+        // Another market keeps it open.
+        markets.update(cx, |view, cx| view.focus_market("BTC", window, cx));
+        window.click(("tile", 1usize), cx);
+        window.render_frame(cx);
+        assert_eq!(markets.read(cx).selected_market().as_deref(), Some("BTC"));
+        assert_eq!(window.find_by_label("PNL breakdown").expanded(), Some(true));
+    })
+    .unwrap();
+}
+
+#[gpui_kit::test]
+fn the_last_trade_is_shown_or_said_to_be_none(cx: &mut TestAppContext) {
+    let staged = Rc::new(Staged::new(Ok(())));
+    let fills = walked(vec![
+        eth_fill(3_600_000, FillSide::Sold, "1", "1700", "0", "1"),
+        eth_fill(60_000, FillSide::Bought, "2.5", "1741.2", "0", "2.18"),
+    ]);
+    let (window, _desk, markets, _portfolio, _dir) =
+        eth_panel(cx, &staged, Some(vec![eth_long_row()]), vec![], Some(fills));
+    cx.update_window(window.into(), |_, window, cx| {
+        let trade = markets
+            .read(cx)
+            .position_panel()
+            .unwrap()
+            .trade
+            .unwrap()
+            .unwrap();
+        let label = format!("{} Buy 2.5 at 1,741.2, fee $2.18", trade.time);
+        assert!(window.try_find_by_label(&label).is_some(), "{label}");
+
+        // BTC has no fill among those held.
+        window.click(("tile", 1usize), cx);
+        window.render_frame(cx);
+        assert!(window.try_find_by_label("No recent trade").is_some());
+    })
+    .unwrap();
+}
+
+#[gpui_kit::test]
+fn open_orders_summarise_when_collapsed_and_list_and_cancel_when_open(cx: &mut TestAppContext) {
+    let staged = Rc::new(Staged::new(Ok(())));
+    // Flat, so the open list fits without scrolling: the test cannot scroll.
+    let (window, _desk, _markets, portfolio, _dir) =
+        eth_panel(cx, &staged, Some(vec![]), eth_orders(), None);
+    cx.update_window(window.into(), |_, window, _| {
+        assert_eq!(window.find_by_label("Open orders").expanded(), Some(false));
+        assert!(window.try_find_by_label("3 open orders").is_some());
+        assert!(
+            window
+                .try_find_by_label("TP \u{b7} SL \u{b7} 1 limit")
+                .is_some()
+        );
+        assert!(window.try_find("orders-list").is_none());
+    })
+    .unwrap();
+
+    click(cx, window, "orders-header");
+    cx.update_window(window.into(), |_, window, _| {
+        assert_eq!(window.find_by_label("Open orders").expanded(), Some(true));
+        assert!(window.try_find("orders-list").is_some());
+        assert!(
+            window
+                .try_find_by_label("Cancel Sell Take profit order in ETH")
+                .is_some()
+        );
+        assert!(
+            window
+                .try_find_by_label("Cancel Buy Limit order in ETH")
+                .is_some()
+        );
+    })
+    .unwrap();
+
+    cx.update_window(window.into(), |_, window, cx| {
+        window.click(("cancel-market-order", 13usize), cx)
+    })
+    .unwrap();
+    cx.run_until_parked();
+    cx.update_window(window.into(), |_, _, cx| {
+        assert_eq!(portfolio.read(cx).open_dialog(), Some("cancel"));
+    })
+    .unwrap();
+    click(cx, window, "dialog-keep");
+
+    click(cx, window, "cancel-market-orders");
+    cx.update_window(window.into(), |_, _, cx| {
+        assert_eq!(portfolio.read(cx).open_dialog(), Some("cancel-market"));
+        assert_eq!(
+            portfolio.read(cx).cancel_all_heading().as_deref(),
+            Some("Cancel all 3 open ETH orders?")
+        );
+    })
+    .unwrap();
+    click(cx, window, "dialog-keep");
+    assert!(staged.cancels.borrow().is_empty());
+}
+
+#[gpui_kit::test]
+fn guarded_actions_are_shown_but_cannot_be_used_and_say_why(cx: &mut TestAppContext) {
+    let staged = Rc::new(Staged::new(Err(Unavailable::MainnetOff)));
+    let (window, _desk, _markets, portfolio, _dir) =
+        eth_panel(cx, &staged, Some(vec![eth_long_row()]), eth_orders(), None);
+    cx.update_window(window.into(), |_, window, _| {
+        assert!(window.try_find("position-close").is_some());
+        assert!(window.try_find("position-guard").is_some());
+        // The one-line notice leaves the collapsed open orders in view.
+        let orders = window.find("orders-header").bounds();
+        let guard = window.find("position-guard").bounds();
+        assert!(orders.bottom() <= guard.top(), "{orders:?} {guard:?}");
+        assert!(
+            window
+                .find("position-guard")
+                .label()
+                .is_some_and(|l| l.contains("Allow trading on mainnet")),
+        );
+    })
+    .unwrap();
+    click(cx, window, "position-close");
+    click(cx, window, "position-tpsl");
+    cx.update_window(window.into(), |_, _, cx| {
+        assert_eq!(portfolio.read(cx).open_dialog(), None);
+    })
+    .unwrap();
+    assert!(staged.closes.borrow().is_empty());
+}
+
+#[gpui_kit::test]
+fn expanding_both_sections_keeps_the_panels_height_and_scrolls_within(cx: &mut TestAppContext) {
+    let staged = Rc::new(Staged::new(Ok(())));
+    let fills = walked(vec![eth_fill(
+        60_000,
+        FillSide::Bought,
+        "2.5",
+        "1741.2",
+        "0",
+        "2.18",
+    )]);
+    let (window, _desk, _markets, _portfolio, _dir) = eth_panel(
+        cx,
+        &staged,
+        Some(vec![eth_long_row()]),
+        eth_orders(),
+        Some(fills),
+    );
+    let height = |cx: &mut TestAppContext| {
+        cx.update_window(window.into(), |_, window, _| {
+            window.find("market-panel").bounds().size.height
+        })
+        .unwrap()
+    };
+    let before = height(cx);
+    // Collapsed, everything down to Open orders fits without scrolling.
+    cx.update_window(window.into(), |_, window, _| {
+        let panel = window.find("market-panel").bounds();
+        let orders = window.find("orders-header").bounds();
+        assert!(orders.bottom() <= panel.bottom(), "{orders:?} {panel:?}");
+    })
+    .unwrap();
+    // Open orders first: the PNL breakdown, once open, pushes it down.
+    click(cx, window, "orders-header");
+    click(cx, window, "pnl-header");
+    assert_eq!(height(cx), before);
+    cx.update_window(window.into(), |_, window, _| {
+        let panel = window.find("market-panel").bounds();
+        let column = window.find("position-panel").bounds();
+        assert!(column.bottom() <= panel.bottom());
+        assert!(window.try_find("pnl-rows").is_some());
+        assert!(window.try_find("orders-list").is_some());
+    })
+    .unwrap();
+    assert_eq!(before, px(406.));
+}
+
+/// Markets on BTC, charted from 99 to 141, holding this position or none.
+fn btc_chart_with(
+    cx: &mut TestAppContext,
+    held: Option<PositionRow>,
+) -> (WindowHandle<Root>, Entity<Markets>, tempfile::TempDir) {
+    let (window, desk, dir) = open_with(cx, Some(&["BTC"]));
+    let markets = go_to_markets(window, &desk, cx);
+    cx.update_window(window.into(), |_, window, cx| {
+        markets.update(cx, |view, cx| {
+            view.set_snapshot(charted("BTC", &["BTC"], 40), cx)
+        });
+        give_account(&desk, Some(held.into_iter().collect()), None, cx);
+        markets.update(cx, |_, cx| cx.notify());
+        window.render_frame(cx);
+    })
+    .unwrap();
+    (window, markets, dir)
+}
+
+#[gpui_kit::test]
+fn the_entry_price_is_a_line_on_the_chart_while_it_is_in_range(cx: &mut TestAppContext) {
+    let held = PositionRow {
+        size: dec("0.5"),
+        entry: dec("120"),
+        ..position("BTC", "", 60)
+    };
+    let (window, _markets, _dir) = btc_chart_with(cx, Some(held));
+    cx.update_window(window.into(), |_, window, _| {
+        let line = window.find("entry-line");
+        assert_eq!(line.label(), Some("Entry 120 \u{b7} +0.5"));
+        // Between the plot's top and bottom, about halfway (120 of 99..141).
+        let plot = window.find("chart-plot").bounds();
+        let y = line.bounds().top();
+        assert!(y > plot.top() && y < plot.bottom(), "{y:?} {plot:?}");
+    })
+    .unwrap();
+}
+
+#[gpui_kit::test]
+fn an_entry_outside_the_candles_draws_nothing_and_leaves_the_axis_alone(cx: &mut TestAppContext) {
+    let (_w, flat, _d) = btc_chart_with(cx, None);
+    let flat_range = cx.update(|cx| flat.read(cx).chart_range());
+    assert!(flat_range.is_some());
+
+    let held = PositionRow {
+        size: dec("-0.5"),
+        entry: dec("50"),
+        ..position("BTC", "", 60)
+    };
+    let (window, markets, _dir) = btc_chart_with(cx, Some(held));
+    cx.update_window(window.into(), |_, window, cx| {
+        assert!(window.try_find("entry-line").is_none());
+        assert_eq!(markets.read(cx).chart_range(), flat_range);
+    })
+    .unwrap();
+}
+
+#[gpui_kit::test]
+fn with_no_position_there_is_no_entry_line(cx: &mut TestAppContext) {
+    let (window, _markets, _dir) = btc_chart_with(cx, None);
+    cx.update_window(window.into(), |_, window, _| {
+        assert!(window.try_find("entry-line").is_none());
+    })
+    .unwrap();
 }

@@ -692,7 +692,11 @@ fn an_older_watcher_gets_no_pnl_summary_switch_and_no_setting(cx: &mut TestAppCo
     click(cx, window, "add-level-save");
     cx.update(|cx| {
         let saved = link.read(cx).saved.last().unwrap().clone();
-        assert_eq!(saved.levels.len(), older_levels() + 1, "the level was saved");
+        assert_eq!(
+            saved.levels.len(),
+            older_levels() + 1,
+            "the level was saved"
+        );
         let written = serde_json::to_value(&saved).unwrap();
         assert!(written.get("pnl_summary").is_none(), "{written}");
     });
@@ -869,9 +873,15 @@ fn call_levels_come_first_and_the_health_line_last(cx: &mut TestAppContext) {
         let near_liq = window.find("near-liq-save").bounds();
         let health = window.find("watcher-health").bounds();
         assert!(level.origin.y < stops.origin.y, "levels above stop alerts");
-        assert!(stops.origin.y < summary.origin.y, "the PnL summary below stop alerts");
+        assert!(
+            stops.origin.y < summary.origin.y,
+            "the PnL summary below stop alerts"
+        );
         // Near liquidation is the panel beside the stop alerts panel.
-        assert!(summary.origin.x < near_liq.origin.x, "and before near liquidation");
+        assert!(
+            summary.origin.x < near_liq.origin.x,
+            "and before near liquidation"
+        );
         assert!(stops.origin.y < health.origin.y, "health line last");
     })
     .unwrap();
@@ -1293,4 +1303,166 @@ fn a_tiles_alert_form_opens_above_the_tile_when_there_is_no_room_below(cx: &mut 
         form.top() >= tile.bottom(),
         "below a tile with room under it"
     );
+}
+
+// ---- The Markets position panel's alerts bell ----
+
+fn click_and_settle(cx: &mut TestAppContext, window: WindowHandle<Root>, id: &'static str) {
+    cx.update_window(window.into(), |_, window, cx| {
+        window.render_frame(cx);
+        window.click(id, cx);
+    })
+    .unwrap();
+    cx.run_until_parked();
+    cx.update_window(window.into(), |_, window, cx| window.render_frame(cx))
+        .unwrap();
+}
+
+#[gpui_kit::test]
+fn the_bell_counts_the_markets_armed_levels(cx: &mut TestAppContext) {
+    let (window, _desk, _link, _markets, _dir) =
+        markets_with_chart(cx, ConfigState::Read(chart_config()));
+    cx.update_window(window.into(), |_, window, cx| {
+        window.render_frame(cx);
+        // BTC has two armed levels and one fired.
+        assert!(window.try_find_by_label("2 armed").is_some());
+        let bell = window.find_by_label("Alerts for BTC");
+        assert_ne!(bell.disabled(), Some(true));
+    })
+    .unwrap();
+}
+
+#[gpui_kit::test]
+fn without_a_usable_watcher_the_bell_says_why_and_cannot_be_pressed(cx: &mut TestAppContext) {
+    // No watcher at all.
+    let (window, desk, _dir) = super::open_with(cx, Some(&["BTC"]));
+    super::go_to_markets(window, &desk, cx);
+    cx.update_window(window.into(), |_, window, cx| {
+        window.render_frame(cx);
+        let bell = window.find_by_label("Alerts for BTC: needs a watcher connection");
+        assert_eq!(bell.disabled(), Some(true));
+    })
+    .unwrap();
+    click_and_settle(cx, window, "position-alerts");
+    cx.update_window(window.into(), |_, window, _| {
+        assert!(window.try_find("alerts-menu").is_none());
+    })
+    .unwrap();
+
+    // Watching another network.
+    let mut other = chart_config();
+    other.network = galata_desk_core::network::Network::Testnet;
+    let (window, _desk, _link, _markets, _dir) = markets_with_chart(cx, ConfigState::Read(other));
+    cx.update_window(window.into(), |_, window, cx| {
+        window.render_frame(cx);
+        let bell = window.find_by_label("Alerts for BTC: the watcher watches another network");
+        assert_eq!(bell.disabled(), Some(true));
+    })
+    .unwrap();
+}
+
+#[gpui_kit::test]
+fn a_level_added_from_the_bell_is_saved_armed_and_drawn(cx: &mut TestAppContext) {
+    let (window, _desk, link, markets, _dir) =
+        markets_with_chart(cx, ConfigState::Read(chart_config()));
+    click_and_settle(cx, window, "position-alerts");
+    cx.update_window(window.into(), |_, window, cx| {
+        assert!(window.try_find("alerts-menu").is_some());
+        // The market's levels, armed first.
+        assert!(window.try_find_by_label("Above 130 \u{b7} armed").is_some());
+        assert!(window.try_find_by_label("Above 105 \u{b7} fired").is_some());
+        markets.update(cx, |view, cx| view.set_alert_price("150", window, cx));
+    })
+    .unwrap();
+    click_and_settle(cx, window, "alert-add");
+    cx.update_window(window.into(), |_, window, cx| {
+        let saved = link.read(cx).saved.last().cloned().expect("a save");
+        let added = saved
+            .levels
+            .iter()
+            .find(|l| l.market == "BTC" && l.price == Decimal::from(150))
+            .expect("the new level");
+        // BTC is at 120: 150 is above it.
+        assert_eq!(added.direction, Direction::Above);
+        assert!(added.is_armed());
+        assert!(window.try_find_by_label("Alert saved.").is_some());
+        // The menu lists it with the market's other levels. (The test link
+        // arms every level it saves without an id, so the count is not
+        // checked here.)
+        assert!(window.try_find_by_label("Above 150 \u{b7} armed").is_some());
+    })
+    .unwrap();
+}
+
+#[gpui_kit::test]
+fn the_every_market_settings_save_through_the_watcher_and_a_conflict_overwrites_nothing(
+    cx: &mut TestAppContext,
+) {
+    let (window, _desk, link, markets, _dir) =
+        markets_with_chart(cx, ConfigState::Read(chart_config()));
+    click_and_settle(cx, window, "position-alerts");
+    cx.update_window(window.into(), |_, window, _| {
+        assert!(
+            window
+                .try_find_by_label("Take-profit and stop-loss alerts, every market")
+                .is_some()
+        );
+    })
+    .unwrap();
+
+    // The recorded configuration has stop alerts off: switching turns them on.
+    click_and_settle(cx, window, "alert-stop-alerts");
+    cx.update(|cx| {
+        let saved = link.read(cx).saved.clone();
+        assert_eq!(saved.len(), 1);
+        assert!(saved[0].stop_alerts);
+    });
+
+    // The distance, within its range.
+    cx.update_window(window.into(), |_, window, cx| {
+        markets.update(cx, |view, cx| view.set_alert_near_liq("8", window, cx));
+    })
+    .unwrap();
+    click_and_settle(cx, window, "alert-near-liq-save");
+    cx.update(|cx| {
+        let saved = link.read(cx).saved.clone();
+        assert_eq!(saved.len(), 2);
+        assert_eq!(saved[1].near_liquidation_pct, Decimal::from(8));
+    });
+
+    // Out of range: nothing is sent.
+    cx.update_window(window.into(), |_, window, cx| {
+        markets.update(cx, |view, cx| view.set_alert_near_liq("80", window, cx));
+    })
+    .unwrap();
+    click_and_settle(cx, window, "alert-near-liq-save");
+    cx.update_window(window.into(), |_, window, cx| {
+        assert_eq!(link.read(cx).saved.len(), 2);
+        assert!(
+            window
+                .try_find_by_label("The distance is from 2% to 50%. Nothing was saved.")
+                .is_some()
+        );
+    })
+    .unwrap();
+
+    // Changed elsewhere since it was read: not overwritten, and said so.
+    cx.update(|cx| {
+        link.update(cx, |l, _| {
+            l.next_outcome = Some(WatcherError::Changed { version: 9 })
+        })
+    });
+    click_and_settle(cx, window, "alert-stop-alerts");
+    cx.update_window(window.into(), |_, window, cx| {
+        assert_eq!(link.read(cx).saved.len(), 2);
+        let message = window.find("alert-message");
+        assert!(
+            message
+                .label()
+                .is_some_and(|l| l.starts_with("Not saved: the configuration changed elsewhere")),
+            "{:?}",
+            message.label()
+        );
+    })
+    .unwrap();
 }

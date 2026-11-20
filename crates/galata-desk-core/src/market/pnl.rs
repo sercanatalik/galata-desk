@@ -1,5 +1,6 @@
-//! The account's PNL in each market over three windows: the last 30 days,
-//! the year to date and all time.
+//! The account's PNL in each market over four windows: the last 24 hours,
+//! the last 30 days, the year to date and all time. The tiles show the last
+//! three; the Markets position panel shows all four.
 //!
 //! A window's PNL is what the account's fills in that market realised within
 //! the window, less those fills' fees, plus the open position's whole
@@ -15,13 +16,20 @@ use super::MarketId;
 use super::fills::Fills;
 use crate::model::PositionRow;
 
+/// One day, in milliseconds.
+pub const ONE_DAY_MS: u64 = 24 * 60 * 60 * 1000;
+
 /// Thirty days, in milliseconds.
-pub const THIRTY_DAYS_MS: u64 = 30 * 24 * 60 * 60 * 1000;
+pub const THIRTY_DAYS_MS: u64 = 30 * ONE_DAY_MS;
 
 /// One window's PNL in one market.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct WindowPnl {
+    /// The total: realised, less fees, plus the open position's unrealised.
     pub usd: Decimal,
+    /// The realised part alone: the window's fills' realised PNL less their
+    /// fees.
+    pub realised: Decimal,
     /// Older fills may exist that fall in the window but were not counted.
     pub partial: bool,
 }
@@ -30,6 +38,7 @@ pub struct WindowPnl {
 /// no fill in it and no open position.
 #[derive(Debug, Clone, Copy, PartialEq, Default)]
 pub struct MarketPnl {
+    pub d1: Option<WindowPnl>,
     pub d30: Option<WindowPnl>,
     pub ytd: Option<WindowPnl>,
     pub all: Option<WindowPnl>,
@@ -54,6 +63,7 @@ pub fn market_pnl(
     now_ms: u64,
 ) -> HashMap<MarketId, MarketPnl> {
     let starts = [
+        now_ms.saturating_sub(ONE_DAY_MS),
         now_ms.saturating_sub(THIRTY_DAYS_MS),
         year_start_ms(now_ms),
         0,
@@ -61,7 +71,7 @@ pub fn market_pnl(
     let reaches_from = fills.reaches_from();
 
     // Net realised PNL per market and window, and whether any fill fell in it.
-    let mut realised: HashMap<MarketId, [Option<Decimal>; 3]> = HashMap::new();
+    let mut realised: HashMap<MarketId, [Option<Decimal>; 4]> = HashMap::new();
     for fill in &fills.rows {
         let sums = realised
             .entry(MarketId::new(fill.coin.as_str()))
@@ -86,19 +96,21 @@ pub fn market_pnl(
             let sums = realised.get(&market).copied().unwrap_or_default();
             let open = unrealised.get(&market).copied();
             let window = |i: usize| {
-                let usd = match (sums[i], open) {
-                    (None, None) => return None,
-                    (sum, open) => sum.unwrap_or_default() + open.unwrap_or_default(),
-                };
+                if sums[i].is_none() && open.is_none() {
+                    return None;
+                }
+                let realised = sums[i].unwrap_or_default();
                 Some(WindowPnl {
-                    usd,
+                    usd: realised + open.unwrap_or_default(),
+                    realised,
                     partial: reaches_from.is_some_and(|from| from > starts[i]),
                 })
             };
             let pnl = MarketPnl {
-                d30: window(0),
-                ytd: window(1),
-                all: window(2),
+                d1: window(0),
+                d30: window(1),
+                ytd: window(2),
+                all: window(3),
             };
             (market, pnl)
         })
@@ -274,6 +286,58 @@ mod tests {
         let btc = market_pnl(&complete, &[], NOW)[&MarketId::new("BTC")];
         assert!(!btc.ytd.unwrap().partial);
         assert!(!btc.all.unwrap().partial);
+    }
+
+    #[test]
+    fn the_last_day_counts_only_its_own_fills() {
+        let fills = all(vec![
+            fill("ETH", NOW - 2 * 60 * 60 * 1000, "-180", "6.2"),
+            fill("ETH", NOW - 2 * DAY, "900", "0"),
+        ]);
+        let eth = market_pnl(&fills, &[], NOW)[&MarketId::new("ETH")];
+        assert_eq!(usd(eth.d1), Some(d("-186.2")));
+        assert_eq!(usd(eth.d30), Some(d("713.8")));
+    }
+
+    #[test]
+    fn realised_is_kept_apart_from_the_open_positions_pnl() {
+        let fills = all(vec![fill("ETH", NOW - 60 * 60 * 1000, "-180", "6.2")]);
+        let eth = market_pnl(&fills, &[position("", "ETH", "13.6429", "70.94")], NOW)
+            [&MarketId::new("ETH")];
+        let day = eth.d1.unwrap();
+        assert_eq!(day.realised, d("-186.2"));
+        assert_eq!(day.usd, d("-115.26"));
+    }
+
+    #[test]
+    fn flat_total_equals_realised() {
+        let fills = all(vec![fill("ETH", NOW - DAY / 2, "40", "1")]);
+        let eth = market_pnl(&fills, &[], NOW)[&MarketId::new("ETH")];
+        for w in [eth.d1, eth.d30, eth.ytd, eth.all] {
+            let w = w.unwrap();
+            assert_eq!(w.usd, w.realised);
+        }
+    }
+
+    #[test]
+    fn a_position_with_no_fills_today_has_zero_realised_for_the_day() {
+        let fills = all(vec![fill("HYPE", NOW - 3 * DAY, "700", "0")]);
+        let hype =
+            market_pnl(&fills, &[position("", "HYPE", "10", "-50")], NOW)[&MarketId::new("HYPE")];
+        let day = hype.d1.unwrap();
+        assert_eq!(day.realised, Decimal::ZERO);
+        assert_eq!(day.usd, d("-50"));
+    }
+
+    #[test]
+    fn the_last_day_is_partial_when_older_fills_were_held_back_within_it() {
+        let fills = Fills {
+            rows: vec![fill("BTC", NOW - 60 * 60 * 1000, "5", "0")],
+            capped: true,
+            walked: true,
+        };
+        let btc = market_pnl(&fills, &[], NOW)[&MarketId::new("BTC")];
+        assert!(btc.d1.unwrap().partial);
     }
 
     #[test]

@@ -214,6 +214,39 @@ impl Portfolio {
             .unwrap_or_default()
     }
 
+    /// The listed position in `market` that can be acted on.
+    fn market_position(&self, market: &galata_desk_core::market::MarketId) -> Option<PositionRow> {
+        self.closable()
+            .into_iter()
+            .find(|p| p.market == market.ticker() && p.dex == market.dex())
+    }
+
+    /// Open the market-close dialog for the position in `market`, exactly as
+    /// the Positions tab's Close at market does.
+    pub fn open_close(
+        &mut self,
+        market: &galata_desk_core::market::MarketId,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if let Some(p) = self.market_position(market) {
+            self.press_position("close-market", key(&p), window, cx);
+        }
+    }
+
+    /// Open the take-profit and stop-loss dialog for the position in
+    /// `market`, exactly as the Positions tab's TP/SL does.
+    pub fn open_tpsl(
+        &mut self,
+        market: &galata_desk_core::market::MarketId,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if let Some(p) = self.market_position(market) {
+            self.press_position("edit-tpsl", key(&p), window, cx);
+        }
+    }
+
     fn position(&self, key: u64) -> Option<PositionRow> {
         self.closable().into_iter().find(|p| self::key(p) == key)
     }
