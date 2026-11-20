@@ -228,6 +228,15 @@ impl WatcherSection {
         self.save(move |c| c.stop_alerts = on, done, cx);
     }
 
+    fn set_pnl_summary(&mut self, on: bool, cx: &mut Context<Self>) {
+        let done = if on {
+            "PnL summary on."
+        } else {
+            "PnL summary off."
+        };
+        self.save(move |c| c.pnl_summary = Some(on), done, cx);
+    }
+
     fn save_near_liq(&mut self, cx: &mut Context<Self>) {
         let text = self
             .near_liq
@@ -518,14 +527,17 @@ impl WatcherSection {
 
     fn stops_panel(&self, editable: bool, cx: &mut Context<Self>) -> AnyElement {
         let on = self.stop_alerts_on(cx);
+        let summary = self.pnl_summary_on(cx);
         ui::panel()
             .px_5()
             .py_4()
             .gap_2()
-            .child(heading("STOP ALERTS"))
-            .child(ui::label(
-                "An alert each time a take-profit or stop-loss order fills, on every ticker.",
-            ))
+            .child(heading("ALERTS"))
+            .child(ui::label(if summary.is_some() {
+                "An alert each time a take-profit or stop-loss order fills, on every ticker, and a PnL summary every half hour from 07:00 to 22:30."
+            } else {
+                "An alert each time a take-profit or stop-loss order fills, on every ticker."
+            }))
             .child(
                 h_flex()
                     .gap_3()
@@ -547,7 +559,33 @@ impl WatcherSection {
                             ),
                     ),
             )
+            .children(summary.map(|on| {
+                h_flex()
+                    .gap_3()
+                    .py(px(4.))
+                    .child(div().flex_1().child("PnL summary every half hour"))
+                    .child(
+                        div()
+                            .text_size(px(12.5))
+                            .text_color(Palette::muted())
+                            .child(if on { "on" } else { "off" }),
+                    )
+                    .child(
+                        Switch::new("pnl-summary")
+                            .checked(on)
+                            .disabled(!editable)
+                            .accessibility_label("PnL summary every half hour")
+                            .on_click(
+                                cx.listener(|this, on: &bool, _, cx| this.set_pnl_summary(*on, cx)),
+                            ),
+                    )
+            }))
             .into_any_element()
+    }
+
+    /// The PnL summary switch's state, when the watcher reports the setting.
+    fn pnl_summary_on(&self, cx: &gpui_kit::App) -> Option<bool> {
+        self.snapshot(cx).config.config().and_then(|c| c.pnl_summary)
     }
 
     /// The switch's state: the watcher's, or on before it has been read.
@@ -766,6 +804,11 @@ impl WatcherSection {
 
     pub fn stop_alerts_shown(&self, cx: &gpui_kit::App) -> bool {
         self.stop_alerts_on(cx)
+    }
+
+    /// The PnL summary switch as drawn: `None` when it is not shown.
+    pub fn pnl_summary_shown(&self, cx: &gpui_kit::App) -> Option<bool> {
+        self.pnl_summary_on(cx)
     }
 
     pub fn set_near_liq_text(&self, text: &str, window: &mut Window, cx: &mut Context<Self>) {

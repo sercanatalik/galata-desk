@@ -649,6 +649,60 @@ fn stop_alerts_are_one_switch_for_every_ticker(cx: &mut TestAppContext) {
 }
 
 #[gpui_kit::test]
+fn the_pnl_summary_is_one_switch(cx: &mut TestAppContext) {
+    let (window, desk, link, _dir) = configured(cx);
+    let section = go_to_watcher(cx, window, &desk);
+    cx.update(|cx| assert_eq!(section.read(cx).pnl_summary_shown(cx), Some(true)));
+    click(cx, window, "pnl-summary");
+    cx.update(|cx| {
+        assert_eq!(link.read(cx).saved.last().unwrap().pnl_summary, Some(false));
+        assert_eq!(section.read(cx).pnl_summary_shown(cx), Some(false));
+        assert_eq!(
+            section.read(cx).message(),
+            Some(("PnL summary off.".into(), false))
+        );
+    });
+    click(cx, window, "pnl-summary");
+    cx.update(|cx| assert_eq!(link.read(cx).saved.last().unwrap().pnl_summary, Some(true)));
+}
+
+#[gpui_kit::test]
+fn an_older_watcher_gets_no_pnl_summary_switch_and_no_setting(cx: &mut TestAppContext) {
+    let mut older = recorded_config();
+    older.pnl_summary = None;
+    let (window, desk, link, _dir) =
+        open_with_watcher(cx, answered(ConfigState::Read(older), now()));
+    let section = go_to_watcher(cx, window, &desk);
+    cx.update_window(window.into(), |_, window, cx| {
+        window.render_frame(cx);
+        assert!(window.try_find("pnl-summary").is_none());
+        assert!(window.try_find("stop-alerts").is_some());
+    })
+    .unwrap();
+    cx.update(|cx| {
+        link.update(cx, |l, _| {
+            l.mids.insert("BTC".into(), Decimal::new(60_000, 0));
+        })
+    });
+    let form = cx.update(|cx| section.read(cx).add_form());
+    cx.update_window(window.into(), |_, window, cx| {
+        form.update(cx, |f, cx| f.type_level("BTC", "65000", "", window, cx));
+    })
+    .unwrap();
+    click(cx, window, "add-level-save");
+    cx.update(|cx| {
+        let saved = link.read(cx).saved.last().unwrap().clone();
+        assert_eq!(saved.levels.len(), older_levels() + 1, "the level was saved");
+        let written = serde_json::to_value(&saved).unwrap();
+        assert!(written.get("pnl_summary").is_none(), "{written}");
+    });
+}
+
+fn older_levels() -> usize {
+    recorded_config().levels.len()
+}
+
+#[gpui_kit::test]
 fn the_near_liquidation_distance_is_tuned_within_its_range(cx: &mut TestAppContext) {
     let (window, desk, link, _dir) = configured(cx);
     let section = go_to_watcher(cx, window, &desk);
@@ -811,8 +865,13 @@ fn call_levels_come_first_and_the_health_line_last(cx: &mut TestAppContext) {
         window.render_frame(cx);
         let level = window.find(("level-delete", 0usize)).bounds();
         let stops = window.find("stop-alerts").bounds();
+        let summary = window.find("pnl-summary").bounds();
+        let near_liq = window.find("near-liq-save").bounds();
         let health = window.find("watcher-health").bounds();
         assert!(level.origin.y < stops.origin.y, "levels above stop alerts");
+        assert!(stops.origin.y < summary.origin.y, "the PnL summary below stop alerts");
+        // Near liquidation is the panel beside the stop alerts panel.
+        assert!(summary.origin.x < near_liq.origin.x, "and before near liquidation");
         assert!(stops.origin.y < health.origin.y, "health line last");
     })
     .unwrap();

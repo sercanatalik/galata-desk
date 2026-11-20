@@ -7,9 +7,12 @@ level was then marked fired, and two alerts with their deliveries, plus a
 health record, were written by hand in the watcher's own formats. Every
 address is the example `0x…aa`.
 
+`config.json` was later given `"pnl_summary": true` by hand, as a watcher
+with the PnL summary switch (galata-watcher after `6f62379`) reports it.
+
 | File | Answer to |
 |---|---|
-| `config.json` | `GET /config`, 200, `ETag: "1"`: one fired and one armed level, stop alerts off, a digest |
+| `config.json` | `GET /config`, 200, `ETag: "1"`: one fired and one armed level, stop alerts off, PnL summary on, a digest |
 | `no_config.json` | `GET /config` before the first write, 404, `ETag: "0"` |
 | `health.json` | `GET /health`, with a last error |
 | `alerts.json` | `GET /alerts?since=0`: a late, undelivered stop-loss and a delivered level alert |

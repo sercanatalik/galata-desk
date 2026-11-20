@@ -31,6 +31,10 @@ pub struct WatcherConfig {
     /// Take-profit and stop-loss fill alerts, for every ticker at once.
     #[serde(default = "on", deserialize_with = "switch")]
     pub stop_alerts: bool,
+    /// The half-hourly PnL summary. `None` from a watcher that predates the
+    /// setting: then it is never written, since that watcher would refuse it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pnl_summary: Option<bool>,
     #[serde(default)]
     pub levels: Vec<Level>,
     /// Every other field, as read.
@@ -265,6 +269,24 @@ mod tests {
         let written = serde_json::to_value(&config.levels[0]).unwrap();
         assert_eq!(written["state"], json!("armed"));
         assert!(written.get("fired_at").is_none());
+    }
+
+    #[test]
+    fn the_pnl_summary_switch_is_written_only_when_the_watcher_has_it() {
+        let read: Value = serde_json::from_str(CONFIG).unwrap();
+        let config: WatcherConfig = serde_json::from_value(read.clone()).unwrap();
+        assert_eq!(config.pnl_summary, Some(true));
+        let mut off = config.clone();
+        off.pnl_summary = Some(false);
+        assert_eq!(serde_json::to_value(&off).unwrap()["pnl_summary"], json!(false));
+
+        let mut older = read;
+        older.as_object_mut().unwrap().remove("pnl_summary");
+        let config: WatcherConfig = serde_json::from_value(older).unwrap();
+        assert_eq!(config.pnl_summary, None);
+        assert!(!config.rest.contains_key("pnl_summary"));
+        let written = serde_json::to_value(&config).unwrap();
+        assert!(written.get("pnl_summary").is_none(), "an older watcher would refuse it");
     }
 
     #[test]

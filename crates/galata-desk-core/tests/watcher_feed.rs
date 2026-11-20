@@ -155,6 +155,25 @@ async fn two_quick_saves_both_land_in_order() {
 }
 
 #[tokio::test]
+async fn the_pnl_summary_switch_is_saved_and_read_back() {
+    let fake = Fake::configured();
+    let f = feed(&fake, SLOW).await;
+    let mut rx = f.snapshots();
+    until(&mut rx, |s| s.reached_ms.is_some()).await;
+    assert_eq!(rx.borrow().config.config().unwrap().pnl_summary, Some(true));
+
+    let saved = f.save(|c| c.pnl_summary = Some(false)).await.unwrap();
+    assert_eq!(saved.pnl_summary, Some(false));
+    let body = fake.writes().last().unwrap().body.clone().unwrap();
+    assert_eq!(body["pnl_summary"], json!(false));
+    let s = until(&mut rx, |s| {
+        s.config.config().is_some_and(|c| c.version == 2)
+    })
+    .await;
+    assert_eq!(s.config.config().unwrap().pnl_summary, Some(false));
+}
+
+#[tokio::test]
 async fn a_stale_save_is_refused_and_the_newer_configuration_shown() {
     let fake = Fake::configured();
     let f = feed(&fake, SLOW).await;
