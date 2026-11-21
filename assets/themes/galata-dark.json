@@ -57,6 +57,8 @@
     "tab.active.foreground": "#ece8df",
     "tab_bar.background": "#15181b",
     "tab_bar.segmented.background": "#1b1f23",
+    "drag.border": "#f0a73a",
+    "drop_target.background": "#f0a73a26",
     "title_bar.background": "#0e1012",
     "title_bar.border": "#20252a",
     "skeleton.background": "#1b1f23",

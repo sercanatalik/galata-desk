@@ -180,6 +180,9 @@ impl PanelRecord {
 /// What a panel keeps for the workspace: its key, its links, and the focus
 /// the dock moves to it. A windowed panel has one too, unsaved.
 pub struct DockMeta {
+    /// The dock area the panel is in, for its own Close; none in the fixed
+    /// layout.
+    pub area: Option<WeakEntity<DockArea>>,
     pub key: String,
     pub roles: [Role; 3],
     pub actions: Vec<Action>,
@@ -190,6 +193,7 @@ impl DockMeta {
     /// A new panel's: a fresh key and no links.
     pub fn fresh(cx: &mut App) -> Self {
         Self {
+            area: None,
             key: new_key(),
             roles: [Role::Off; 3],
             actions: Vec::new(),
@@ -198,8 +202,9 @@ impl DockMeta {
     }
 
     /// A saved panel's, as it was saved.
-    pub fn restored(record: &PanelRecord, cx: &mut App) -> Self {
+    pub fn restored(record: &PanelRecord, area: WeakEntity<DockArea>, cx: &mut App) -> Self {
         Self {
+            area: Some(area),
             key: record.key.clone(),
             roles: record.roles,
             actions: record.actions.clone(),
@@ -283,18 +288,30 @@ fn build(
         let state = context.state().clone();
         return panel_handle(cx.new(|cx| Kept::new(state, cx)));
     };
-    new_panel(kind, model, &record, window, cx)
+    let home = Home {
+        model,
+        area: context.dock_area(),
+    };
+    new_panel(kind, &home, &record, window, cx)
+}
+
+/// Where a workspace panel lives: the model it shows and the dock area it is
+/// in.
+pub struct Home {
+    pub model: Entity<MarketsModel>,
+    pub area: WeakEntity<DockArea>,
 }
 
 /// A panel of `kind` from `record`, on `model`, wrapped for the dock.
 pub fn new_panel(
     kind: PanelKind,
-    model: Entity<MarketsModel>,
+    home: &Home,
     record: &PanelRecord,
     window: &mut Window,
     cx: &mut App,
 ) -> Arc<dyn BasePanelView> {
-    let meta = DockMeta::restored(record, cx);
+    let model = home.model.clone();
+    let meta = DockMeta::restored(record, home.area.clone(), cx);
     let market = record.market();
     match kind {
         PanelKind::Chart => {
@@ -402,12 +419,118 @@ macro_rules! dock_panel {
                 _: &mut gpui_kit::Window,
                 cx: &mut gpui_kit::Context<Self>,
             ) -> impl gpui_kit::IntoElement {
-                self.title_text(cx)
+                $crate::markets::dock::panel_title(self.title_text(cx))
+            }
+
+            fn title_suffix(
+                &mut self,
+                _: &mut gpui_kit::Window,
+                _: &mut gpui_kit::Context<Self>,
+            ) -> Option<impl gpui_kit::IntoElement> {
+                $crate::markets::dock::channel_marks(&self.dock.roles)
+            }
+
+            /// Close, in the header. The dock's own refuses to close the
+            /// last panel; this one does not, and an empty workspace offers
+            /// Add panel and the presets.
+            fn toolbar_buttons(
+                &mut self,
+                _: &mut gpui_kit::Window,
+                cx: &mut gpui_kit::Context<Self>,
+            ) -> Option<Vec<gpui_kit::component::button::Button>> {
+                $crate::markets::dock::close_button(self.dock.area.clone(), cx.entity())
+                    .map(|button| vec![button])
+            }
+
+            /// Maximise is a button in the header, beside close.
+            fn zoom_control(
+                &self,
+                _: &gpui_kit::App,
+            ) -> Option<gpui_kit::component::dock::PanelControl> {
+                Some(gpui_kit::component::dock::PanelControl::Toolbar)
+            }
+
+            /// Panels draw their own spacing, as in the fixed layout.
+            fn inner_padding(&self, _: &gpui_kit::App) -> bool {
+                false
             }
         }
     };
 }
 pub(super) use dock_panel;
+
+/// A panel's Close: it leaves `area`. None outside a dock area.
+pub fn close_button<P: BasePanel>(
+    area: Option<WeakEntity<DockArea>>,
+    panel: Entity<P>,
+) -> Option<gpui_kit::component::button::Button> {
+    use gpui_kit::component::IconName;
+    use gpui_kit::component::button::{Button, ButtonVariants as _};
+    let area = area?;
+    Some(
+        Button::new("panel-close")
+            .icon(IconName::Close)
+            .ghost()
+            .tooltip("Close")
+            .on_click(move |_, window, cx| {
+                if let Some(area) = area.upgrade() {
+                    area.update(cx, |a, cx| a.remove_panel(panel.clone(), window, cx));
+                }
+            }),
+    )
+}
+
+/// A panel's title in its header.
+pub fn panel_title(text: String) -> gpui_kit::AnyElement {
+    use gpui_kit::TestSupportExt as _;
+    div()
+        .id("panel-title")
+        .text_size(gpui_kit::px(12.5))
+        .font_weight(gpui_kit::FontWeight::MEDIUM)
+        .child(text)
+        .test_support()
+        .into_any_element()
+}
+
+/// Each link channel's letter and colour: A amber, B blue, C violet.
+pub const CHANNELS: [(&str, u32); 3] = [("A", 0xf0a73a), ("B", 0x5fa8f5), ("C", 0xb48cf0)];
+
+/// The marks of the channels a panel takes part in, for its header; none
+/// for a panel that is not linked.
+pub fn channel_marks(roles: &[Role; 3]) -> Option<gpui_kit::AnyElement> {
+    use gpui_kit::TestSupportExt as _;
+    if roles.iter().all(|r| *r == Role::Off) {
+        return None;
+    }
+    let marks = roles
+        .iter()
+        .enumerate()
+        .filter(|(_, role)| **role != Role::Off)
+        .map(|(ix, _)| {
+            let (letter, colour) = CHANNELS[ix];
+            let colour = gpui_kit::rgb(colour);
+            div()
+                .id(("channel-mark", ix))
+                .size(gpui_kit::px(16.))
+                .flex()
+                .items_center()
+                .justify_center()
+                .rounded(gpui_kit::px(3.))
+                .border_1()
+                .border_color(colour)
+                .text_size(gpui_kit::px(10.))
+                .font_weight(gpui_kit::FontWeight::SEMIBOLD)
+                .text_color(colour)
+                .child(letter)
+                .test_support()
+        });
+    Some(
+        gpui_kit::component::h_flex()
+            .gap_1()
+            .children(marks)
+            .into_any_element(),
+    )
+}
 
 /// How a panel names a market in its title.
 pub fn market_name(market: &MarketId) -> String {

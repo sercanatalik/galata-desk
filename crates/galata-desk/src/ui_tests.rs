@@ -6147,7 +6147,11 @@ fn each_panel_kind_comes_back_from_a_saved_layout_with_its_market_and_period(
         let area = new_area(window, cx);
         let mut layout = DockLayout::h_split();
         for record in [&chart, &tiles, &detail, &position] {
-            let panel = dock::new_panel(record.kind, model.clone(), record, window, cx);
+            let home = dock::Home {
+                model: model.clone(),
+                area: area.downgrade(),
+            };
+            let panel = dock::new_panel(record.kind, &home, record, window, cx);
             layout = layout.child(DockLayout::tabs().panel_view(panel, cx), None);
         }
         area.update(cx, |area, cx| area.set_center(layout, window, cx));
@@ -6518,6 +6522,597 @@ fn other_sections_look_the_same_in_fullscreen(cx: &mut TestAppContext) {
         desk.update(cx, |d, cx| d.show(Section::Markets, window, cx));
         window.render_frame(cx);
         assert!(window.try_find("markets-workspace").is_some());
+    })
+    .unwrap();
+}
+
+#[gpui_kit::test]
+fn a_panel_header_shows_its_title_channel_maximise_and_close(cx: &mut TestAppContext) {
+    use crate::markets::dock::{self, PanelKind, PanelRecord, Role};
+    use gpui_kit::component::dock::DockLayout;
+
+    let (window, desk, _dir) = open_with(cx, Some(&["BTC", "ETH"]));
+    let markets = go_to_markets(window, &desk, cx);
+    fullscreen(cx, window, &markets, true);
+    let model = cx.update(|cx| markets.read(cx).model());
+    let chart = cx
+        .update_window(window.into(), |_, window, cx| {
+            // The workspace holds one chart, of ETH, listening on channel A.
+            let mut record =
+                PanelRecord::fresh(PanelKind::Chart, Some(&MarketId::new("ETH")), None);
+            record.roles = [Role::Listen, Role::Off, Role::Off];
+            let area = markets.read(cx).workspace_area().unwrap();
+            let home = dock::Home {
+                model: model.clone(),
+                area: area.downgrade(),
+            };
+            let panel = dock::new_panel(PanelKind::Chart, &home, &record, window, cx);
+            let chart = panel
+                .view()
+                .downcast::<crate::markets::ChartPanel>()
+                .unwrap();
+            let layout = DockLayout::tabs().panel_view(panel, cx);
+            area.update(cx, |a, cx| a.set_center(layout, window, cx));
+            window.render_frame(cx);
+            window.render_frame(cx);
+            chart
+        })
+        .unwrap();
+    cx.update_window(window.into(), |_, window, cx| {
+        assert_eq!(chart.read(cx).title_text(cx), "ETH \u{b7} 24H");
+        assert_eq!(window.find_all("panel-title").len(), 1);
+        assert!(
+            window.try_find(("channel-mark", 0usize)).is_some(),
+            "channel A"
+        );
+        assert!(window.try_find(("channel-mark", 1usize)).is_none());
+        assert!(window.try_find("zoom-in").is_some(), "maximise");
+        assert!(window.try_find("panel-close").is_some(), "close");
+    })
+    .unwrap();
+
+    // Close works on the last panel too: the workspace is left empty.
+    cx.update_window(window.into(), |_, window, cx| {
+        let area = markets.read(cx).workspace_area().unwrap();
+        window.click("panel-close", cx);
+        window.render_frame(cx);
+        let left = area
+            .read(cx)
+            .layout(gpui_kit::component::dock::DockPlacement::Center)
+            .unwrap()
+            .panels()
+            .count();
+        assert_eq!(left, 0);
+    })
+    .unwrap();
+}
+
+/// Markets in fullscreen, its workspace laid out by `build` from new panels.
+/// Returns the panels `build` made, in order, by their keys.
+fn workspace_with(
+    cx: &mut TestAppContext,
+    markets_list: &[&str],
+    build: impl FnOnce(
+        &mut dyn FnMut(
+            crate::markets::dock::PanelKind,
+            Option<&str>,
+            &mut gpui_kit::Window,
+            &mut gpui_kit::App,
+        ) -> gpui_kit::component::dock::DockLayout,
+        &mut gpui_kit::Window,
+        &mut gpui_kit::App,
+    ) -> gpui_kit::component::dock::DockLayout,
+) -> (
+    WindowHandle<Root>,
+    Entity<Desk>,
+    Entity<Markets>,
+    Vec<String>,
+    tempfile::TempDir,
+) {
+    use crate::markets::dock::{self, PanelRecord};
+    let (window, desk, dir) = open_with(cx, Some(markets_list));
+    let markets = go_to_markets(window, &desk, cx);
+    fullscreen(cx, window, &markets, true);
+    let keys = cx
+        .update_window(window.into(), |_, window, cx| {
+            let model = markets.read(cx).model();
+            let area = markets.read(cx).workspace_area().unwrap();
+            let home = dock::Home {
+                model,
+                area: area.downgrade(),
+            };
+            let mut keys = Vec::new();
+            let mut panel = |kind,
+                             market: Option<&str>,
+                             window: &mut gpui_kit::Window,
+                             cx: &mut gpui_kit::App| {
+                let market = market.map(MarketId::new);
+                let record = PanelRecord::fresh(kind, market.as_ref(), None);
+                keys.push(record.key.clone());
+                let view = dock::new_panel(kind, &home, &record, window, cx);
+                gpui_kit::component::dock::DockLayout::tabs().panel_view(view, cx)
+            };
+            let layout = build(&mut panel, window, cx);
+            area.update(cx, |a, cx| a.set_center(layout, window, cx));
+            window.render_frame(cx);
+            window.render_frame(cx);
+            keys
+        })
+        .unwrap();
+    (window, desk, markets, keys, dir)
+}
+
+/// Where each panel's title is drawn, by panel title text order of the
+/// layout's panels: the bounds of every `panel-title` on screen.
+fn titles(window: &gpui_kit::Window) -> Vec<gpui_kit::Bounds<gpui_kit::Pixels>> {
+    window
+        .find_all("panel-title")
+        .into_iter()
+        .map(|e| e.bounds())
+        .collect()
+}
+
+/// Drag with the mouse from `from` to `to`, drawing as it goes, as a hand
+/// does: drop targets appear only once the drag has been drawn. With
+/// `escape`, Escape is pressed before letting go.
+fn drag_drawn(
+    window: &mut gpui_kit::Window,
+    from: gpui_kit::Point<gpui_kit::Pixels>,
+    to: gpui_kit::Point<gpui_kit::Pixels>,
+    escape: bool,
+    cx: &mut gpui_kit::App,
+) {
+    window.render_frame(cx);
+    window.pointer_move(from, None, cx);
+    window.pointer_down(from, gpui_kit::MouseButton::Left, cx);
+    for step in 1..=8 {
+        let f = step as f32 / 8.;
+        let at = gpui_kit::point(from.x + (to.x - from.x) * f, from.y + (to.y - from.y) * f);
+        window.pointer_move(at, Some(gpui_kit::MouseButton::Left), cx);
+        window.render_frame(cx);
+    }
+    if escape {
+        window.press("escape", cx);
+    }
+    window.pointer_up(to, gpui_kit::MouseButton::Left, cx);
+    window.render_frame(cx);
+    window.render_frame(cx);
+}
+
+/// The saved layout's tab groups, each as its panels' keys, and which of
+/// them is shown.
+fn groups(state: &gpui_kit::component::dock::PanelState) -> Vec<(Vec<String>, usize)> {
+    use gpui_kit::component::dock::PanelInfo;
+    let mut out = Vec::new();
+    if let PanelInfo::Tabs { active_index } = &state.info {
+        out.push((
+            state
+                .children
+                .iter()
+                .filter_map(|c| crate::markets::dock::PanelRecord::from_state(c).map(|r| r.key))
+                .collect(),
+            *active_index,
+        ));
+    }
+    for child in &state.children {
+        out.extend(groups(child));
+    }
+    out
+}
+
+#[gpui_kit::test]
+fn dropping_the_blotter_on_a_charts_right_side_splits_the_chart(cx: &mut TestAppContext) {
+    use crate::markets::dock::PanelKind;
+    use gpui_kit::component::dock::DockLayout;
+    let (window, _desk, _markets, _keys, _dir) =
+        workspace_with(cx, &["BTC", "ETH"], |panel, window, cx| {
+            DockLayout::v_split()
+                .child(panel(PanelKind::Chart, Some("ETH"), window, cx), None)
+                .child(panel(PanelKind::Blotter, None, window, cx), None)
+        });
+    cx.update_window(window.into(), |_, window, cx| {
+        let before = titles(window);
+        assert_eq!(before.len(), 2);
+        let (chart, blotter) = (before[0], before[1]);
+        assert!(
+            blotter.origin.y > chart.origin.y,
+            "the blotter starts below"
+        );
+        let chart_group = window.find_all("tab-panel")[0].bounds();
+        let target = gpui_kit::point(
+            chart_group.origin.x + chart_group.size.width * 0.92,
+            chart_group.origin.y + chart_group.size.height * 0.5,
+        );
+        drag_drawn(window, blotter.center(), target, false, cx);
+    })
+    .unwrap();
+    // The drop is told to the dock after the drag's update.
+    cx.update_window(window.into(), |_, window, cx| {
+        window.render_frame(cx);
+        let after = titles(window);
+        assert_eq!(after.len(), 2);
+        assert!(
+            (after[0].origin.y - after[1].origin.y).abs() < gpui_kit::px(1.),
+            "side by side: {after:?}"
+        );
+        assert!(
+            after[1].origin.x > after[0].origin.x,
+            "chart left, blotter right"
+        );
+    })
+    .unwrap();
+}
+
+#[gpui_kit::test]
+fn dropping_a_chart_on_anothers_centre_makes_them_tabs_and_shows_it(cx: &mut TestAppContext) {
+    use crate::markets::dock::PanelKind;
+    use gpui_kit::component::dock::DockLayout;
+    let (window, _desk, markets, keys, _dir) =
+        workspace_with(cx, &["BTC", "ETH"], |panel, window, cx| {
+            DockLayout::h_split()
+                .child(panel(PanelKind::Chart, Some("BTC"), window, cx), None)
+                .child(panel(PanelKind::Chart, Some("ETH"), window, cx), None)
+        });
+    cx.update_window(window.into(), |_, window, cx| {
+        let before = titles(window);
+        let first_group = window.find_all("tab-panel")[0].bounds();
+        drag_drawn(window, before[1].center(), first_group.center(), false, cx);
+    })
+    .unwrap();
+    cx.update_window(window.into(), |_, window, cx| {
+        window.render_frame(cx);
+        let area = markets.read(cx).workspace_area().unwrap();
+        let state = area.read(cx).dump(cx);
+        let found = groups(&state.center);
+        assert_eq!(found.len(), 1, "one space: {found:?}");
+        let (members, shown) = &found[0];
+        assert_eq!(members.len(), 2);
+        assert_eq!(members[*shown], keys[1], "the dropped chart is shown");
+    })
+    .unwrap();
+}
+
+#[gpui_kit::test]
+fn escape_cancels_a_drag(cx: &mut TestAppContext) {
+    use crate::markets::dock::PanelKind;
+    use gpui_kit::component::dock::DockLayout;
+    let (window, _desk, markets, _keys, _dir) =
+        workspace_with(cx, &["BTC", "ETH"], |panel, window, cx| {
+            DockLayout::h_split()
+                .child(panel(PanelKind::Chart, Some("BTC"), window, cx), None)
+                .child(panel(PanelKind::Chart, Some("ETH"), window, cx), None)
+        });
+    let before = cx
+        .update_window(window.into(), |_, window, cx| {
+            let area = markets.read(cx).workspace_area().unwrap();
+            let before = area.read(cx).dump(cx);
+            let from = titles(window)[1].center();
+            let to = window.find_all("tab-panel")[0].bounds().center();
+            drag_drawn(window, from, to, true, cx);
+            assert!(!cx.has_active_drag());
+            before
+        })
+        .unwrap();
+    cx.update_window(window.into(), |_, window, cx| {
+        window.render_frame(cx);
+        let area = markets.read(cx).workspace_area().unwrap();
+        assert_eq!(area.read(cx).dump(cx), before, "nothing moved");
+    })
+    .unwrap();
+}
+
+#[gpui_kit::test]
+fn a_divider_stops_where_the_panel_beside_it_is_100_points_wide(cx: &mut TestAppContext) {
+    use crate::markets::dock::PanelKind;
+    use gpui_kit::component::dock::DockLayout;
+    let (window, _desk, _markets, _keys, _dir) =
+        workspace_with(cx, &["BTC", "ETH"], |panel, window, cx| {
+            DockLayout::h_split()
+                .child(panel(PanelKind::Chart, Some("BTC"), window, cx), None)
+                .child(panel(PanelKind::Detail, Some("ETH"), window, cx), None)
+        });
+    cx.update_window(window.into(), |_, window, cx| {
+        let edge = window.find_all(("resizable-handle", 0usize))[0]
+            .bounds()
+            .center();
+        // Dragged far past the left edge.
+        drag_drawn(
+            window,
+            edge,
+            gpui_kit::point(gpui_kit::px(2.), edge.y),
+            false,
+            cx,
+        );
+    })
+    .unwrap();
+    cx.update_window(window.into(), |_, window, cx| {
+        window.render_frame(cx);
+        let first = window.find_all("tab-panel")[0].bounds();
+        let width = f32::from(first.size.width);
+        assert!(
+            (99.0..=104.0).contains(&width),
+            "the divider stops at 100 points: {width}"
+        );
+    })
+    .unwrap();
+}
+
+#[gpui_kit::test]
+fn a_chart_too_narrow_for_its_axis_shows_the_candles_alone(cx: &mut TestAppContext) {
+    use crate::markets::dock::PanelKind;
+    use gpui_kit::component::dock::DockLayout;
+    let (window, _desk, markets, _keys, _dir) =
+        workspace_with(cx, &["BTC", "ETH"], |panel, window, cx| {
+            DockLayout::h_split()
+                .child(
+                    panel(PanelKind::Chart, Some("BTC"), window, cx),
+                    Some(gpui_kit::px(180.)),
+                )
+                .child(panel(PanelKind::Detail, Some("ETH"), window, cx), None)
+        });
+    // A day of candles for the panel's own BTC chart.
+    cx.update(|cx| {
+        use galata_desk_core::market::feed::{ChartKey, ChartView};
+        let mut snapshot = charted("BTC", &["BTC", "ETH"], 96);
+        let chart = snapshot.chart.take().unwrap();
+        snapshot.charts.insert(
+            ChartKey {
+                market: MarketId::new("BTC"),
+                period: MarketPeriod::Day,
+            },
+            ChartView::Ready(chart),
+        );
+        markets.update(cx, |m, cx| m.set_snapshot(snapshot, cx));
+    });
+    cx.update_window(window.into(), |_, window, cx| {
+        window.render_frame(cx);
+        window.render_frame(cx);
+        assert!(
+            window.try_find("chart-plot").is_some(),
+            "the candles are drawn"
+        );
+        assert!(
+            window.try_find("chart-price-axis").is_none(),
+            "no price axis"
+        );
+        let axis = window.find("chart-time-axis").bounds();
+        let labels: Vec<_> = (0..5usize)
+            .filter_map(|i| window.try_find(("chart-time", i)))
+            .map(|e| e.bounds())
+            .collect();
+        assert_eq!(labels.len(), 2, "as many labels as fit");
+        for pair in labels.windows(2) {
+            assert!(pair[0].right() <= pair[1].left(), "labels do not overlap");
+        }
+        for label in &labels {
+            assert!(
+                label.left() >= axis.left() && label.right() <= axis.right() + gpui_kit::px(0.5)
+            );
+        }
+    })
+    .unwrap();
+}
+
+#[gpui_kit::test]
+fn maximising_fills_the_workspace_and_restoring_puts_every_panel_back(cx: &mut TestAppContext) {
+    use crate::markets::dock::PanelKind;
+    use gpui_kit::component::dock::DockLayout;
+    let (window, _desk, markets, _keys, _dir) =
+        workspace_with(cx, &["BTC", "ETH"], |panel, window, cx| {
+            DockLayout::h_split()
+                .child(panel(PanelKind::Chart, Some("BTC"), window, cx), None)
+                .child(panel(PanelKind::Chart, Some("ETH"), window, cx), None)
+                .child(panel(PanelKind::Blotter, None, window, cx), None)
+        });
+    let before = cx
+        .update_window(window.into(), |_, window, cx| {
+            let area = markets.read(cx).workspace_area().unwrap();
+            let before = area.read(cx).dump(cx);
+            assert_eq!(titles(window).len(), 3);
+            let zoom = window.find_all("zoom-in")[0].bounds().center();
+            window.pointer_move(zoom, None, cx);
+            window.pointer_down(zoom, gpui_kit::MouseButton::Left, cx);
+            window.pointer_up(zoom, gpui_kit::MouseButton::Left, cx);
+            before
+        })
+        .unwrap();
+    cx.update_window(window.into(), |_, window, cx| {
+        window.render_frame(cx);
+        let area = markets.read(cx).workspace_area().unwrap();
+        assert!(area.read(cx).is_zoomed());
+        assert_eq!(titles(window).len(), 1, "the one chart fills the workspace");
+        window.click("zoom-out", cx);
+    })
+    .unwrap();
+    cx.update_window(window.into(), |_, window, cx| {
+        window.render_frame(cx);
+        let area = markets.read(cx).workspace_area().unwrap();
+        assert!(!area.read(cx).is_zoomed());
+        assert_eq!(titles(window).len(), 3);
+        assert_eq!(
+            area.read(cx).dump(cx),
+            before,
+            "every panel back where it was"
+        );
+    })
+    .unwrap();
+}
+
+#[gpui_kit::test]
+fn closing_the_last_panel_offers_add_panel_and_the_layouts(cx: &mut TestAppContext) {
+    use crate::markets::dock::PanelKind;
+    use gpui_kit::component::dock::DockLayout;
+    let (window, _desk, markets, _keys, _dir) =
+        workspace_with(cx, &["BTC", "ETH"], |panel, window, cx| {
+            DockLayout::h_split()
+                .child(panel(PanelKind::Chart, Some("BTC"), window, cx), None)
+                .child(panel(PanelKind::Detail, Some("ETH"), window, cx), None)
+        });
+    for _ in 0..2 {
+        cx.update_window(window.into(), |_, window, cx| {
+            window.render_frame(cx);
+            let close = window.find_all("panel-close")[0].bounds().center();
+            window.pointer_move(close, None, cx);
+            window.pointer_down(close, gpui_kit::MouseButton::Left, cx);
+            window.pointer_up(close, gpui_kit::MouseButton::Left, cx);
+        })
+        .unwrap();
+    }
+    cx.update_window(window.into(), |_, window, cx| {
+        window.render_frame(cx);
+        window.render_frame(cx);
+        assert!(window.try_find("workspace-empty").is_some());
+        assert!(
+            window.try_find("workspace-empty-add").is_some(),
+            "Add panel"
+        );
+        assert!(window.try_find(("preset", 0usize)).is_some(), "a layout");
+        // Choosing it fills the workspace again.
+        window.click(("preset", 0usize), cx);
+        window.render_frame(cx);
+        window.render_frame(cx);
+        assert!(window.try_find("workspace-empty").is_none());
+        let area = markets.read(cx).workspace_area().unwrap();
+        let panels = area
+            .read(cx)
+            .layout(gpui_kit::component::dock::DockPlacement::Center)
+            .unwrap()
+            .panels()
+            .count();
+        assert_eq!(panels, 7);
+    })
+    .unwrap();
+}
+
+/// Choose `name` from the workspace's Add panel menu.
+fn add_from_menu(window: &mut gpui_kit::Window, name: &str, cx: &mut gpui_kit::App) {
+    window.click("workspace-add", cx);
+    window.render_frame(cx);
+    let item = window.find_by_label(name).bounds().center();
+    window.pointer_move(item, None, cx);
+    window.pointer_down(item, gpui_kit::MouseButton::Left, cx);
+    window.pointer_up(item, gpui_kit::MouseButton::Left, cx);
+    window.render_frame(cx);
+}
+
+fn center_panels(markets: &Entity<Markets>, cx: &gpui_kit::App) -> usize {
+    markets
+        .read(cx)
+        .workspace_area()
+        .unwrap()
+        .read(cx)
+        .layout(gpui_kit::component::dock::DockPlacement::Center)
+        .unwrap()
+        .panels()
+        .count()
+}
+
+#[gpui_kit::test]
+fn adding_a_chart_splits_the_largest_panel_and_both_charts_keep_their_own(cx: &mut TestAppContext) {
+    use crate::markets::dock::PanelKind;
+    use gpui_kit::component::dock::DockLayout;
+    let (window, _desk, markets, keys, _dir) =
+        workspace_with(cx, &["BTC", "ETH"], |panel, window, cx| {
+            DockLayout::h_split()
+                .child(
+                    panel(PanelKind::Chart, Some("BTC"), window, cx),
+                    Some(gpui_kit::px(1000.)),
+                )
+                .child(panel(PanelKind::Detail, Some("ETH"), window, cx), None)
+        });
+    cx.update_window(window.into(), |_, window, cx| {
+        add_from_menu(window, "Chart", cx);
+    })
+    .unwrap();
+    cx.update_window(window.into(), |_, window, cx| {
+        window.render_frame(cx);
+        assert_eq!(center_panels(&markets, cx), 3);
+        let area = markets.read(cx).workspace_area().unwrap();
+        let found = groups(&area.read(cx).dump(cx).center);
+        let order: Vec<&String> = found.iter().map(|(members, _)| &members[0]).collect();
+        assert_eq!(order.len(), 3);
+        assert_eq!(order[0], &keys[0], "the chart keeps its place");
+        assert!(!keys.contains(order[1]), "the new chart is beside it");
+        assert_eq!(order[2], &keys[1], "the detail is untouched");
+
+        // Two charts, each with its own market and period.
+        let charts: Vec<_> = {
+            let a = area.read(cx);
+            a.layout(gpui_kit::component::dock::DockPlacement::Center)
+                .unwrap()
+                .panels()
+                .filter_map(|id| {
+                    a.panel(id)?
+                        .view()
+                        .downcast::<crate::markets::ChartPanel>()
+                        .ok()
+                })
+                .collect()
+        };
+        assert_eq!(charts.len(), 2);
+        charts[1].update(cx, |c, cx| {
+            c.set_market(Some(MarketId::new("ETH")), cx);
+            c.set_period(Some(MarketPeriod::Week), cx);
+        });
+        window.render_frame(cx);
+        let titles: Vec<String> = charts.iter().map(|c| c.read(cx).title_text(cx)).collect();
+        assert!(titles.contains(&"BTC \u{b7} 24H".to_string()), "{titles:?}");
+        assert!(titles.contains(&"ETH \u{b7} 7D".to_string()), "{titles:?}");
+        let held = markets.read(cx).model().read(cx).chart_holds();
+        assert_eq!(held.len(), 2, "two charts, two holds: {held:?}");
+    })
+    .unwrap();
+}
+
+#[gpui_kit::test]
+fn added_tiles_show_every_watched_market(cx: &mut TestAppContext) {
+    use crate::markets::dock::PanelKind;
+    use gpui_kit::component::dock::DockLayout;
+    let (window, _desk, markets, _keys, _dir) =
+        workspace_with(cx, &["BTC", "ETH", "SOL"], |panel, window, cx| {
+            DockLayout::h_split().child(panel(PanelKind::Chart, Some("BTC"), window, cx), None)
+        });
+    cx.update(|cx| {
+        markets.update(cx, |m, cx| {
+            m.set_snapshot(snapshot(&["BTC", "ETH", "SOL"], &["BTC", "ETH", "SOL"]), cx)
+        })
+    });
+    cx.update_window(window.into(), |_, window, cx| {
+        assert!(window.try_find(("tile", 0usize)).is_none());
+        add_from_menu(window, "Watchlist tiles", cx);
+    })
+    .unwrap();
+    cx.update_window(window.into(), |_, window, cx| {
+        window.render_frame(cx);
+        window.render_frame(cx);
+        assert_eq!(center_panels(&markets, cx), 2);
+        let tiles = (0..3usize)
+            .filter(|i| window.try_find(("tile", *i)).is_some())
+            .count();
+        assert_eq!(tiles, 3, "a tile for every watched market");
+        assert!(window.try_find(("tile", 3usize)).is_none());
+    })
+    .unwrap();
+}
+
+#[gpui_kit::test]
+fn there_is_only_ever_one_order_ticket(cx: &mut TestAppContext) {
+    let (window, desk, _dir) = open_with(cx, Some(&["BTC", "ETH"]));
+    let markets = go_to_markets(window, &desk, cx);
+    fullscreen(cx, window, &markets, true);
+    cx.update_window(window.into(), |_, window, cx| {
+        // Trader has a ticket: the menu shows it as added.
+        assert_eq!(center_panels(&markets, cx), 7);
+        window.click("workspace-add", cx);
+        window.render_frame(cx);
+        assert!(window.try_find_by_label("Order ticket (added)").is_some());
+        assert!(window.try_find_by_label("Order ticket").is_none());
+        window.press("escape", cx);
+        markets.update(cx, |m, cx| {
+            m.add_panel(crate::markets::dock::PanelKind::Ticket, window, cx)
+        });
+        window.render_frame(cx);
+        assert_eq!(center_panels(&markets, cx), 7, "no second ticket");
     })
     .unwrap();
 }

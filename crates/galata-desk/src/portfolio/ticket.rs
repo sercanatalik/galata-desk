@@ -195,10 +195,6 @@ impl Portfolio {
     }
 
     /// Whether a ticket panel is docked.
-    #[allow(
-        dead_code,
-        reason = "the workspace's Add panel menu (task 3.8) reads it"
-    )]
     pub fn ticket_is_docked(&self) -> bool {
         self.actions.ticket_docked
     }

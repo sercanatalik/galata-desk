@@ -267,23 +267,39 @@ impl ChartPanel {
                 time_label(at, span_ms.max(24 * 3_600_000))
             )
         });
+        // In the workspace the panel's header already names the market and
+        // period. The line gives way to a narrow chart rather than widen it.
+        let docked = matches!(self.source, MarketSource::Own(_));
+        let squeeze = |d: gpui_kit::Div| {
+            d.min_w_0()
+                .overflow_hidden()
+                .whitespace_nowrap()
+                .text_ellipsis()
+        };
         let heading = h_flex()
+            .min_w_0()
+            .overflow_hidden()
             .gap_4()
             .text_size(px(12.5))
             .text_color(Palette::muted())
-            .child(
-                div()
-                    .text_color(Palette::text())
-                    .font_weight(gpui_kit::FontWeight::MEDIUM)
-                    .child(format!(
-                        "{} \u{b7} {}",
-                        tile.market.ticker(),
-                        period.label()
-                    )),
-            )
-            .child(shown)
+            .when(!docked, |d| {
+                d.child(
+                    div()
+                        .flex_shrink_0()
+                        .text_color(Palette::text())
+                        .font_weight(gpui_kit::FontWeight::MEDIUM)
+                        .child(format!(
+                            "{} \u{b7} {}",
+                            tile.market.ticker(),
+                            period.label()
+                        )),
+                )
+            })
+            .child(squeeze(div()).child(shown))
             .child(div().flex_1())
-            .children(since_note.map(|note| div().id("trades-since").child(note).test_support()));
+            .children(
+                since_note.map(|note| squeeze(div()).id("trades-since").child(note).test_support()),
+            );
 
         let message = |text: &'static str| {
             h_flex()
@@ -371,12 +387,20 @@ impl ChartPanel {
         v_flex()
             .flex_1()
             .min_w_0()
+            .w_full()
             .h_full()
             .px_4()
             .py_3()
             .gap_2()
             .child(heading)
-            .child(div().flex_1().min_h_0().child(body))
+            .child(
+                div()
+                    .flex_1()
+                    .min_h_0()
+                    .min_w_0()
+                    .overflow_hidden()
+                    .child(body),
+            )
             .into_any_element()
     }
 }

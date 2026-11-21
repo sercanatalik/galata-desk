@@ -58,6 +58,12 @@ const DETAIL_WIDTH: f32 = 280.;
 /// The chart's plot, and the column of price labels beside it.
 const PLOT_HEIGHT: f32 = 266.;
 const PRICE_AXIS_WIDTH: f32 = 74.;
+/// The room one time label takes on the time axis, gap included.
+const TIME_LABEL_WIDTH: f32 = 100.;
+/// A chart narrower than this has no room for the price axis beside a plot
+/// with two time labels under it: it draws the compact form, without the
+/// price axis.
+const COMPACT_CHART_WIDTH: f32 = PRICE_AXIS_WIDTH + 8. + 2. * TIME_LABEL_WIDTH;
 /// The component kit draws a chart's highest value this far below its top.
 const PLOT_TOP_INSET: f32 = 10.;
 
@@ -104,8 +110,8 @@ pub struct Markets {
     workspace: Option<workspace::Workspace>,
     /// Whether Markets was last drawn fullscreen, to notice the change.
     was_fullscreen: bool,
-    /// Tests say whether the window is fullscreen.
-    #[cfg(test)]
+    /// Tests and screenshot runs say whether the window is fullscreen.
+    #[cfg(any(test, feature = "shot"))]
     fullscreen: Option<bool>,
     _subscriptions: Vec<Subscription>,
 }
@@ -155,7 +161,7 @@ impl Markets {
             search,
             workspace: None,
             was_fullscreen: false,
-            #[cfg(test)]
+            #[cfg(any(test, feature = "shot"))]
             fullscreen: None,
             _subscriptions: subscriptions,
         };
@@ -167,7 +173,7 @@ impl Markets {
 
     /// Whether the window is fullscreen: then Markets is the workspace.
     fn is_fullscreen(&self, window: &Window) -> bool {
-        #[cfg(test)]
+        #[cfg(any(test, feature = "shot"))]
         if let Some(fullscreen) = self.fullscreen {
             return fullscreen;
         }
@@ -196,6 +202,109 @@ impl Markets {
         portfolio.update(cx, |p, cx| p.set_ticket_docked(false, cx));
     }
 
+    /// The workspace with every panel closed: what can fill it again.
+    fn empty_workspace(&self, cx: &mut Context<Self>) -> AnyElement {
+        v_flex()
+            .id("workspace-empty")
+            .flex_1()
+            .items_center()
+            .justify_center()
+            .gap_3()
+            .child(
+                div()
+                    .text_color(Palette::muted())
+                    .child("The workspace is empty. Add a panel, or choose a layout."),
+            )
+            .child(
+                h_flex()
+                    .gap_2()
+                    .child(self.add_panel_menu("workspace-empty-add", cx))
+                    .child(
+                        Button::new(("preset", 0usize))
+                            .small()
+                            .outline()
+                            .label("Trader")
+                            .on_click(
+                                cx.listener(|this, _, window, cx| this.apply_trader(window, cx)),
+                            ),
+                    ),
+            )
+            .test_support()
+            .into_any_element()
+    }
+
+    /// Whether the workspace is what Markets shows now.
+    fn workspace_shown(&self) -> bool {
+        self.was_fullscreen && self.workspace.is_some()
+    }
+
+    /// Add panel: every kind of panel, the order ticket only while there is
+    /// none.
+    fn add_panel_menu(&self, id: &'static str, cx: &mut Context<Self>) -> AnyElement {
+        let ticket_docked = self.model.read(cx).portfolio.read(cx).ticket_is_docked();
+        let markets = cx.entity().downgrade();
+        Button::new(id)
+            .small()
+            .outline()
+            .label("Add panel \u{25be}")
+            .dropdown_menu(move |mut menu, _, _| {
+                for (kind, name) in workspace::CATALOGUE {
+                    let markets = markets.clone();
+                    let added = kind == dock::PanelKind::Ticket && ticket_docked;
+                    let name = if added {
+                        format!("{name} (added)")
+                    } else {
+                        name.to_string()
+                    };
+                    menu = menu.item(PopupMenuItem::new(name).disabled(added).on_click(
+                        move |_, window, cx| {
+                            let _ = markets.update(cx, |m, cx| m.add_panel(kind, window, cx));
+                        },
+                    ));
+                }
+                menu
+            })
+            .into_any_element()
+    }
+
+    /// Add a panel of `kind` to the workspace. Never a second order ticket.
+    pub fn add_panel(
+        &mut self,
+        kind: dock::PanelKind,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(workspace) = &self.workspace else {
+            return;
+        };
+        let portfolio = self.model.read(cx).portfolio.clone();
+        if kind == dock::PanelKind::Ticket && portfolio.read(cx).ticket_is_docked() {
+            return;
+        }
+        workspace.add(&self.model, kind, window, cx);
+        cx.notify();
+    }
+
+    /// Lay the workspace out as Trader.
+    fn apply_trader(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(workspace) = &self.workspace else {
+            return;
+        };
+        let second = {
+            let m = self.model.read(cx);
+            m.watchlist
+                .as_ref()
+                .and_then(|w| {
+                    w.markets()
+                        .iter()
+                        .find(|x| Some(*x) != workspace.channels[0].as_ref())
+                })
+                .cloned()
+        };
+        workspace.apply_trader(&self.model, second, window, cx);
+        cx.notify();
+    }
+
     /// The History and Funding views, for the workspace's blotter.
     pub fn set_sources(
         &mut self,
@@ -219,13 +328,17 @@ impl Markets {
         self.model.update(cx, |m, cx| m.set_watcher(link, cx));
     }
 
-    /// `GALATA_DESK_SHOT_STATE=section=markets,mperiod=week,colour=funding,select=xyz:NVDA,picker=1`
+    /// `GALATA_DESK_SHOT_STATE=section=markets,mperiod=week,colour=funding,select=xyz:NVDA,picker=1,fullscreen=1`
     #[cfg(feature = "shot")]
     fn preselect(&mut self, cx: &mut Context<Self>) {
         let state = std::env::var("GALATA_DESK_SHOT_STATE").unwrap_or_default();
         for (key, value) in state.split(',').filter_map(|kv| kv.split_once('=')) {
             if key == "picker" {
                 self.picker_open = true;
+                continue;
+            }
+            if key == "fullscreen" {
+                self.fullscreen = Some(value == "1");
                 continue;
             }
             self.model.update(cx, |m, _| match key {
@@ -411,6 +524,10 @@ impl Markets {
                     .children(count.map(|n| ui::label(format!("{n} watched")).text_size(px(13.)))),
             )
             .child(div().flex_1())
+            .children(
+                self.workspace_shown()
+                    .then(|| self.add_panel_menu("workspace-add", cx)),
+            )
             .child(h_flex().gap_2().child(ui::label("Period")).child(period))
             .child(h_flex().gap_2().child(ui::label("Sort")).child(sort_menu))
             .child(h_flex().gap_2().child(ui::label("Colour by")).child(colour))
@@ -757,6 +874,10 @@ impl Render for Markets {
             .child(self.legend(&self.account(cx), cx))
             .children(self.notices(cx));
         match self.workspace.as_ref().filter(|_| fullscreen) {
+            Some(workspace) if workspace.is_empty(cx) => page
+                .id("markets-workspace")
+                .child(self.empty_workspace(cx))
+                .test_support(),
             Some(workspace) => page
                 .id("markets-workspace")
                 .child(div().flex_1().min_h_0().child(workspace.area.clone()))
@@ -1129,6 +1250,19 @@ fn time_label(open_ms: u64, span_ms: u64) -> String {
     }
 }
 
+/// A time axis label for a narrow chart: the time, or over more than three
+/// days the date.
+fn short_time_label(open_ms: u64, span_ms: u64) -> String {
+    let at = DateTime::from_timestamp_millis(open_ms as i64)
+        .unwrap_or_default()
+        .with_timezone(&Local);
+    if span_ms <= 72 * 3_600_000 {
+        at.format("%H:%M").to_string()
+    } else {
+        at.format("%b %-d").to_string()
+    }
+}
+
 /// Where a price sits down the plot, in pixels from its top.
 ///
 /// The component kit's candlestick chart, with its own time axis off, puts
@@ -1164,6 +1298,9 @@ struct PlotPointer {
     bounds: std::rc::Rc<std::cell::Cell<Option<gpui_kit::Bounds<gpui_kit::Pixels>>>>,
     /// Low, high, and a price at the venue's precision.
     range: std::rc::Rc<std::cell::Cell<Option<(f64, f64, Decimal)>>>,
+    /// How wide the whole chart was last drawn, which decides its compact
+    /// form.
+    width: std::rc::Rc<std::cell::Cell<Option<gpui_kit::Pixels>>>,
 }
 
 impl PlotPointer {
@@ -1385,6 +1522,25 @@ fn candle_chart(
     entry: Option<Entry>,
     plot: &PlotPointer,
 ) -> AnyElement {
+    let measured = &plot.width;
+    // Too narrow for the price axis: the candles alone. And never more time
+    // labels than fit, so none is cut off. The width is what the chart was
+    // last drawn at; a change draws it again.
+    let width = measured.get().map(f32::from);
+    let compact = width.is_some_and(|w| w < COMPACT_CHART_WIDTH);
+    let plot_width = width.map(|w| {
+        if compact {
+            w
+        } else {
+            w - PRICE_AXIS_WIDTH - 8.
+        }
+    });
+    let time_labels = plot_width
+        .map(|w| ((w / TIME_LABEL_WIDTH).floor() as usize).clamp(2, 5))
+        .unwrap_or(5);
+    // Too narrow even for two whole labels: the time alone, or the date
+    // alone over more than three days.
+    let short_times = plot_width.is_some_and(|w| w < 2. * TIME_LABEL_WIDTH);
     let span_ms = match (candles.first(), candles.last()) {
         (Some(first), Some(last)) => last.open_ms.saturating_sub(first.open_ms),
         _ => 0,
@@ -1656,20 +1812,46 @@ fn candle_chart(
     });
 
     // Five times along the bottom, from the oldest candle to the newest.
-    let times = (0..5).map(|i| {
-        let at = (candles.len() - 1) * i / 4;
+    let times = (0..time_labels).map(|i| {
+        let at = (candles.len() - 1) * i / (time_labels - 1);
         div()
+            .id(("chart-time", i))
+            .whitespace_nowrap()
             .font_family(MONO)
             .text_size(px(11.))
             .text_color(Palette::muted())
-            .child(time_label(candles[at].open_ms, span_ms))
+            .child(if short_times {
+                short_time_label(candles[at].open_ms, span_ms)
+            } else {
+                time_label(candles[at].open_ms, span_ms)
+            })
     });
 
-    v_flex()
+    let measure = {
+        let measured = measured.clone();
+        gpui_kit::canvas(
+            move |bounds, window, _| {
+                if measured.replace(Some(bounds.size.width)) != Some(bounds.size.width) {
+                    window.refresh();
+                }
+            },
+            |_, _, _, _| {},
+        )
+        .absolute()
+        .top_0()
+        .left_0()
         .size_full()
+    };
+    v_flex()
+        .relative()
+        .size_full()
+        .min_w_0()
+        .overflow_hidden()
         .gap_1()
+        .child(measure)
         .child(
             h_flex()
+                .min_w_0()
                 .items_start()
                 .gap_2()
                 .child(plot_area(
@@ -1704,24 +1886,28 @@ fn candle_chart(
                     plot,
                     calls.menu,
                 ))
-                .child(
-                    div()
-                        .id("chart-price-axis")
-                        .relative()
-                        .w(px(PRICE_AXIS_WIDTH))
-                        .h(px(PLOT_HEIGHT))
-                        .flex_shrink_0()
-                        .children(labels)
-                        .children(order_tags)
-                        .test_support(),
-                ),
+                .when(!compact, |row| {
+                    row.child(
+                        div()
+                            .id("chart-price-axis")
+                            .relative()
+                            .w(px(PRICE_AXIS_WIDTH))
+                            .h(px(PLOT_HEIGHT))
+                            .flex_shrink_0()
+                            .children(labels)
+                            .children(order_tags)
+                            .test_support(),
+                    )
+                }),
         )
         .child(
             h_flex()
                 .id("chart-time-axis")
+                .min_w_0()
+                .overflow_hidden()
                 .justify_between()
-                .pr(px(PRICE_AXIS_WIDTH + 8.))
-                .children(times)
+                .when(!compact, |axis| axis.pr(px(PRICE_AXIS_WIDTH + 8.)))
+                .children(times.map(|t| t.test_support()))
                 .test_support(),
         )
         .into_any_element()
