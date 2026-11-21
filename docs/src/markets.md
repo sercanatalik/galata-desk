@@ -83,6 +83,10 @@ When the window is fullscreen, Markets becomes a workspace you arrange
 yourself. Leave fullscreen and the fixed layout returns, showing the market
 channel A last showed. The other sections look the same either way.
 
+The **Workspace** switch in the toolbar shows the workspace in a window of
+any size, or the fixed layout in fullscreen. Entering or leaving fullscreen
+hands the choice back to the window.
+
 ### Panels
 
 Every part of the workspace is a panel with a header: its title, its link

@@ -117,8 +117,15 @@ pub struct Markets {
     workspace: Option<workspace::Workspace>,
     /// Writes the workspace once a second while it changes.
     _autosave: Option<gpui_kit::Task<()>>,
-    /// Whether Markets was last drawn fullscreen, to notice the change.
-    was_fullscreen: bool,
+    /// Whether Markets was last drawn as the workspace, to notice the
+    /// change.
+    showing_workspace: bool,
+    /// Whether the window was fullscreen when Markets was last drawn.
+    window_was_fullscreen: bool,
+    /// The Workspace switch, while the user has set it: on or off whatever
+    /// the window. `None` follows the window: the workspace in fullscreen.
+    /// Entering or leaving fullscreen clears it.
+    workspace_choice: Option<bool>,
     /// Tests and screenshot runs say whether the window is fullscreen.
     #[cfg(any(test, feature = "shot"))]
     fullscreen: Option<bool>,
@@ -179,7 +186,9 @@ impl Markets {
             layouts_open: false,
             workspace: None,
             _autosave: None,
-            was_fullscreen: false,
+            showing_workspace: false,
+            window_was_fullscreen: false,
+            workspace_choice: None,
             #[cfg(any(test, feature = "shot"))]
             fullscreen: None,
             _subscriptions: subscriptions,
@@ -271,7 +280,7 @@ impl Markets {
 
     /// Whether the workspace is what Markets shows now.
     fn workspace_shown(&self) -> bool {
-        self.was_fullscreen && self.workspace.is_some()
+        self.showing_workspace && self.workspace.is_some()
     }
 
     /// Add panel: every kind of panel, the order ticket only while there is
@@ -407,6 +416,27 @@ impl Markets {
             )
             .children(rows)
             .test_support()
+            .into_any_element()
+    }
+
+    /// Workspace: shows the arrangeable workspace in any window, or the
+    /// fixed layout in fullscreen.
+    fn workspace_switch(&self, cx: &mut Context<Self>) -> AnyElement {
+        let on = self.showing_workspace;
+        Button::new("workspace-toggle")
+            .small()
+            .outline()
+            .selected(on)
+            .label("Workspace")
+            .accessibility_label(if on {
+                "Workspace: on"
+            } else {
+                "Workspace: off"
+            })
+            .on_click(cx.listener(|this, _, _, cx| {
+                this.workspace_choice = Some(!this.showing_workspace);
+                cx.notify();
+            }))
             .into_any_element()
     }
 
@@ -861,6 +891,7 @@ impl Markets {
                     .children(count.map(|n| ui::label(format!("{n} watched")).text_size(px(13.)))),
             )
             .child(div().flex_1())
+            .child(self.workspace_switch(cx))
             .children(
                 self.workspace_shown()
                     .then(|| self.add_panel_menu("workspace-add", cx)),
@@ -1219,9 +1250,17 @@ impl Render for Markets {
                 .clone()
                 .update(cx, |p, cx| p.stage_ticket_shot(market, mid, window, cx));
         }
-        let fullscreen = self.is_fullscreen(window);
-        if fullscreen != self.was_fullscreen {
-            self.was_fullscreen = fullscreen;
+        // The workspace shows in fullscreen, or while the Workspace switch
+        // says so. Entering or leaving fullscreen hands it back to the
+        // window.
+        let window_fullscreen = self.is_fullscreen(window);
+        if window_fullscreen != self.window_was_fullscreen {
+            self.window_was_fullscreen = window_fullscreen;
+            self.workspace_choice = None;
+        }
+        let fullscreen = self.workspace_choice.unwrap_or(window_fullscreen);
+        if fullscreen != self.showing_workspace {
+            self.showing_workspace = fullscreen;
             if fullscreen {
                 self.enter_workspace(window, cx);
             } else {

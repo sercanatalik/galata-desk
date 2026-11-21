@@ -8307,3 +8307,39 @@ fn a_chart_keeps_a_market_that_leaves_the_watchlist(cx: &mut TestAppContext) {
     })
     .unwrap();
 }
+
+#[gpui_kit::test]
+fn the_workspace_switch_shows_it_in_any_window_until_fullscreen_changes(cx: &mut TestAppContext) {
+    let (window, desk, _dir) = open_with(cx, Some(&["BTC", "ETH"]));
+    let markets = go_to_markets(window, &desk, cx);
+    let shows = |cx: &mut TestAppContext, id: &'static str| {
+        cx.update_window(window.into(), |_, window, cx| {
+            window.render_frame(cx);
+            window.render_frame(cx);
+            window.try_find(id).is_some()
+        })
+        .unwrap()
+    };
+    let switch = |cx: &mut TestAppContext| {
+        cx.update_window(window.into(), |_, window, cx| {
+            window.click("workspace-toggle", cx)
+        })
+        .unwrap()
+    };
+    // Windowed: the switch turns the workspace on, and off again.
+    assert!(shows(cx, "markets-fixed"));
+    switch(cx);
+    assert!(shows(cx, "markets-workspace"));
+    cx.update(|cx| assert_eq!(center_panels(&markets, cx), 7, "Trader"));
+    switch(cx);
+    assert!(shows(cx, "markets-fixed"));
+    // Fullscreen takes over; there the switch gives the fixed layout.
+    fullscreen(cx, window, &markets, true);
+    assert!(shows(cx, "markets-workspace"));
+    switch(cx);
+    assert!(shows(cx, "markets-fixed"));
+    // Leaving fullscreen goes back to the window's own choice: fixed.
+    switch(cx);
+    fullscreen(cx, window, &markets, false);
+    assert!(shows(cx, "markets-fixed"));
+}
