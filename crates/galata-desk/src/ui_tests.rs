@@ -6047,3 +6047,47 @@ fn with_no_position_there_is_no_entry_line(cx: &mut TestAppContext) {
     })
     .unwrap();
 }
+
+// ---- Charts of their own -------------------------------------------------
+
+#[gpui_kit::test]
+fn two_charts_of_one_market_and_period_share_one_hold_and_closing_both_lets_it_go(
+    cx: &mut TestAppContext,
+) {
+    use crate::markets::{ChartPanel, MarketSource};
+    use galata_desk_core::market::MarketPeriod;
+    use galata_desk_core::market::feed::ChartKey;
+
+    let (window, desk, _dir) = open_with(cx, Some(&["BTC", "ETH"]));
+    let markets = go_to_markets(window, &desk, cx);
+    let model = cx.update(|cx| markets.read(cx).model());
+    let eth = || MarketSource::Own(Some(MarketId::new("ETH")));
+    let key = |period| ChartKey {
+        market: MarketId::new("ETH"),
+        period,
+    };
+    // The windowed chart follows the selection and holds nothing.
+    cx.update(|cx| assert!(model.read(cx).chart_holds().is_empty()));
+
+    let first = cx.new(|cx| ChartPanel::new(model.clone(), eth(), cx));
+    let second = cx.new(|cx| ChartPanel::new(model.clone(), eth(), cx));
+    cx.update(|cx| assert_eq!(model.read(cx).chart_holds(), [(key(MarketPeriod::Day), 2)]));
+
+    // A chart that moves to another period holds that one instead.
+    second.update(cx, |chart, cx| {
+        chart.set_period(Some(MarketPeriod::Week), cx)
+    });
+    cx.update(|cx| {
+        assert_eq!(
+            model.read(cx).chart_holds(),
+            [(key(MarketPeriod::Day), 1), (key(MarketPeriod::Week), 1)]
+        )
+    });
+
+    // Closing both lets both go.
+    drop(first);
+    drop(second);
+    // Dropped entities are released when the app next flushes its effects.
+    cx.update(|_| {});
+    cx.update(|cx| assert!(model.read(cx).chart_holds().is_empty()));
+}

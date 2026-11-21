@@ -4,10 +4,10 @@
 //! market.
 
 use galata_desk_core::format as f;
-use galata_desk_core::market::MarketId;
 use galata_desk_core::market::candles::Candle;
-use galata_desk_core::market::feed::Tile;
+use galata_desk_core::market::feed::{Chart, ChartKey, ChartView, Tile};
 use galata_desk_core::market::fills::{self, CandleFills};
+use galata_desk_core::market::{MarketId, MarketPeriod};
 use galata_desk_core::rust_decimal::Decimal;
 use gpui_kit::component::menu::{PopupMenu, PopupMenuItem};
 use gpui_kit::component::{h_flex, v_flex};
@@ -34,6 +34,12 @@ pub struct ChartPanel {
     plot: PlotPointer,
     /// Why the last call level added from the chart was not saved.
     call_problem: Option<SharedString>,
+    /// The chart's own period; `None` follows the toolbar's.
+    period: Option<MarketPeriod>,
+    /// The chart this panel holds in the feed, while it keeps its own
+    /// market. The windowed chart follows the selection, which the feed
+    /// charts anyway, and holds nothing.
+    held: Option<ChartKey>,
     _subscriptions: Vec<Subscription>,
 }
 
@@ -43,14 +49,87 @@ impl ChartPanel {
             cx.observe(&model, |_, _, cx| cx.notify()),
             // Fills, orders and the entry are the portfolio's.
             cx.observe(&model.read(cx).portfolio.clone(), |_, _, cx| cx.notify()),
+            // A closed chart lets its candles go.
+            cx.on_release(|this: &mut Self, cx| {
+                if let Some(key) = this.held.take() {
+                    this.model.update(cx, |m, _| m.release(&key));
+                }
+            }),
         ];
-        Self {
+        let mut this = Self {
             model,
             source,
             drawn_chart: std::cell::Cell::new(("none", 0, 0, None)),
             plot: PlotPointer::default(),
             call_problem: None,
+            period: None,
+            held: None,
             _subscriptions: subscriptions,
+        };
+        this.hold(cx);
+        this
+    }
+
+    /// The period the chart covers: its own, or the toolbar's.
+    pub fn period(&self, cx: &gpui_kit::App) -> MarketPeriod {
+        self.period.unwrap_or(self.model.read(cx).period)
+    }
+
+    /// Cover `period`, or follow the toolbar's with `None`.
+    #[allow(dead_code, reason = "the workspace's chart panels use it")]
+    pub fn set_period(&mut self, period: Option<MarketPeriod>, cx: &mut Context<Self>) {
+        if self.period != period {
+            self.period = period;
+            self.hold(cx);
+            cx.notify();
+        }
+    }
+
+    /// Hold the chart this panel shows in the feed, and let go of the one
+    /// it showed before.
+    fn hold(&mut self, cx: &mut Context<Self>) {
+        let want = match &self.source {
+            MarketSource::Own(Some(market)) => Some(ChartKey {
+                market: market.clone(),
+                period: self.period(cx),
+            }),
+            _ => None,
+        };
+        if want == self.held {
+            return;
+        }
+        let old = std::mem::replace(&mut self.held, want.clone());
+        self.model.update(cx, |m, _| {
+            if let Some(key) = want {
+                m.acquire(key);
+            }
+            if let Some(key) = old {
+                m.release(&key);
+            }
+        });
+    }
+
+    /// What the chart has to draw: its period, its candles once loaded,
+    /// and whether loading them failed.
+    fn view(&self, market: &MarketId, cx: &gpui_kit::App) -> (MarketPeriod, Option<Chart>, bool) {
+        let period = self.period(cx);
+        let m = self.model.read(cx);
+        match &self.held {
+            Some(key) => match m.snapshot.charts.get(key) {
+                Some(ChartView::Ready(chart)) => (period, Some(chart.clone()), false),
+                Some(ChartView::Failed) => (period, None, true),
+                _ => (period, None, false),
+            },
+            // The windowed chart is the selected market's. It belongs to the
+            // panel only while it is this market's: just after a new
+            // selection the feed may still hold the last one.
+            None => {
+                let chart =
+                    m.snapshot.chart.clone().filter(|chart| {
+                        &chart.market == market && chart.interval == period.interval()
+                    });
+                (period, chart, m.snapshot.chart_failed)
+            }
         }
     }
 
@@ -63,6 +142,7 @@ impl ChartPanel {
     #[allow(dead_code, reason = "the workspace's chart panels use it")]
     pub fn set_market(&mut self, market: Option<MarketId>, cx: &mut Context<Self>) {
         if self.source.set(market) {
+            self.hold(cx);
             cx.notify();
         }
     }
@@ -110,6 +190,8 @@ impl ChartPanel {
     #[allow(clippy::too_many_arguments)]
     fn chart(
         &self,
+        period: MarketPeriod,
+        chart_failed: bool,
         tile: &Tile,
         candles: Option<&[Candle]>,
         grouped: &[CandleFills],
@@ -119,12 +201,7 @@ impl ChartPanel {
         since: Option<u64>,
         // The system asks for reduced motion: placeholders hold still.
         still: bool,
-        cx: &gpui_kit::App,
     ) -> AnyElement {
-        let (period, chart_failed) = {
-            let m = self.model.read(cx);
-            (m.period, m.snapshot.chart_failed)
-        };
         let interval = period.interval();
         // A period under an hour is too few candles to read, so the chart
         // shows the hour it ends; the heading says so.
@@ -264,22 +341,13 @@ impl Render for ChartPanel {
             self.drawn_chart.set(("none", 0, 0, None));
             return div().flex_1().into_any_element();
         };
-        let (tile, period, chart, portfolio) = {
+        let (tile, portfolio) = {
             let m = self.model.read(cx);
-            (
-                m.tile_of(&market),
-                m.period,
-                m.snapshot.chart.clone(),
-                m.portfolio.clone(),
-            )
+            (m.tile_of(&market), m.portfolio.clone())
         };
         let tile = &tile;
-        // The chart belongs to the panel only while it is this market's:
-        // just after a new selection the feed may still hold the last one.
-        let candles = chart
-            .as_ref()
-            .filter(|chart| chart.market == market && chart.interval == period.interval())
-            .map(|chart| chart.candles.as_slice());
+        let (period, chart, chart_failed) = self.view(&market, cx);
+        let candles = chart.as_ref().map(|chart| chart.candles.as_slice());
         // The account's fills in this market, grouped into these candles.
         let (grouped, since) = match (portfolio.read(cx).fills(), candles) {
             (Some(all), Some(candles)) if !candles.is_empty() => (
@@ -340,6 +408,8 @@ impl Render for ChartPanel {
                 })
         });
         self.chart(
+            period,
+            chart_failed,
             tile,
             candles,
             &grouped,
@@ -348,7 +418,6 @@ impl Render for ChartPanel {
             entry,
             since,
             cx.reduce_motion(),
-            cx,
         )
     }
 }

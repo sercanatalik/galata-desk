@@ -5,7 +5,7 @@
 //! Portfolio section and galata-datawatch also draw on, so it is rationed: a
 //! burst to fill a small watchlist at once, then a steady pace.
 
-use std::collections::VecDeque;
+use std::collections::{HashSet, VecDeque};
 use std::time::Duration;
 
 use tokio::sync::mpsc;
@@ -95,9 +95,9 @@ const SLOW_DOWN_MAX: Duration = Duration::from_secs(120);
 
 enum Ask {
     Load(Request),
-    /// Forget queued requests at any other interval: the period changed, and
-    /// nobody is waiting for them any more.
-    KeepOnly(Interval),
+    /// Forget queued requests for anything else: the period changed, or a
+    /// chart closed, and nobody is waiting for them any more.
+    KeepOnly(HashSet<(MarketId, Interval)>),
     /// Serve this market's queued request next: someone is looking at it.
     First(MarketId, Interval),
 }
@@ -129,9 +129,9 @@ impl Loader {
         let _ = self.requests.send(Ask::First(market, interval));
     }
 
-    /// Drop queued requests that are not for `interval`.
-    pub fn keep_only(&self, interval: Interval) {
-        let _ = self.requests.send(Ask::KeepOnly(interval));
+    /// Drop queued requests for any market and interval not in `wanted`.
+    pub fn keep_only(&self, wanted: HashSet<(MarketId, Interval)>) {
+        let _ = self.requests.send(Ask::KeepOnly(wanted));
     }
 }
 
@@ -195,7 +195,7 @@ async fn run<T: Transport>(
 fn take(queue: &mut VecDeque<Request>, ask: Ask) {
     match ask {
         Ask::Load(request) => queue.push_back(request),
-        Ask::KeepOnly(interval) => queue.retain(|r| r.interval == interval),
+        Ask::KeepOnly(wanted) => queue.retain(|r| wanted.contains(&(r.market.clone(), r.interval))),
         Ask::First(market, interval) => {
             if let Some(at) = queue
                 .iter()

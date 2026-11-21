@@ -1675,6 +1675,11 @@ impl Markets {
     }
 
     /// Replace what the feed has reported, for tests that have no venue.
+    /// What every panel shares, for building panels beside the windowed ones.
+    pub fn model(&self) -> Entity<MarketsModel> {
+        self.model.clone()
+    }
+
     pub fn set_snapshot(&mut self, snapshot: MarketSnapshot, cx: &mut Context<Self>) {
         self.model.update(cx, |m, cx| {
             m.snapshot = snapshot;

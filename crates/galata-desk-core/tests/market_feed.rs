@@ -977,3 +977,178 @@ async fn a_chart_that_is_only_slow_is_not_reported_as_failed() {
     assert_eq!(snapshot.chart, None);
     assert!(!snapshot.chart_failed);
 }
+
+// ---- Panels' own charts ----------------------------------------------------
+
+fn key(coin: &str, period: MarketPeriod) -> ChartKey {
+    ChartKey {
+        market: id(coin),
+        period,
+    }
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_chart_of_an_unwatched_market_is_streamed_loaded_once_and_stopped() {
+    let mut r = rig(&["BTC"]);
+    r.settle().await;
+    r.subs.take();
+    let eth = key("ETH", MarketPeriod::Week);
+    // Two panels on one market and period name one chart.
+    r.feed.set_charts([eth.clone(), eth.clone()]);
+    let snapshot = r.settle().await;
+    assert_eq!(
+        r.subs.take(),
+        [
+            (true, Sub::Ctx(id("ETH"))),
+            (true, Sub::Candles(id("ETH"), Interval::H2)),
+        ]
+    );
+    assert_eq!(r.venue.count("candleSnapshot ETH 2h"), 1);
+    let ChartView::Ready(chart) = &snapshot.charts[&eth] else {
+        panic!("{:?}", snapshot.charts[&eth]);
+    };
+    assert_eq!(chart.market, id("ETH"));
+    assert_eq!(chart.interval, Interval::H2);
+    // A week of two-hour candles, plus the one forming.
+    assert!(
+        (84..=85).contains(&chart.candles.len()),
+        "{}",
+        chart.candles.len()
+    );
+    // No tile for it: the watchlist is unchanged.
+    assert_eq!(snapshot.tiles.len(), 1);
+
+    // Naming it again costs nothing.
+    r.feed.set_charts([eth.clone()]);
+    r.settle().await;
+    assert_eq!(r.venue.count("candleSnapshot ETH 2h"), 1);
+    assert!(r.subs.take().is_empty());
+
+    // Closing the last chart stops its stream.
+    r.feed.set_charts([]);
+    let snapshot = r.settle().await;
+    assert!(snapshot.charts.is_empty());
+    let changes = r.subs.take();
+    assert_eq!(changes.len(), 2, "{changes:?}");
+    assert!(changes.contains(&(false, Sub::Ctx(id("ETH")))));
+    assert!(changes.contains(&(false, Sub::Candles(id("ETH"), Interval::H2))));
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_chart_of_a_watched_market_at_the_watchlists_period_costs_nothing_more() {
+    let mut r = rig(&["BTC"]);
+    r.settle().await;
+    r.subs.take();
+    let btc = key("BTC", MarketPeriod::Day);
+    r.feed.set_charts([btc.clone()]);
+    let snapshot = r.settle().await;
+    assert!(r.subs.take().is_empty());
+    assert_eq!(r.venue.count("candleSnapshot"), 1);
+    assert!(matches!(snapshot.charts[&btc], ChartView::Ready(_)));
+    // Closing it leaves the watchlist's subscriptions alone.
+    r.feed.set_charts([]);
+    r.settle().await;
+    assert!(r.subs.take().is_empty());
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_chart_of_a_watched_market_at_another_period_adds_only_its_candles() {
+    let mut r = rig(&["BTC"]);
+    r.settle().await;
+    r.subs.take();
+    r.feed.set_charts([key("BTC", MarketPeriod::Hour)]);
+    r.settle().await;
+    assert_eq!(
+        r.subs.take(),
+        [(true, Sub::Candles(id("BTC"), Interval::M1))]
+    );
+    assert_eq!(r.venue.count("candleSnapshot BTC 1m"), 1);
+}
+
+#[tokio::test(start_paused = true)]
+async fn the_watchlist_and_a_chart_hand_a_subscription_over_without_a_gap() {
+    let mut r = rig(&["BTC"]);
+    r.settle().await;
+    let week = key("BTC", MarketPeriod::Week);
+    r.feed.set_charts([week.clone()]);
+    r.settle().await;
+    r.subs.take();
+    // The watchlist moves to the chart's interval: the chart's stream is
+    // already there, so nothing is subscribed twice.
+    r.feed.set_period(MarketPeriod::Week);
+    r.settle().await;
+    assert_eq!(
+        r.subs.take(),
+        [(false, Sub::Candles(id("BTC"), Interval::M15))]
+    );
+    // And back: the chart keeps its stream when the watchlist lets it go.
+    r.feed.set_period(MarketPeriod::Day);
+    r.settle().await;
+    assert_eq!(
+        r.subs.take(),
+        [(true, Sub::Candles(id("BTC"), Interval::M15))]
+    );
+    // Unwatching the market keeps its chart, its figures and their
+    // streams: only the watchlist's candles go.
+    r.feed.unwatch(id("BTC"));
+    let snapshot = r.settle().await;
+    assert!(snapshot.tiles.is_empty());
+    assert!(matches!(snapshot.charts[&week], ChartView::Ready(_)));
+    assert_eq!(
+        r.subs.take(),
+        [(false, Sub::Candles(id("BTC"), Interval::M15))]
+    );
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_chart_of_a_market_the_venue_does_not_list_is_never_subscribed_to() {
+    let mut r = rig(&[]);
+    let gone = key("MATIC", MarketPeriod::Day);
+    r.feed.set_charts([gone.clone()]);
+    let snapshot = r.settle().await;
+    assert!(r.subs.wanted().is_empty());
+    assert_eq!(r.venue.count("candleSnapshot"), 0);
+    assert_eq!(snapshot.charts[&gone], ChartView::Loading);
+}
+
+#[tokio::test(start_paused = true)]
+async fn four_charts_load_first_and_within_the_venues_limits() {
+    let coins: Vec<String> = (0..40).map(|i| format!("M{i}")).collect();
+    let refs: Vec<&str> = coins.iter().map(String::as_str).collect();
+    let mut r = rig(&refs);
+    let charts = ["BTC", "ETH", "SOL", "HYPE"].map(|c| key(c, MarketPeriod::Day));
+    r.feed.set_charts(charts.clone());
+    // At once: the burst, the four charts ahead of the queue of tiles.
+    let snapshot = r.settle().await;
+    assert_eq!(
+        r.venue.count("candleSnapshot"),
+        5,
+        "five requests fit the burst"
+    );
+    for chart in &charts {
+        assert!(
+            matches!(snapshot.charts[chart], ChartView::Ready(_)),
+            "{chart:?}"
+        );
+    }
+    // A minute on: the same steady pace as without them.
+    tokio::time::sleep(Duration::from_secs(60)).await;
+    r.settle().await;
+    let asked = r.venue.count("candleSnapshot");
+    assert!((15..=17).contains(&asked), "{asked} asked after a minute");
+}
+
+#[tokio::test(start_paused = true)]
+async fn closing_a_chart_drops_its_history_still_queued() {
+    let coins: Vec<String> = (0..40).map(|i| format!("M{i}")).collect();
+    let refs: Vec<&str> = coins.iter().map(String::as_str).collect();
+    let mut r = rig(&refs);
+    r.settle().await;
+    // The burst is spent; a chart's request waits in the queue.
+    r.feed.set_charts([key("BTC", MarketPeriod::Week)]);
+    r.settle().await;
+    r.feed.set_charts([]);
+    tokio::time::sleep(Duration::from_secs(60)).await;
+    r.settle().await;
+    assert_eq!(r.venue.count("candleSnapshot BTC"), 0);
+}

@@ -6,7 +6,7 @@
 use std::collections::HashMap;
 use std::time::{Duration, Instant, SystemTime};
 
-use galata_desk_core::market::feed::{Connection, MarketFeed, MarketSnapshot, Tile};
+use galata_desk_core::market::feed::{ChartKey, Connection, MarketFeed, MarketSnapshot, Tile};
 use galata_desk_core::market::pnl::{self, MarketPnl};
 use galata_desk_core::market::sort::{self, SortBy};
 use galata_desk_core::market::watchlist::{AddError, Watchlist};
@@ -60,9 +60,51 @@ impl MarketSource {
     }
 }
 
+/// How many panels show each chart of their own. Two charts of one market
+/// at one period are one chart to the feed: one history, one stream.
+#[derive(Default)]
+pub struct ChartHolds(HashMap<ChartKey, usize>);
+
+impl ChartHolds {
+    /// One more panel shows `key`. Whether the feed must start it.
+    pub fn acquire(&mut self, key: ChartKey) -> bool {
+        let count = self.0.entry(key).or_default();
+        *count += 1;
+        *count == 1
+    }
+
+    /// One panel fewer shows `key`. Whether the feed may stop it.
+    pub fn release(&mut self, key: &ChartKey) -> bool {
+        match self.0.get_mut(key) {
+            Some(count) if *count > 1 => {
+                *count -= 1;
+                false
+            }
+            Some(_) => {
+                self.0.remove(key);
+                true
+            }
+            None => false,
+        }
+    }
+
+    /// Every chart some panel shows.
+    pub fn keys(&self) -> Vec<ChartKey> {
+        self.0.keys().cloned().collect()
+    }
+
+    /// How many panels show `key`.
+    #[cfg(test)]
+    pub fn count(&self, key: &ChartKey) -> usize {
+        self.0.get(key).copied().unwrap_or_default()
+    }
+}
+
 pub struct MarketsModel {
     pub(super) portfolio: Entity<Portfolio>,
     pub(super) feed: MarketFeed,
+    /// The charts the panels show of their own.
+    pub(super) holds: ChartHolds,
     pub(super) snapshot: MarketSnapshot,
     /// `None` until the default list can be decided, which needs the
     /// account's positions.
@@ -179,6 +221,7 @@ impl MarketsModel {
         let mut this = Self {
             portfolio,
             feed,
+            holds: ChartHolds::default(),
             snapshot: MarketSnapshot::default(),
             watchlist: stored,
             period: MarketPeriod::default(),
@@ -204,6 +247,37 @@ impl MarketsModel {
     pub(super) fn start(&mut self) {
         self.feed
             .select(self.watchlist.as_ref().and_then(|w| w.selected().cloned()));
+    }
+
+    /// Each chart some panel holds, with how many hold it.
+    #[cfg(test)]
+    pub fn chart_holds(&self) -> Vec<(ChartKey, usize)> {
+        let mut holds: Vec<_> = self
+            .holds
+            .keys()
+            .into_iter()
+            .map(|key| {
+                let count = self.holds.count(&key);
+                (key, count)
+            })
+            .collect();
+        holds.sort_by_key(|(key, _)| format!("{key:?}"));
+        holds
+    }
+
+    /// A panel starts showing `key`: the feed streams and loads it unless
+    /// another panel already shows it.
+    pub(super) fn acquire(&mut self, key: ChartKey) {
+        if self.holds.acquire(key) {
+            self.feed.set_charts(self.holds.keys());
+        }
+    }
+
+    /// A panel stops showing `key`: the feed stops it once no panel does.
+    pub(super) fn release(&mut self, key: &ChartKey) {
+        if self.holds.release(key) {
+            self.feed.set_charts(self.holds.keys());
+        }
     }
 
     /// Use this connection to the watcher, or none.
@@ -522,5 +596,39 @@ impl MarketsModel {
     /// Whether the feed has failed to connect for long enough to say so.
     pub(super) fn unreachable(&self) -> bool {
         self.snapshot.connection == Connection::Connecting && self.opened_at.elapsed() >= PATIENCE
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn key(coin: &str, period: MarketPeriod) -> ChartKey {
+        ChartKey {
+            market: MarketId::new(coin),
+            period,
+        }
+    }
+
+    #[test]
+    fn two_holds_of_one_chart_start_it_once_and_stop_it_with_the_last() {
+        let mut holds = ChartHolds::default();
+        let btc = key("BTC", MarketPeriod::Day);
+        assert!(holds.acquire(btc.clone()), "the first starts it");
+        assert!(!holds.acquire(btc.clone()), "the second shares it");
+        assert_eq!(holds.keys(), std::slice::from_ref(&btc));
+        assert!(!holds.release(&btc), "one panel still shows it");
+        assert!(holds.release(&btc), "the last one stops it");
+        assert!(holds.keys().is_empty());
+        assert!(!holds.release(&btc), "a stray release changes nothing");
+    }
+
+    #[test]
+    fn another_period_or_market_is_another_chart() {
+        let mut holds = ChartHolds::default();
+        assert!(holds.acquire(key("BTC", MarketPeriod::Day)));
+        assert!(holds.acquire(key("BTC", MarketPeriod::Week)));
+        assert!(holds.acquire(key("ETH", MarketPeriod::Day)));
+        assert_eq!(holds.keys().len(), 3);
     }
 }

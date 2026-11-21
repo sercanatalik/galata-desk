@@ -73,6 +73,24 @@ pub struct Chart {
     pub candles: Vec<Candle>,
 }
 
+/// A chart a panel shows of its own: a market and a period. The period sets
+/// the candle interval and how far back the chart reaches.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct ChartKey {
+    pub market: MarketId,
+    pub period: MarketPeriod,
+}
+
+/// What a panel's own chart can show so far.
+#[derive(Debug, Clone, PartialEq)]
+pub enum ChartView {
+    /// Its history has not loaded yet.
+    Loading,
+    /// The last attempt to load its history failed. It is tried again.
+    Failed,
+    Ready(Chart),
+}
+
 /// Whether the stream is up.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum Connection {
@@ -118,6 +136,8 @@ pub struct MarketSnapshot {
     /// There is no chart because the last attempt to load the selected
     /// market's history failed. It is tried again; a success clears this.
     pub chart_failed: bool,
+    /// Each chart named with `set_charts`, by its market and period.
+    pub charts: HashMap<ChartKey, ChartView>,
 }
 
 impl Default for MarketSnapshot {
@@ -130,6 +150,7 @@ impl Default for MarketSnapshot {
             listing: Listing::Loading,
             chart: None,
             chart_failed: false,
+            charts: HashMap::new(),
         }
     }
 }
@@ -139,6 +160,7 @@ enum Command {
     Unwatch(MarketId),
     SetPeriod(MarketPeriod),
     Select(Option<MarketId>),
+    SetCharts(HashSet<ChartKey>),
     RefreshListing,
 }
 
@@ -217,6 +239,8 @@ impl MarketFeed {
             period,
             watched: Vec::new(),
             selected: None,
+            charts: HashSet::new(),
+            chart_subs: HashSet::new(),
             active: HashSet::new(),
             ctx: HashMap::new(),
             series: HashMap::new(),
@@ -260,6 +284,17 @@ impl MarketFeed {
         let _ = self.commands.send(Command::Select(market));
     }
 
+    /// Name every chart the panels show of their own, beside the selected
+    /// market's. Each is published with each snapshot, in `charts`. A market
+    /// charted here is streamed and loaded whether or not it is watched; two
+    /// charts at one interval of one market share the candles. A chart left
+    /// out of the next call is stopped.
+    pub fn set_charts(&self, charts: impl IntoIterator<Item = ChartKey>) {
+        let _ = self
+            .commands
+            .send(Command::SetCharts(charts.into_iter().collect()));
+    }
+
     /// Reload the list of markets if it failed or has grown old.
     pub fn refresh_listing(&self) {
         let _ = self.commands.send(Command::RefreshListing);
@@ -281,6 +316,12 @@ struct State<T, S> {
     watched: Vec<MarketId>,
     /// The market the panel shows.
     selected: Option<MarketId>,
+    /// The charts panels show of their own.
+    charts: HashSet<ChartKey>,
+    /// What is subscribed to for those charts alone: the watched markets'
+    /// subscriptions do not count. A subscription is made once, so when a
+    /// chart and the watchlist want the same one, the watchlist holds it.
+    chart_subs: HashSet<Sub>,
     /// Watched markets the venue is known to list, and so subscribed to. The
     /// venue closes the whole connection on a subscription to a market it does
     /// not list, so nothing is subscribed before the list says it may be.
@@ -310,7 +351,12 @@ impl<T: Transport + Clone, S: Subscriptions> State<T, S> {
     /// already here and current, or already asked for. `force` asks even when
     /// a series is loaded: after an outage it has a hole in it.
     fn want_history(&mut self, market: &MarketId, force: bool) {
-        let interval = self.interval();
+        self.load(market, self.period, force);
+    }
+
+    /// Ask for a market's history for `period`, as `want_history` does.
+    fn load(&mut self, market: &MarketId, period: MarketPeriod, force: bool) {
+        let interval = period.interval();
         let key = (market.clone(), interval);
         if self.requested.contains(&key) {
             return;
@@ -329,20 +375,162 @@ impl<T: Transport + Clone, S: Subscriptions> State<T, S> {
             market: market.clone(),
             interval,
             // One candle more than the window, so its oldest candle is whole.
-            from_ms: now.saturating_sub(self.period.chart_millis() + interval.millis()),
+            from_ms: now.saturating_sub(period.chart_millis() + interval.millis()),
             to_ms: now,
         });
         self.hurry_selected();
     }
 
-    /// The selected market's history is the one someone is waiting to see:
-    /// if it is queued, it goes to the front.
+    /// The histories someone is waiting to see, the panels' own charts and
+    /// the selected market's: if they are queued, they go to the front, the
+    /// selected market's first.
     fn hurry_selected(&self) {
+        for key in &self.charts {
+            let interval = key.period.interval();
+            if self.requested.contains(&(key.market.clone(), interval)) {
+                self.loader.prioritise(key.market.clone(), interval);
+            }
+        }
         if let Some(market) = &self.selected
             && self.requested.contains(&(market.clone(), self.interval()))
         {
             self.loader.prioritise(market.clone(), self.interval());
         }
+    }
+
+    fn charted(&self, market: &MarketId) -> bool {
+        self.charts.iter().any(|key| &key.market == market)
+    }
+
+    /// Whether anything shows `market`: the watchlist or a chart.
+    fn wanted(&self, market: &MarketId) -> bool {
+        self.watched.contains(market) || self.charted(market)
+    }
+
+    /// Whether a chart needs `sub` and the venue lists its market.
+    fn chart_needs(&self, sub: &Sub) -> bool {
+        match sub {
+            Sub::Ctx(market) => self.leverage.contains_key(market) && self.charted(market),
+            Sub::Candles(market, interval) => {
+                self.leverage.contains_key(market)
+                    && self
+                        .charts
+                        .iter()
+                        .any(|k| &k.market == market && k.period.interval() == *interval)
+            }
+        }
+    }
+
+    /// Subscribe for the watchlist. A chart may already hold it: then the
+    /// watchlist takes it over.
+    fn base_subscribe(&mut self, sub: Sub) {
+        if !self.chart_subs.remove(&sub) {
+            self.subscriptions.subscribe(sub);
+        }
+    }
+
+    /// Unsubscribe for the watchlist. A chart may still need it: then the
+    /// chart takes it over.
+    fn base_unsubscribe(&mut self, sub: Sub) {
+        if self.chart_needs(&sub) {
+            self.chart_subs.insert(sub);
+        } else {
+            self.subscriptions.unsubscribe(sub);
+        }
+    }
+
+    /// Subscribe to what the charts need beyond the watchlist, and drop what
+    /// they no longer do. Markets the venue does not list are left out: a
+    /// subscription to one closes the whole connection.
+    fn sync_chart_subs(&mut self) {
+        let mut keys: Vec<&ChartKey> = self.charts.iter().collect();
+        keys.sort_by(|a, b| a.market.cmp(&b.market));
+        let mut wanted: Vec<Sub> = Vec::new();
+        for key in keys {
+            let market = &key.market;
+            if !self.leverage.contains_key(market) {
+                continue;
+            }
+            let active = self.active.contains(market);
+            let interval = key.period.interval();
+            let mut needs = Vec::new();
+            if !active {
+                needs.push(Sub::Ctx(market.clone()));
+            }
+            if !(active && interval == self.interval()) {
+                needs.push(Sub::Candles(market.clone(), interval));
+            }
+            for sub in needs {
+                if !wanted.contains(&sub) {
+                    wanted.push(sub);
+                }
+            }
+        }
+        let mut gone: Vec<Sub> = self
+            .chart_subs
+            .iter()
+            .filter(|sub| !wanted.contains(sub))
+            .cloned()
+            .collect();
+        gone.sort_by_key(|sub| format!("{sub:?}"));
+        for sub in gone {
+            self.chart_subs.remove(&sub);
+            self.subscriptions.unsubscribe(sub);
+        }
+        for sub in wanted {
+            if self.chart_subs.insert(sub.clone()) {
+                self.subscriptions.subscribe(sub);
+            }
+        }
+    }
+
+    /// Load each chart's history the venue lists, unless it is here.
+    fn load_charts(&mut self, force: bool) {
+        let keys: Vec<ChartKey> = self.charts.iter().cloned().collect();
+        for key in keys {
+            if self.leverage.contains_key(&key.market) {
+                self.load(&key.market, key.period, force);
+            }
+        }
+    }
+
+    fn set_charts(&mut self, charts: HashSet<ChartKey>) {
+        if charts == self.charts {
+            return;
+        }
+        let old = std::mem::replace(&mut self.charts, charts);
+        // History queued for a chart that closed is no longer wanted.
+        let before = self.requested.len();
+        let keep: HashSet<(MarketId, Interval)> = self
+            .requested
+            .iter()
+            .filter(|(market, interval)| {
+                (self.active.contains(market) && *interval == self.interval())
+                    || self.chart_needs(&Sub::Candles(market.clone(), *interval))
+            })
+            .cloned()
+            .collect();
+        if keep.len() != before {
+            self.requested = keep.clone();
+            self.loader.keep_only(keep);
+        }
+        // A market nothing shows any more loses what was kept for it.
+        for key in &old {
+            if !self.wanted(&key.market) {
+                self.forget(&key.market.clone());
+            }
+        }
+        self.sync_chart_subs();
+        self.load_charts(false);
+        self.hurry_selected();
+    }
+
+    /// Drop the figures and candles kept for `market`.
+    fn forget(&mut self, market: &MarketId) {
+        self.ctx.remove(market);
+        self.failed.retain(|(m, _)| m != market);
+        self.series.retain(|(m, _), _| m != market);
+        self.requested.retain(|(m, _)| m != market);
     }
 
     fn select(&mut self, market: Option<MarketId>) {
@@ -365,9 +553,8 @@ impl<T: Transport + Clone, S: Subscriptions> State<T, S> {
             return;
         }
         self.active.insert(market.clone());
-        self.subscriptions.subscribe(Sub::Ctx(market.clone()));
-        self.subscriptions
-            .subscribe(Sub::Candles(market.clone(), self.interval()));
+        self.base_subscribe(Sub::Ctx(market.clone()));
+        self.base_subscribe(Sub::Candles(market.clone(), self.interval()));
         self.want_history(market, false);
     }
 
@@ -377,14 +564,13 @@ impl<T: Transport + Clone, S: Subscriptions> State<T, S> {
         }
         self.watched.retain(|m| m != market);
         if self.active.remove(market) {
-            self.subscriptions.unsubscribe(Sub::Ctx(market.clone()));
-            self.subscriptions
-                .unsubscribe(Sub::Candles(market.clone(), self.interval()));
+            self.base_unsubscribe(Sub::Ctx(market.clone()));
+            self.base_unsubscribe(Sub::Candles(market.clone(), self.interval()));
         }
-        self.ctx.remove(market);
-        self.failed.retain(|(m, _)| m != market);
-        self.series.retain(|(m, _), _| m != market);
-        self.requested.retain(|(m, _)| m != market);
+        // A chart of the market keeps its candles.
+        if !self.charted(market) {
+            self.forget(market);
+        }
     }
 
     fn set_period(&mut self, period: MarketPeriod) {
@@ -398,14 +584,21 @@ impl<T: Transport + Clone, S: Subscriptions> State<T, S> {
         if old == new {
             return;
         }
-        // History still queued for the old period is no longer wanted.
-        self.loader.keep_only(new);
-        self.requested.retain(|(_, interval)| *interval == new);
+        // History still queued for the old period is no longer wanted,
+        // unless a chart is waiting for it.
+        let keep: HashSet<(MarketId, Interval)> = self
+            .requested
+            .iter()
+            .filter(|(market, interval)| {
+                *interval == new || self.chart_needs(&Sub::Candles(market.clone(), *interval))
+            })
+            .cloned()
+            .collect();
+        self.requested = keep.clone();
+        self.loader.keep_only(keep);
         for market in self.active_in_order() {
-            self.subscriptions
-                .unsubscribe(Sub::Candles(market.clone(), old));
-            self.subscriptions
-                .subscribe(Sub::Candles(market.clone(), new));
+            self.base_unsubscribe(Sub::Candles(market.clone(), old));
+            self.base_subscribe(Sub::Candles(market.clone(), new));
             self.want_history(&market, false);
         }
     }
@@ -433,13 +626,13 @@ impl<T: Transport + Clone, S: Subscriptions> State<T, S> {
             }
             Event::Ctx(market, ctx) => {
                 self.heard();
-                if self.watched.contains(&market) {
+                if self.wanted(&market) {
                     self.ctx.insert(market, ctx);
                 }
             }
             Event::Candle(market, interval, candle) => {
                 self.heard();
-                if self.watched.contains(&market) {
+                if self.wanted(&market) {
                     self.series
                         .entry((market, interval))
                         .or_default()
@@ -465,6 +658,7 @@ impl<T: Transport + Clone, S: Subscriptions> State<T, S> {
             for market in self.active_in_order() {
                 self.want_history(&market, true);
             }
+            self.load_charts(true);
         }
         self.last_message = Some(SystemTime::now());
     }
@@ -472,7 +666,7 @@ impl<T: Transport + Clone, S: Subscriptions> State<T, S> {
     fn on_loaded(&mut self, loaded: Loaded) {
         let key = (loaded.market, loaded.interval);
         self.requested.remove(&key);
-        if !self.watched.contains(&key.0) {
+        if !self.wanted(&key.0) {
             return;
         }
         // A failed load leaves the tile on placeholders and is asked again
@@ -494,6 +688,7 @@ impl<T: Transport + Clone, S: Subscriptions> State<T, S> {
         for market in self.active_in_order() {
             self.want_history(&market, false);
         }
+        self.load_charts(false);
     }
 
     fn on_listing(&mut self, answer: Result<Vec<PerpMeta>, VenueError>) {
@@ -518,6 +713,9 @@ impl<T: Transport + Clone, S: Subscriptions> State<T, S> {
                 for market in self.watched.clone() {
                     self.activate(&market);
                 }
+                self.sync_chart_subs();
+                self.load_charts(false);
+                self.hurry_selected();
             }
             // A list already in hand is better than none.
             Err(_) if matches!(self.listing, Listing::Ready(_)) => {}
@@ -591,6 +789,31 @@ impl<T: Transport + Clone, S: Subscriptions> State<T, S> {
                 .selected
                 .as_ref()
                 .is_some_and(|market| self.failed.contains(&(market.clone(), interval)));
+        // Each panel's own chart, from the candles at its period's interval.
+        let charts = self
+            .charts
+            .iter()
+            .map(|key| {
+                let interval = key.period.interval();
+                let at = (key.market.clone(), interval);
+                let view = match self.series.get(&at).filter(|s| s.is_loaded()) {
+                    Some(series) => {
+                        let last = self.ctx.get(&key.market).map(|ctx| Live::from(ctx).last);
+                        ChartView::Ready(Chart {
+                            market: key.market.clone(),
+                            interval,
+                            candles: super::candles::chart(
+                                series.window(now, key.period.chart_millis()),
+                                last,
+                            ),
+                        })
+                    }
+                    None if self.failed.contains(&at) => ChartView::Failed,
+                    None => ChartView::Loading,
+                };
+                (key.clone(), view)
+            })
+            .collect();
         MarketSnapshot {
             period,
             tiles,
@@ -599,6 +822,7 @@ impl<T: Transport + Clone, S: Subscriptions> State<T, S> {
             listing: self.listing.clone(),
             chart,
             chart_failed,
+            charts,
         }
     }
 }
@@ -641,6 +865,7 @@ async fn run<T: Transport + Clone, S: Subscriptions>(
                     Some(Command::Unwatch(market)) => state.unwatch(&market),
                     Some(Command::SetPeriod(period)) => state.set_period(period),
                     Some(Command::Select(market)) => state.select(market),
+                    Some(Command::SetCharts(charts)) => state.set_charts(charts),
                     Some(Command::RefreshListing) => {
                         if state.listing_is_stale() {
                             if !matches!(state.listing, Listing::Ready(_)) {
