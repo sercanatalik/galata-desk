@@ -20,6 +20,72 @@ const ACCOUNT_FILE: &str = "account.json";
 const CONFIG_FILE: &str = "config.toml";
 const WATCHLIST_FILE: &str = "watchlist.json";
 const SETTINGS_FILE: &str = "settings.json";
+const WORKSPACE_FILE: &str = "workspace.json";
+
+/// The version of `workspace.json` this build writes and reads.
+pub const WORKSPACE_VERSION: u32 = 1;
+
+/// A market as saved: by dex and ticker, as the watchlist file has it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SavedMarket {
+    pub dex: String,
+    pub ticker: String,
+}
+
+impl From<&MarketId> for SavedMarket {
+    fn from(market: &MarketId) -> Self {
+        Self {
+            dex: market.dex().to_string(),
+            ticker: market.ticker().to_string(),
+        }
+    }
+}
+
+impl From<&SavedMarket> for MarketId {
+    fn from(saved: &SavedMarket) -> Self {
+        MarketId::from_parts(&saved.dex, &saved.ticker)
+    }
+}
+
+/// The Markets workspace on disk: the layout in use, and the layouts the
+/// user saved by name.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct WorkspaceRecord {
+    pub version: u32,
+    pub current: WorkspaceLayout,
+    #[serde(default)]
+    pub saved: Vec<NamedLayout>,
+}
+
+/// One layout: the dock's own saved state, which this crate keeps as it was
+/// given, and each link channel's market.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct WorkspaceLayout {
+    pub dock: serde_json::Value,
+    #[serde(default)]
+    pub channels: [Option<SavedMarket>; 3],
+    #[serde(default)]
+    pub locked: bool,
+}
+
+/// A layout the user saved under a name.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct NamedLayout {
+    pub name: String,
+    pub dock: serde_json::Value,
+    #[serde(default)]
+    pub channels: [Option<SavedMarket>; 3],
+}
+
+/// What reading `workspace.json` came to.
+#[derive(Debug, Clone, PartialEq)]
+pub enum WorkspaceFile {
+    /// There is none: the workspace has never been saved.
+    Missing,
+    /// There is one, but it cannot be read, or another version wrote it.
+    Unreadable,
+    Read(Box<WorkspaceRecord>),
+}
 
 /// The connected account.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -293,6 +359,27 @@ impl Store {
         })
     }
 
+    /// The saved workspace, if there is one this build can read.
+    pub fn workspace(&self) -> WorkspaceFile {
+        let text = match std::fs::read_to_string(self.dir.join(WORKSPACE_FILE)) {
+            Ok(text) => text,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return WorkspaceFile::Missing,
+            Err(_) => return WorkspaceFile::Unreadable,
+        };
+        match serde_json::from_str::<WorkspaceRecord>(&text) {
+            Ok(record) if record.version == WORKSPACE_VERSION => {
+                WorkspaceFile::Read(Box::new(record))
+            }
+            _ => WorkspaceFile::Unreadable,
+        }
+    }
+
+    /// Remember the workspace, replacing the file whole.
+    pub fn save_workspace(&self, record: &WorkspaceRecord) -> std::io::Result<()> {
+        let text = serde_json::to_string_pretty(record).expect("the record serialises");
+        self.write_whole(WORKSPACE_FILE, &text)
+    }
+
     /// Remember the watchlist and its order.
     pub fn save_watchlist(&self, watchlist: &Watchlist) -> std::io::Result<()> {
         let watched = |m: &MarketId| WatchedMarket {
@@ -482,6 +569,52 @@ mod tests {
 
     fn watchlist(coins: &[&str]) -> Watchlist {
         Watchlist::from_markets(coins.iter().map(|c| MarketId::new(*c)))
+    }
+
+    fn workspace() -> WorkspaceRecord {
+        let nvda = SavedMarket::from(&MarketId::new("xyz:NVDA"));
+        WorkspaceRecord {
+            version: WORKSPACE_VERSION,
+            current: WorkspaceLayout {
+                dock: serde_json::json!({"version": 1, "center": {"panel_name": "StackPanel"}}),
+                channels: [Some(nvda.clone()), None, None],
+                locked: true,
+            },
+            saved: vec![NamedLayout {
+                name: "Macro watch".into(),
+                dock: serde_json::json!({"version": 1}),
+                channels: [None, Some(nvda), None],
+            }],
+        }
+    }
+
+    #[test]
+    fn a_workspace_comes_back_as_it_was_saved() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::at(dir.path());
+        store.save_workspace(&workspace()).unwrap();
+        assert_eq!(store.workspace(), WorkspaceFile::Read(Box::new(workspace())));
+        // Markets are written by dex and ticker.
+        let text = std::fs::read_to_string(dir.path().join(WORKSPACE_FILE)).unwrap();
+        assert!(text.contains(r#""dex": "xyz""#) && text.contains(r#""ticker": "NVDA""#));
+    }
+
+    #[test]
+    fn with_no_workspace_file_there_is_none() {
+        let dir = tempfile::tempdir().unwrap();
+        assert_eq!(Store::at(dir.path()).workspace(), WorkspaceFile::Missing);
+    }
+
+    #[test]
+    fn a_broken_or_foreign_workspace_file_is_unreadable() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::at(dir.path());
+        std::fs::write(dir.path().join(WORKSPACE_FILE), "{ not json").unwrap();
+        assert_eq!(store.workspace(), WorkspaceFile::Unreadable);
+        let mut later = serde_json::to_value(workspace()).unwrap();
+        later["version"] = serde_json::json!(WORKSPACE_VERSION + 1);
+        std::fs::write(dir.path().join(WORKSPACE_FILE), later.to_string()).unwrap();
+        assert_eq!(store.workspace(), WorkspaceFile::Unreadable);
     }
 
     #[test]

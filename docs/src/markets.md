@@ -74,3 +74,72 @@ Pressing it opens a menu that:
 - shows the account-wide stop-alerts switch and near-liquidation distance.
 
 The bell is disabled while no watcher is connected or it cannot be reached.
+
+## Fullscreen workspace
+
+![The fullscreen workspace](images/workspace.png)
+
+When the window is fullscreen, Markets becomes a workspace you arrange
+yourself. Leave fullscreen and the fixed layout returns, showing the market
+channel A last showed. The other sections look the same either way.
+
+### Panels
+
+Every part of the workspace is a panel with a header: its title, its link
+channels, **maximise** and **close**. **Add panel** adds one beside the
+largest panel:
+
+- **Chart**: a market's candles over its own period. Narrow charts drop the
+  price axis rather than cut figures off.
+- **Watchlist tiles**: the tiles, with the same colours, sort and figures.
+- **Market detail**, with Buy and Sell.
+- **Position**: the account's position in a market.
+- **Order ticket**: the ticket, docked. There is only ever one; while it is
+  there, Buy and Sell fill it in instead of opening it over the screen.
+- **Blotter**: Positions, Open orders, Trade history and Funding, as Portfolio,
+  History and Funding show them, with the same buttons and confirmations.
+
+Drag a panel by its header onto another panel's edge to split that panel, or
+onto its centre to make tabs; Escape cancels. Drag the dividers to resize, down
+to 100 points. Closing the last panel leaves an empty workspace that offers
+Add panel and the layouts.
+
+### Layouts
+
+**Layout** offers four presets, each replacing the current layout:
+**Trader** (two charts, tiles, blotter, position, detail and ticket),
+**Focus chart**, **Quad charts** (four equal charts) and **Chart and
+blotter**. The first time, the workspace shows Trader.
+
+**Saved layouts…** keeps the current layout under a name, with its panels,
+markets, periods and links; choose it from the Layout menu to get it back,
+or rename or delete it there. The workspace is remembered across launches.
+If the remembered layout cannot be read, the workspace shows Trader and says
+so once.
+
+**Lock layout** stops panels being dragged, resized, closed or added. What is
+in them works as usual.
+
+### Link channels
+
+Panels share what you do through three channels: **A** (amber square),
+**B** (blue circle) and **C** (violet triangle). On each channel a panel is
+off, listens, sends, or does both. A panel on no channel is **pinned**: it
+keeps its own market.
+
+What a sending panel can tell its channels:
+
+| Action | From | Does |
+|---|---|---|
+| Set market | Tiles, blotter rows | Listening panels show that market. |
+| Sync time cursor | Charts | Listening charts mark the same candle. |
+| Limit price from chart | A click on a chart | The listening ticket's limit price becomes that price. |
+| Filter blotter | Tiles, blotter rows | Listening blotters show only that market's rows. |
+
+Click a panel's channel marks to set its roles, or open **Links** to see
+every panel's roles and switch each sending panel's actions on or off. New
+panels start linked on channel A: tiles, blotter and charts send, and the
+others listen; filter blotter starts off.
+
+Linking never trades. Nothing linked sends an order, opens a confirmation or
+changes an order: at most it fills in a ticket field you could have typed.

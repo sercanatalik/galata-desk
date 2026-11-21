@@ -6631,7 +6631,10 @@ fn workspace_with(
                              window: &mut gpui_kit::Window,
                              cx: &mut gpui_kit::App| {
                 let market = market.map(MarketId::new);
-                let record = PanelRecord::fresh(kind, market.as_ref(), None);
+                // Unlinked: each test sets the links it is about.
+                let mut record = PanelRecord::fresh(kind, market.as_ref(), None);
+                record.roles = [crate::markets::dock::Role::Off; 3];
+                record.actions.clear();
                 keys.push(record.key.clone());
                 let view = dock::new_panel(kind, &home, &record, window, cx);
                 gpui_kit::component::dock::DockLayout::tabs().panel_view(view, cx)
@@ -7722,6 +7725,585 @@ fn no_link_event_sends_anything_opens_a_confirmation_or_changes_an_order(cx: &mu
         );
         // The ticket only had fields filled in: NVDA from the blotter row.
         assert_eq!(p.ticket_open().map(|t| t.0), Some("xyz:NVDA".into()));
+    })
+    .unwrap();
+}
+
+#[gpui_kit::test]
+fn channels_marks_differ_in_colour_and_shape(cx: &mut TestAppContext) {
+    use crate::markets::ChartPanel;
+    use crate::markets::dock::{self, CHANNELS, PanelKind, Role};
+    use gpui_kit::component::dock::DockLayout;
+    let (window, _desk, markets, _keys, _dir) =
+        workspace_with(cx, &["BTC", "ETH"], |panel, window, cx| {
+            DockLayout::h_split()
+                .child(panel(PanelKind::Chart, Some("BTC"), window, cx), None)
+                .child(panel(PanelKind::Chart, Some("ETH"), window, cx), None)
+        });
+    cx.update_window(window.into(), |_, window, cx| {
+        let charts = panels_of::<ChartPanel>(&markets, cx);
+        charts[0].update(cx, |c, cx| dock::set_role(c, 0, Role::Listen, window, cx));
+        charts[1].update(cx, |c, cx| dock::set_role(c, 1, Role::Listen, window, cx));
+        window.render_frame(cx);
+        window.render_frame(cx);
+        // One panel on A, the other on B, side by side.
+        let a = window.find(("channel-mark", 0usize)).bounds();
+        let b = window.find(("channel-mark", 1usize)).bounds();
+        assert!(a.left() < b.left());
+        let (_, colour_a, shape_a) = CHANNELS[0];
+        let (_, colour_b, shape_b) = CHANNELS[1];
+        assert_ne!(colour_a, colour_b, "colours differ");
+        assert_ne!(shape_a, shape_b, "shapes differ");
+        let (_, colour_c, shape_c) = CHANNELS[2];
+        assert!(colour_c != colour_a && colour_c != colour_b);
+        assert!(shape_c != shape_a && shape_c != shape_b);
+    })
+    .unwrap();
+}
+
+#[gpui_kit::test]
+fn a_chart_set_to_listen_on_b_from_its_header_shows_bs_market(cx: &mut TestAppContext) {
+    use crate::markets::ChartPanel;
+    use crate::markets::dock::{PanelKind, Role};
+    use gpui_kit::component::dock::DockLayout;
+    let (window, _desk, markets, keys, _dir) =
+        workspace_with(cx, &["BTC", "ETH"], |panel, window, cx| {
+            DockLayout::h_split().child(panel(PanelKind::Chart, Some("BTC"), window, cx), None)
+        });
+    cx.update(|cx| {
+        let bus = markets.read(cx).workspace_bus().unwrap();
+        bus.update(cx, |b, _| b.set_market(1, Some(MarketId::new("ETH"))));
+    });
+    cx.update_window(window.into(), |_, window, cx| {
+        // An unlinked chart: its header says it is pinned.
+        assert!(window.try_find("channel-pinned").is_some());
+        window.click("channel-menu", cx);
+        window.render_frame(cx);
+        let item = window
+            .find_by_label("Channel B \u{b7} Listens")
+            .bounds()
+            .center();
+        window.pointer_move(item, None, cx);
+        window.pointer_down(item, gpui_kit::MouseButton::Left, cx);
+        window.pointer_up(item, gpui_kit::MouseButton::Left, cx);
+        window.render_frame(cx);
+    })
+    .unwrap();
+    cx.update_window(window.into(), |_, window, cx| {
+        window.render_frame(cx);
+        let chart = &panels_of::<ChartPanel>(&markets, cx)[0];
+        assert_eq!(
+            chart.read(cx).market(cx).as_ref().map(MarketId::coin),
+            Some("ETH")
+        );
+        assert!(
+            window.try_find(("channel-mark", 1usize)).is_some(),
+            "the B mark"
+        );
+        assert!(window.try_find("channel-pinned").is_none());
+        let bus = markets.read(cx).workspace_bus().unwrap();
+        assert_eq!(
+            bus.read(cx).roles(&keys[0]),
+            [Role::Off, Role::Listen, Role::Off]
+        );
+        // And it saves so.
+        assert_eq!(
+            chart.read(cx).record(cx).roles,
+            [Role::Off, Role::Listen, Role::Off]
+        );
+    })
+    .unwrap();
+}
+
+#[gpui_kit::test]
+fn the_links_view_lists_every_panel_with_its_role_on_each_channel(cx: &mut TestAppContext) {
+    use crate::markets::dock::PanelKind;
+    use gpui_kit::component::dock::DockLayout;
+    let (window, _desk, _markets, _keys, _dir) =
+        workspace_with(cx, &["BTC", "ETH"], |panel, window, cx| {
+            DockLayout::h_split()
+                .child(panel(PanelKind::Chart, Some("BTC"), window, cx), None)
+                .child(panel(PanelKind::Chart, Some("ETH"), window, cx), None)
+                .child(panel(PanelKind::Tiles, Some("BTC"), window, cx), None)
+                .child(panel(PanelKind::Blotter, None, window, cx), None)
+        });
+    cx.update_window(window.into(), |_, window, cx| {
+        window.click("workspace-links", cx);
+        window.render_frame(cx);
+        assert!(window.try_find("links-view").is_some());
+        let rows = (0..8usize)
+            .filter(|r| window.try_find(("link-row", *r)).is_some())
+            .count();
+        assert_eq!(rows, 4, "the four panels");
+        for row in 0..4usize {
+            for channel in 0..3usize {
+                assert!(window.try_find(("link-role", row * 3 + channel)).is_some());
+            }
+        }
+        assert!(
+            window
+                .try_find_by_label("Chart \u{b7} BTC, channel A: Off")
+                .is_some()
+        );
+        assert!(
+            window
+                .try_find_by_label("Blotter, channel C: Off")
+                .is_some()
+        );
+    })
+    .unwrap();
+}
+
+#[gpui_kit::test]
+fn a_chart_with_sync_time_cursor_off_moves_no_other_cursor(cx: &mut TestAppContext) {
+    use crate::markets::ChartPanel;
+    use crate::markets::dock::{PanelKind, Role};
+    use galata_desk_core::market::feed::{ChartKey, ChartView};
+    use gpui_kit::component::dock::DockLayout;
+    let (window, _desk, markets, keys, _dir) =
+        workspace_with(cx, &["BTC", "ETH"], |panel, window, cx| {
+            DockLayout::h_split()
+                .child(panel(PanelKind::Chart, Some("BTC"), window, cx), None)
+                .child(panel(PanelKind::Chart, Some("BTC"), window, cx), None)
+        });
+    // Both charts with a new chart's links.
+    let (roles, actions) = PanelKind::Chart.default_links();
+    assert_eq!(roles, [Role::Both, Role::Off, Role::Off]);
+    for key in &keys {
+        link(&markets, key, roles, &actions, cx);
+    }
+    cx.update(|cx| {
+        let mut snapshot = charted("BTC", &["BTC", "ETH"], 96);
+        let chart = snapshot.chart.take().unwrap();
+        snapshot.charts.insert(
+            ChartKey {
+                market: MarketId::new("BTC"),
+                period: MarketPeriod::Day,
+            },
+            ChartView::Ready(chart),
+        );
+        markets.update(cx, |m, cx| m.set_snapshot(snapshot, cx));
+    });
+    cx.update_window(window.into(), |_, window, cx| {
+        // In the links view, the first chart's "Sync time cursor" off.
+        window.click("workspace-links", cx);
+        window.render_frame(cx);
+        window.click(("link-action", 0usize), cx);
+        window.render_frame(cx);
+        let bus = markets.read(cx).workspace_bus().unwrap();
+        assert!(
+            !bus.read(cx)
+                .actions(&keys[0])
+                .contains(&crate::markets::dock::Action::TimeCursor)
+        );
+        window.click("workspace-links", cx);
+        window.render_frame(cx);
+        window.render_frame(cx);
+        let plot = window.find_all("chart-plot")[0].bounds();
+        let at = gpui_kit::point(
+            plot.origin.x + plot.size.width * 0.5,
+            plot.origin.y + plot.size.height * 0.5,
+        );
+        window.pointer_move(at, None, cx);
+        window.render_frame(cx);
+    })
+    .unwrap();
+    cx.update_window(window.into(), |_, _, cx| {
+        let charts = panels_of::<ChartPanel>(&markets, cx);
+        assert!(
+            charts[0].read(cx).time_cursor().is_some(),
+            "its own cursor moves"
+        );
+        assert_eq!(
+            charts[1].read(cx).time_cursor(),
+            None,
+            "the other's does not"
+        );
+    })
+    .unwrap();
+}
+
+#[gpui_kit::test]
+fn an_added_chart_starts_on_channel_a_with_its_actions_on(cx: &mut TestAppContext) {
+    use crate::markets::dock::{Action, PanelKind, Role};
+    let (window, desk, _dir) = open_with(cx, Some(&["BTC", "ETH"]));
+    let markets = go_to_markets(window, &desk, cx);
+    fullscreen(cx, window, &markets, true);
+    cx.update_window(window.into(), |_, window, cx| {
+        markets.update(cx, |m, cx| m.add_panel(PanelKind::Chart, window, cx));
+        window.render_frame(cx);
+        let bus = markets.read(cx).workspace_bus().unwrap();
+        let charts = panels_of::<crate::markets::ChartPanel>(&markets, cx);
+        assert_eq!(charts.len(), 3);
+        for chart in &charts {
+            let record = chart.read(cx).record(cx);
+            assert_eq!(
+                bus.read(cx).roles(&record.key),
+                [Role::Both, Role::Off, Role::Off]
+            );
+            let actions = bus.read(cx).actions(&record.key);
+            for on in [Action::SetMarket, Action::TimeCursor, Action::LimitPrice] {
+                assert!(actions.contains(&on), "{on:?}");
+            }
+            assert!(!actions.contains(&Action::FilterBlotter));
+        }
+        // The Trader layout's other panels follow channel A, and the tiles
+        // send on it.
+        let tiles = &panels_of::<crate::markets::TilesPanel>(&markets, cx)[0];
+        let key = tiles.read(cx).record(cx).key;
+        assert_eq!(bus.read(cx).roles(&key), [Role::Send, Role::Off, Role::Off]);
+    })
+    .unwrap();
+}
+
+#[gpui_kit::test]
+fn quad_charts_is_four_equal_charts_in_two_rows_of_two(cx: &mut TestAppContext) {
+    let (window, desk, _dir) = open_with(cx, Some(&["BTC", "ETH", "SOL", "HYPE"]));
+    let markets = go_to_markets(window, &desk, cx);
+    fullscreen(cx, window, &markets, true);
+    cx.update_window(window.into(), |_, window, cx| {
+        window.click("workspace-layout", cx);
+        window.render_frame(cx);
+        let item = window.find_by_label("Quad charts").bounds().center();
+        window.pointer_move(item, None, cx);
+        window.pointer_down(item, gpui_kit::MouseButton::Left, cx);
+        window.pointer_up(item, gpui_kit::MouseButton::Left, cx);
+    })
+    .unwrap();
+    cx.update_window(window.into(), |_, window, cx| {
+        window.render_frame(cx);
+        window.render_frame(cx);
+        let charts = panels_of::<crate::markets::ChartPanel>(&markets, cx);
+        assert_eq!(charts.len(), 4);
+        assert_eq!(center_panels(&markets, cx), 4, "nothing else");
+        let markets_shown: Vec<String> = charts
+            .iter()
+            .map(|c| c.read(cx).market(cx).unwrap().coin().to_string())
+            .collect();
+        assert_eq!(markets_shown.len(), 4);
+        let groups: Vec<_> = window
+            .find_all("tab-panel")
+            .into_iter()
+            .map(|e| e.bounds())
+            .collect();
+        assert_eq!(groups.len(), 4);
+        let near =
+            |a: gpui_kit::Pixels, b: gpui_kit::Pixels| (f32::from(a) - f32::from(b)).abs() <= 1.5;
+        for g in &groups {
+            assert!(near(g.size.width, groups[0].size.width), "{groups:?}");
+            assert!(near(g.size.height, groups[0].size.height), "{groups:?}");
+        }
+        let mut xs: Vec<i32> = groups
+            .iter()
+            .map(|g| f32::from(g.origin.x) as i32)
+            .collect();
+        let mut ys: Vec<i32> = groups
+            .iter()
+            .map(|g| f32::from(g.origin.y) as i32)
+            .collect();
+        xs.sort();
+        xs.dedup();
+        ys.sort();
+        ys.dedup();
+        assert_eq!((xs.len(), ys.len()), (2, 2), "two by two");
+    })
+    .unwrap();
+}
+
+#[gpui_kit::test]
+fn the_first_workspace_is_the_trader_preset(cx: &mut TestAppContext) {
+    let (window, desk, dir) = open_with(cx, Some(&["BTC", "ETH"]));
+    assert!(!dir.path().join("workspace.json").exists());
+    let markets = go_to_markets(window, &desk, cx);
+    fullscreen(cx, window, &markets, true);
+    cx.update(|cx| {
+        assert_eq!(center_panels(&markets, cx), 7);
+        assert_eq!(
+            panels_of::<crate::markets::ChartPanel>(&markets, cx).len(),
+            2
+        );
+        assert_eq!(
+            panels_of::<crate::markets::TilesPanel>(&markets, cx).len(),
+            1
+        );
+        assert_eq!(
+            panels_of::<crate::markets::BlotterPanel>(&markets, cx).len(),
+            1
+        );
+        assert_eq!(
+            panels_of::<crate::markets::TicketPanel>(&markets, cx).len(),
+            1
+        );
+        assert_eq!(
+            panels_of::<crate::markets::PositionPanel>(&markets, cx).len(),
+            1
+        );
+    });
+}
+
+// ---- The remembered workspace ----------------------------------------------
+
+#[gpui_kit::test]
+fn the_workspace_and_its_links_come_back_after_a_relaunch(cx: &mut TestAppContext) {
+    use crate::markets::ChartPanel;
+    use crate::markets::dock::{self, PanelKind, Role};
+    use gpui_kit::component::dock::DockLayout;
+    let watched = ["BTC", "ETH", "SOL"];
+    let (window, _desk, markets, keys, dir) = workspace_with(cx, &watched, |panel, window, cx| {
+        DockLayout::h_split()
+            .child(
+                DockLayout::v_split()
+                    .child(panel(PanelKind::Chart, Some("BTC"), window, cx), None)
+                    .child(panel(PanelKind::Chart, Some("ETH"), window, cx), None),
+                None,
+            )
+            .child(panel(PanelKind::Chart, Some("SOL"), window, cx), None)
+            .child(panel(PanelKind::Blotter, None, window, cx), None)
+    });
+    // The SOL chart covers a week and listens on channel B, which shows ETH
+    // (so it shows ETH too); channel A shows BTC.
+    cx.update_window(window.into(), |_, window, cx| {
+        let bus = markets.read(cx).workspace_bus().unwrap();
+        bus.update(cx, |b, _| {
+            b.set_market(0, Some(MarketId::new("BTC")));
+            b.set_market(1, Some(MarketId::new("ETH")));
+        });
+        let sol = panels_of::<ChartPanel>(&markets, cx)
+            .into_iter()
+            .find(|c| c.read(cx).record(cx).key == keys[2])
+            .unwrap();
+        sol.update(cx, |c, cx| {
+            c.set_period(Some(MarketPeriod::Week), cx);
+            dock::set_role(c, 1, Role::Listen, window, cx);
+        });
+        window.render_frame(cx);
+    })
+    .unwrap();
+    // A second on, it has been written.
+    cx.executor()
+        .advance_clock(std::time::Duration::from_secs(2));
+    cx.run_until_parked();
+    assert!(dir.path().join("workspace.json").exists());
+    let before = cx.update(|cx| {
+        let area = markets.read(cx).workspace_area().unwrap();
+        let state = area.read(cx).dump(cx);
+        (saved_records(&state.center), groups(&state.center))
+    });
+    assert_eq!(before.0.len(), 4);
+
+    // Launched again on the same files, in fullscreen.
+    let (window2, desk2) = open_at(
+        cx,
+        dir.path(),
+        true,
+        size(
+            px(crate::DEFAULT_WINDOW_WIDTH),
+            px(crate::DEFAULT_WINDOW_HEIGHT),
+        ),
+    );
+    let markets2 = go_to_markets(window2, &desk2, cx);
+    fullscreen(cx, window2, &markets2, true);
+    cx.update(|cx| {
+        let area = markets2.read(cx).workspace_area().unwrap();
+        let state = area.read(cx).dump(cx);
+        assert_eq!(
+            saved_records(&state.center),
+            before.0,
+            "the same panels, markets and links"
+        );
+        assert_eq!(groups(&state.center), before.1, "in the same places");
+        let sol = panels_of::<ChartPanel>(&markets2, cx)
+            .into_iter()
+            .find(|c| c.read(cx).record(cx).key == keys[2])
+            .unwrap();
+        // Listening on B, it took B's market; and kept its own period.
+        assert_eq!(sol.read(cx).title_text(cx), "ETH \u{b7} 7D");
+        let bus = markets2.read(cx).workspace_bus().unwrap();
+        assert_eq!(bus.read(cx).market(0).map(MarketId::coin), Some("BTC"));
+        assert_eq!(bus.read(cx).market(1).map(MarketId::coin), Some("ETH"));
+        assert_eq!(
+            bus.read(cx).roles(&keys[2]),
+            [Role::Off, Role::Listen, Role::Off]
+        );
+    });
+}
+
+#[gpui_kit::test]
+fn an_unreadable_workspace_is_reset_to_trader_and_says_so(cx: &mut TestAppContext) {
+    let (window, desk, dir) = open_with(cx, Some(&["BTC", "ETH"]));
+    std::fs::write(dir.path().join("workspace.json"), "{ this is not a layout").unwrap();
+    let markets = go_to_markets(window, &desk, cx);
+    fullscreen(cx, window, &markets, true);
+    cx.update_window(window.into(), |_, window, cx| {
+        assert_eq!(center_panels(&markets, cx), 7, "the Trader preset");
+        assert!(window.try_find("workspace-reset").is_some(), "a notice");
+        window.click("workspace-reset-dismiss", cx);
+        window.render_frame(cx);
+        assert!(window.try_find("workspace-reset").is_none(), "said once");
+    })
+    .unwrap();
+    // The next save replaces the broken file with one that reads.
+    cx.executor()
+        .advance_clock(std::time::Duration::from_secs(2));
+    cx.run_until_parked();
+    assert!(matches!(
+        galata_desk_core::store::Store::at(dir.path()).workspace(),
+        galata_desk_core::store::WorkspaceFile::Read(_)
+    ));
+}
+
+/// Choose `label` from the workspace's Layout menu.
+fn choose_layout(window: &mut gpui_kit::Window, label: &str, cx: &mut gpui_kit::App) {
+    window.click("workspace-layout", cx);
+    window.render_frame(cx);
+    let item = window.find_by_label(label).bounds().center();
+    window.pointer_move(item, None, cx);
+    window.pointer_down(item, gpui_kit::MouseButton::Left, cx);
+    window.pointer_up(item, gpui_kit::MouseButton::Left, cx);
+    window.render_frame(cx);
+}
+
+#[gpui_kit::test]
+fn a_layout_saved_by_name_is_listed_and_comes_back_when_chosen(cx: &mut TestAppContext) {
+    use crate::markets::ChartPanel;
+    use crate::markets::dock::PanelKind;
+    use gpui_kit::component::dock::DockLayout;
+    let (window, _desk, markets, _keys, dir) =
+        workspace_with(cx, &["BTC", "ETH", "SOL"], |panel, window, cx| {
+            DockLayout::h_split()
+                .child(panel(PanelKind::Chart, Some("ETH"), window, cx), None)
+                .child(panel(PanelKind::Blotter, None, window, cx), None)
+        });
+    let before = cx
+        .update_window(window.into(), |_, window, cx| {
+            let eth = &panels_of::<ChartPanel>(&markets, cx)[0];
+            eth.update(cx, |c, cx| c.set_period(Some(MarketPeriod::Week), cx));
+            window.render_frame(cx);
+            let area = markets.read(cx).workspace_area().unwrap();
+            let before = saved_records(&area.read(cx).dump(cx).center);
+            // Saving it as "Macro watch".
+            choose_layout(window, "Saved layouts\u{2026}", cx);
+            markets.update(cx, |m, cx| m.type_layout_name("Macro watch", window, cx));
+            window.click("layouts-save", cx);
+            window.render_frame(cx);
+            window.click("layouts-close", cx);
+            window.render_frame(cx);
+            before
+        })
+        .unwrap();
+    cx.update_window(window.into(), |_, window, cx| {
+        // It is listed.
+        window.click("workspace-layout", cx);
+        window.render_frame(cx);
+        assert!(window.try_find_by_label("Macro watch").is_some());
+        // Another layout, then the saved one again.
+        let item = window.find_by_label("Quad charts").bounds().center();
+        window.pointer_move(item, None, cx);
+        window.pointer_down(item, gpui_kit::MouseButton::Left, cx);
+        window.pointer_up(item, gpui_kit::MouseButton::Left, cx);
+        window.render_frame(cx);
+    })
+    .unwrap();
+    cx.update_window(window.into(), |_, window, cx| {
+        window.render_frame(cx);
+        assert_eq!(panels_of::<ChartPanel>(&markets, cx).len(), 4);
+        choose_layout(window, "Macro watch", cx);
+    })
+    .unwrap();
+    cx.update_window(window.into(), |_, window, cx| {
+        window.render_frame(cx);
+        let area = markets.read(cx).workspace_area().unwrap();
+        assert_eq!(
+            saved_records(&area.read(cx).dump(cx).center),
+            before,
+            "as it was saved"
+        );
+        let charts = panels_of::<ChartPanel>(&markets, cx);
+        assert_eq!(charts.len(), 1);
+        assert_eq!(charts[0].read(cx).title_text(cx), "ETH \u{b7} 7D");
+    })
+    .unwrap();
+    // Renamed, it is remembered under the new name; deleted, it is gone.
+    cx.update_window(window.into(), |_, window, cx| {
+        choose_layout(window, "Saved layouts\u{2026}", cx);
+        markets.update(cx, |m, cx| m.type_layout_name("Macro", window, cx));
+        window.click(("saved-layout-rename", 0usize), cx);
+        window.render_frame(cx);
+        let names: Vec<String> = markets.read(cx).saved_layouts();
+        assert_eq!(names, ["Macro"]);
+    })
+    .unwrap();
+    cx.executor()
+        .advance_clock(std::time::Duration::from_secs(2));
+    cx.run_until_parked();
+    match galata_desk_core::store::Store::at(dir.path()).workspace() {
+        galata_desk_core::store::WorkspaceFile::Read(record) => {
+            assert_eq!(
+                record
+                    .saved
+                    .iter()
+                    .map(|l| l.name.as_str())
+                    .collect::<Vec<_>>(),
+                ["Macro"]
+            );
+        }
+        other => panic!("{other:?}"),
+    }
+    cx.update_window(window.into(), |_, window, cx| {
+        window.click(("saved-layout-delete", 0usize), cx);
+        window.render_frame(cx);
+        assert!(markets.read(cx).saved_layouts().is_empty());
+    })
+    .unwrap();
+}
+
+#[gpui_kit::test]
+fn a_chart_keeps_a_market_that_leaves_the_watchlist(cx: &mut TestAppContext) {
+    use crate::markets::ChartPanel;
+    use crate::markets::dock::PanelKind;
+    use galata_desk_core::market::feed::{ChartKey, ChartView};
+    use gpui_kit::component::dock::DockLayout;
+    let watched = ["BTC", "ETH"];
+    let (window, _desk, markets, _keys, _dir) =
+        workspace_with(cx, &watched, |panel, window, cx| {
+            DockLayout::h_split().child(panel(PanelKind::Chart, Some("ETH"), window, cx), None)
+        });
+    cx.update(|cx| markets.update(cx, |m, cx| m.remove_market("ETH", cx)));
+    // The feed keeps a charted market's candles whether or not it is watched.
+    cx.update(|cx| {
+        let mut snapshot = charted("ETH", &["BTC"], 96);
+        let chart = snapshot.chart.take().unwrap();
+        snapshot.charts.insert(
+            ChartKey {
+                market: MarketId::new("ETH"),
+                period: MarketPeriod::Day,
+            },
+            ChartView::Ready(chart),
+        );
+        markets.update(cx, |m, cx| m.set_snapshot(snapshot, cx));
+    });
+    cx.update_window(window.into(), |_, window, cx| {
+        window.render_frame(cx);
+        assert_eq!(
+            markets.read(cx).watched(cx),
+            ["BTC"],
+            "ETH is no longer watched"
+        );
+        let chart = &panels_of::<ChartPanel>(&markets, cx)[0];
+        assert_eq!(
+            chart.read(cx).market(cx).as_ref().map(MarketId::coin),
+            Some("ETH")
+        );
+        assert_eq!(
+            chart.read(cx).drawn_chart().0,
+            "chart",
+            "and still draws its candles"
+        );
+        let held = markets.read(cx).model().read(cx).chart_holds();
+        assert!(
+            held.iter().any(|(key, _)| key.market.coin() == "ETH"),
+            "{held:?}"
+        );
     })
     .unwrap();
 }

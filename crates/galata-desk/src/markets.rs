@@ -106,9 +106,17 @@ pub struct Markets {
     chart: Entity<ChartPanel>,
     position: Entity<PositionPanel>,
     picker_open: bool,
+    /// The links view is open.
+    links_open: bool,
     search: Entity<InputState>,
+    /// The name typed for saving or renaming a layout.
+    layout_name: Entity<InputState>,
+    /// The saved layouts panel is open.
+    layouts_open: bool,
     /// The fullscreen workspace, made the first time it is needed and kept.
     workspace: Option<workspace::Workspace>,
+    /// Writes the workspace once a second while it changes.
+    _autosave: Option<gpui_kit::Task<()>>,
     /// Whether Markets was last drawn fullscreen, to notice the change.
     was_fullscreen: bool,
     /// Tests and screenshot runs say whether the window is fullscreen.
@@ -121,6 +129,7 @@ impl Markets {
     pub fn new(portfolio: Entity<Portfolio>, window: &mut Window, cx: &mut Context<Self>) -> Self {
         let model = cx.new(|cx| MarketsModel::new(portfolio.clone(), cx));
         let search = cx.new(|cx| InputState::new(window, cx).placeholder("Search markets"));
+        let layout_name = cx.new(|cx| InputState::new(window, cx).placeholder("Layout name"));
         // A tile picked shows its market in the panel above.
         let markets = cx.entity().downgrade();
         let on_tiles: TilesHandler = std::rc::Rc::new(move |event, _, cx| {
@@ -149,6 +158,11 @@ impl Markets {
             cx.observe(&model, |_, _, cx| cx.notify()),
             // Going fullscreen, or leaving it, changes the layout.
             cx.observe_window_bounds(window, |_, _, cx| cx.notify()),
+            // The workspace is written as the app quits.
+            cx.on_app_quit(|this, cx| {
+                this.save_workspace(cx);
+                async {}
+            }),
         ];
 
         #[allow(unused_mut)]
@@ -159,8 +173,12 @@ impl Markets {
             chart,
             position,
             picker_open: false,
+            links_open: false,
             search,
+            layout_name,
+            layouts_open: false,
             workspace: None,
+            _autosave: None,
             was_fullscreen: false,
             #[cfg(any(test, feature = "shot"))]
             fullscreen: None,
@@ -186,6 +204,18 @@ impl Markets {
     fn enter_workspace(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if self.workspace.is_none() {
             self.workspace = Some(workspace::Workspace::new(&self.model, window, cx));
+            // Written about a second after it changes: the dock, the links
+            // and each panel's own market, period and tab all count.
+            self._autosave = Some(cx.spawn(async move |this, cx| {
+                loop {
+                    cx.background_executor()
+                        .timer(std::time::Duration::from_secs(1))
+                        .await;
+                    if this.update(cx, |this, cx| this.save_workspace(cx)).is_err() {
+                        break;
+                    }
+                }
+            }));
         }
         let portfolio = self.model.read(cx).portfolio.clone();
         portfolio.update(cx, |p, cx| p.set_ticket_panels_shown(true, cx));
@@ -203,6 +233,7 @@ impl Markets {
         }
         let portfolio = self.model.read(cx).portfolio.clone();
         portfolio.update(cx, |p, cx| p.set_ticket_panels_shown(false, cx));
+        self.save_workspace(cx);
     }
 
     /// The workspace with every panel closed: what can fill it again.
@@ -222,15 +253,17 @@ impl Markets {
                 h_flex()
                     .gap_2()
                     .child(self.add_panel_menu("workspace-empty-add", cx))
-                    .child(
-                        Button::new(("preset", 0usize))
-                            .small()
-                            .outline()
-                            .label("Trader")
-                            .on_click(
-                                cx.listener(|this, _, window, cx| this.apply_trader(window, cx)),
-                            ),
-                    ),
+                    .children(workspace::Preset::ALL.into_iter().enumerate().map(
+                        |(ix, preset)| {
+                            Button::new(("preset", ix))
+                                .small()
+                                .outline()
+                                .label(preset.label())
+                                .on_click(cx.listener(move |this, _, window, cx| {
+                                    this.apply_preset(preset, window, cx)
+                                }))
+                        },
+                    )),
             )
             .test_support()
             .into_any_element()
@@ -253,7 +286,8 @@ impl Markets {
             .disabled(locked)
             .label("Add panel \u{25be}")
             .dropdown_menu(move |mut menu, _, _| {
-                for (kind, name) in workspace::CATALOGUE {
+                for kind in workspace::CATALOGUE {
+                    let name = kind.label();
                     let markets = markets.clone();
                     let added = kind == dock::PanelKind::Ticket && ticket_docked;
                     let name = if added {
@@ -269,6 +303,110 @@ impl Markets {
                 }
                 menu
             })
+            .into_any_element()
+    }
+
+    /// The links view: every panel's role on each channel, and the actions
+    /// each sending panel sends.
+    fn links_view(&self, cx: &mut Context<Self>) -> AnyElement {
+        use dock::Role;
+        use gpui_kit::component::checkbox::Checkbox;
+        let Some(workspace) = &self.workspace else {
+            return div().into_any_element();
+        };
+        let bus = workspace.bus.clone();
+        let records = workspace.panel_records(cx);
+        let rows = records.into_iter().enumerate().map(|(row, record)| {
+            let key = record.key.clone();
+            let (roles, actions) = {
+                let b = bus.read(cx);
+                (b.roles(&key), b.actions(&key))
+            };
+            let name = match record.market() {
+                Some(market) => format!(
+                    "{} \u{b7} {}",
+                    record.kind.label(),
+                    dock::market_name(&market)
+                ),
+                None => record.kind.label().to_string(),
+            };
+            let role_cells = (0..3).map(|channel| {
+                let (letter, _, _) = dock::CHANNELS[channel];
+                let (bus, key) = (bus.clone(), key.clone());
+                let now = roles[channel];
+                Button::new(("link-role", row * 3 + channel))
+                    .xsmall()
+                    .outline()
+                    .w(px(124.))
+                    .label(format!("{letter}: {}", now.label()))
+                    .accessibility_label(format!("{name}, channel {letter}: {}", now.label()))
+                    .dropdown_menu(move |mut menu, _, _| {
+                        for role in Role::ALL {
+                            let (bus, key) = (bus.clone(), key.clone());
+                            menu = menu.item(
+                                PopupMenuItem::new(format!(
+                                    "Channel {letter} \u{b7} {}",
+                                    role.label()
+                                ))
+                                .checked(role == now)
+                                .on_click(move |_, _, cx| {
+                                    bus.update(cx, |b, cx| b.set_role(&key, channel, role, cx));
+                                }),
+                            );
+                        }
+                        menu
+                    })
+            });
+            let sending = roles.iter().any(|r| matches!(r, Role::Send | Role::Both));
+            let switches = record.kind.sends().iter().enumerate().map(|(ix, action)| {
+                let (bus, key, action) = (bus.clone(), key.clone(), *action);
+                Checkbox::new(("link-action", row * 4 + ix))
+                    .label(action.label())
+                    .checked(actions.contains(&action))
+                    .on_click(cx.listener(move |_, on: &bool, _, cx| {
+                        let on = *on;
+                        bus.update(cx, |b, _| b.set_action(&key, action, on));
+                        cx.notify();
+                    }))
+            });
+            v_flex()
+                .id(("link-row", row))
+                .gap_1()
+                .py_2()
+                .border_b_1()
+                .border_color(Palette::rule())
+                .child(
+                    h_flex()
+                        .gap_2()
+                        .child(div().w(px(180.)).child(name.clone()))
+                        .children(role_cells),
+                )
+                .when(sending, |d| {
+                    d.child(h_flex().gap_3().pl(px(188.)).children(switches))
+                })
+                .test_support()
+        });
+        v_flex()
+            .id("links-view")
+            .absolute()
+            .top(px(36.))
+            .right_0()
+            .w(px(640.))
+            .p_3()
+            .gap_1()
+            .bg(Palette::panel())
+            .border_1()
+            .border_color(Palette::line())
+            .rounded(px(8.))
+            .shadow_lg()
+            .occlude()
+            .child(
+                div()
+                    .font_weight(gpui_kit::FontWeight::SEMIBOLD)
+                    .child("Links"),
+            )
+            .children(rows)
+            .test_support()
             .into_any_element()
     }
 
@@ -319,21 +457,189 @@ impl Markets {
         cx.notify();
     }
 
-    /// Lay the workspace out as Trader.
-    fn apply_trader(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+    /// Write the workspace to disk, if there is one and it changed.
+    pub fn save_workspace(&mut self, cx: &mut Context<Self>) {
+        if let Some(workspace) = &mut self.workspace {
+            workspace.save(cx);
+        }
+    }
+
+    /// Replace the workspace's layout with `preset`.
+    pub fn apply_preset(
+        &mut self,
+        preset: workspace::Preset,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         let Some(workspace) = &self.workspace else {
             return;
         };
-        let channel_a = workspace.channel_market(0, cx);
-        let second = {
-            let m = self.model.read(cx);
-            m.watchlist
-                .as_ref()
-                .and_then(|w| w.markets().iter().find(|x| Some(*x) != channel_a.as_ref()))
-                .cloned()
-        };
-        workspace.apply_trader(&self.model, second, window, cx);
+        workspace.apply(preset, &self.model, window, cx);
         cx.notify();
+    }
+
+    /// Layout: the presets, each replacing the current layout.
+    fn layout_menu(&self, cx: &mut Context<Self>) -> AnyElement {
+        let markets = cx.entity().downgrade();
+        Button::new("workspace-layout")
+            .small()
+            .outline()
+            .label("Layout \u{25be}")
+            .dropdown_menu(move |mut menu, _, cx| {
+                menu = menu.label("Presets");
+                for preset in workspace::Preset::ALL {
+                    let markets = markets.clone();
+                    menu = menu.item(PopupMenuItem::new(preset.label()).on_click(
+                        move |_, window, cx| {
+                            let _ = markets.update(cx, |m, cx| m.apply_preset(preset, window, cx));
+                        },
+                    ));
+                }
+                let saved: Vec<String> = markets
+                    .upgrade()
+                    .and_then(|m| {
+                        let w = m.read(cx).workspace.as_ref()?;
+                        Some(w.saved.iter().map(|l| l.name.clone()).collect())
+                    })
+                    .unwrap_or_default();
+                if !saved.is_empty() {
+                    menu = menu.separator().label("Saved");
+                    for name in saved {
+                        let markets = markets.clone();
+                        menu = menu.item(PopupMenuItem::new(name.clone()).on_click(
+                            move |_, window, cx| {
+                                let _ =
+                                    markets.update(cx, |m, cx| m.choose_layout(&name, window, cx));
+                            },
+                        ));
+                    }
+                }
+                let markets = markets.clone();
+                menu.separator()
+                    .item(
+                        PopupMenuItem::new("Saved layouts\u{2026}").on_click(move |_, _, cx| {
+                            let _ = markets.update(cx, |m, cx| {
+                                m.layouts_open = true;
+                                cx.notify();
+                            });
+                        }),
+                    )
+            })
+            .into_any_element()
+    }
+
+    /// Show the layout saved as `name`.
+    pub fn choose_layout(&mut self, name: &str, window: &mut Window, cx: &mut Context<Self>) {
+        if let Some(workspace) = &self.workspace {
+            workspace.choose(name, window, cx);
+            cx.notify();
+        }
+    }
+
+    /// The name typed in the saved layouts panel, trimmed; none when blank.
+    fn typed_layout_name(&self, cx: &gpui_kit::App) -> Option<String> {
+        let name = self.layout_name.read(cx).value().trim().to_string();
+        (!name.is_empty()).then_some(name)
+    }
+
+    /// The saved layouts panel: save the current layout under a name, and
+    /// rename or delete the saved ones.
+    fn layouts_view(&self, cx: &mut Context<Self>) -> AnyElement {
+        let saved: Vec<String> = self
+            .workspace
+            .as_ref()
+            .map(|w| w.saved.iter().map(|l| l.name.clone()).collect())
+            .unwrap_or_default();
+        let rows = saved.into_iter().enumerate().map(|(ix, name)| {
+            let (rename, delete) = (name.clone(), name.clone());
+            h_flex()
+                .id(("saved-layout", ix))
+                .gap_2()
+                .py_1()
+                .child(div().flex_1().child(name))
+                .child(
+                    Button::new(("saved-layout-rename", ix))
+                        .xsmall()
+                        .outline()
+                        .label("Rename to typed name")
+                        .on_click(cx.listener(move |this, _, _, cx| {
+                            if let (Some(to), Some(w)) =
+                                (this.typed_layout_name(cx), this.workspace.as_mut())
+                            {
+                                w.rename(&rename, &to);
+                            }
+                            cx.notify();
+                        })),
+                )
+                .child(
+                    Button::new(("saved-layout-delete", ix))
+                        .xsmall()
+                        .outline()
+                        .label("Delete")
+                        .on_click(cx.listener(move |this, _, _, cx| {
+                            if let Some(w) = this.workspace.as_mut() {
+                                w.delete(&delete);
+                            }
+                            cx.notify();
+                        })),
+                )
+                .test_support()
+        });
+        v_flex()
+            .id("layouts-view")
+            .absolute()
+            .top(px(36.))
+            .right_0()
+            .w(px(420.))
+            .p_3()
+            .gap_2()
+            .bg(Palette::panel())
+            .border_1()
+            .border_color(Palette::line())
+            .rounded(px(8.))
+            .shadow_lg()
+            .occlude()
+            .child(
+                h_flex()
+                    .child(
+                        div()
+                            .flex_1()
+                            .font_weight(gpui_kit::FontWeight::SEMIBOLD)
+                            .child("Saved layouts"),
+                    )
+                    .child(
+                        Button::new("layouts-close")
+                            .xsmall()
+                            .outline()
+                            .label("Done")
+                            .on_click(cx.listener(|this, _, _, cx| {
+                                this.layouts_open = false;
+                                cx.notify();
+                            })),
+                    ),
+            )
+            .child(
+                h_flex()
+                    .gap_2()
+                    .child(div().flex_1().child(Input::new(&self.layout_name).small()))
+                    .child(
+                        Button::new("layouts-save")
+                            .small()
+                            .outline()
+                            .label("Save current layout")
+                            .on_click(cx.listener(|this, _, _, cx| {
+                                if let Some(name) = this.typed_layout_name(cx)
+                                    && let Some(w) = this.workspace.as_mut()
+                                {
+                                    w.save_as(&name, cx);
+                                }
+                                cx.notify();
+                            })),
+                    ),
+            )
+            .children(rows)
+            .test_support()
+            .into_any_element()
     }
 
     /// The History and Funding views, for the workspace's blotter.
@@ -559,7 +865,32 @@ impl Markets {
                 self.workspace_shown()
                     .then(|| self.add_panel_menu("workspace-add", cx)),
             )
+            .children(self.workspace_shown().then(|| {
+                div()
+                    .relative()
+                    .child(self.layout_menu(cx))
+                    .when(self.layouts_open, |d| {
+                        d.child(deferred(self.layouts_view(cx)).with_priority(2))
+                    })
+            }))
             .children(self.workspace_shown().then(|| self.lock_switch(cx)))
+            .children(self.workspace_shown().then(|| {
+                div()
+                    .relative()
+                    .child(
+                        Button::new("workspace-links")
+                            .small()
+                            .outline()
+                            .label("Links")
+                            .on_click(cx.listener(|this, _, _, cx| {
+                                this.links_open = !this.links_open;
+                                cx.notify();
+                            })),
+                    )
+                    .when(self.links_open, |d| {
+                        d.child(deferred(self.links_view(cx)).with_priority(2))
+                    })
+            }))
             .child(h_flex().gap_2().child(ui::label("Period")).child(period))
             .child(h_flex().gap_2().child(ui::label("Sort")).child(sort_menu))
             .child(h_flex().gap_2().child(ui::label("Colour by")).child(colour))
@@ -911,6 +1242,33 @@ impl Render for Markets {
                 .child(self.empty_workspace(cx))
                 .test_support(),
             Some(workspace) => {
+                let reset = workspace.reset_notice.then(|| {
+                    h_flex()
+                        .id("workspace-reset")
+                        .gap_3()
+                        .px_3()
+                        .py_2()
+                        .rounded(px(6.))
+                        .bg(Palette::amber_ground())
+                        .border_1()
+                        .border_color(Palette::amber_line())
+                        .text_color(Palette::amber_text())
+                        .child("Your saved workspace could not be read, so it was reset to the Trader layout.")
+                        .child(div().flex_1())
+                        .child(
+                            Button::new("workspace-reset-dismiss")
+                                .xsmall()
+                                .outline()
+                                .label("Dismiss")
+                                .on_click(cx.listener(|this, _, _, cx| {
+                                    if let Some(w) = &mut this.workspace {
+                                        w.reset_notice = false;
+                                    }
+                                    cx.notify();
+                                })),
+                        )
+                        .test_support()
+                });
                 // Locked, the dividers do not move: they are covered.
                 let strips = if workspace.is_locked(cx) {
                     workspace.divider_strips(cx)
@@ -918,6 +1276,7 @@ impl Render for Markets {
                     Vec::new()
                 };
                 page.id("markets-workspace")
+                    .children(reset)
                     .child(
                         div()
                             .relative()
@@ -2040,6 +2399,25 @@ impl Markets {
     /// What every panel shares, for building panels beside the windowed ones.
     pub fn model(&self) -> Entity<MarketsModel> {
         self.model.clone()
+    }
+
+    /// Remove `market` from the watchlist, as its tile's remove button does.
+    pub fn remove_market(&mut self, market: &str, cx: &mut Context<Self>) {
+        self.remove(&MarketId::new(market), cx);
+    }
+
+    /// Type a layout name in the saved layouts panel.
+    pub fn type_layout_name(&mut self, name: &str, window: &mut Window, cx: &mut Context<Self>) {
+        self.layout_name
+            .update(cx, |i, cx| i.set_value(name.to_string(), window, cx));
+    }
+
+    /// The saved layouts' names.
+    pub fn saved_layouts(&self) -> Vec<String> {
+        self.workspace
+            .as_ref()
+            .map(|w| w.saved.iter().map(|l| l.name.clone()).collect())
+            .unwrap_or_default()
     }
 
     /// Draw Markets as if the window were fullscreen, or not.

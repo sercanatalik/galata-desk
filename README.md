@@ -35,6 +35,10 @@ The account shown is one of Hyperliquid's own public vaults.
 | ![Portfolio: account value, breakdown, PNL chart and positions](assets/screenshots/portfolio.png) | ![Markets: the selected market's detail and candlestick chart above heatmap tiles](assets/screenshots/markets.png) |
 | **Portfolio.** Summary, breakdown, PNL chart and positions with Close and TP/SL. | **Markets.** Market detail, a chart with your fills and orders, the position panel, and tiles coloured by change. |
 
+![Markets in fullscreen: a workspace of linked panels](assets/screenshots/workspace.png)
+
+**Markets in fullscreen.** A workspace you arrange: charts, tiles, a blotter, the position and a docked order ticket, linked by channel.
+
 <img src="assets/screenshots/connect.png" alt="The connect page in a browser" width="420">
 
 **The connect page**, served by the app to your browser.

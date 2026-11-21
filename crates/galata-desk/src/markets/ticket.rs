@@ -61,8 +61,8 @@ impl TicketPanel {
 
     /// What the panel saves in a layout: nothing but its key and links. The
     /// ticket's market is whatever it was last filled with.
-    pub fn record(&self, _: &gpui_kit::App) -> PanelRecord {
-        self.dock.record(PanelKind::Ticket, None, None)
+    pub fn record(&self, cx: &gpui_kit::App) -> PanelRecord {
+        self.dock.record(PanelKind::Ticket, None, None, cx)
     }
 
     pub fn title_text(&self, _: &gpui_kit::App) -> String {

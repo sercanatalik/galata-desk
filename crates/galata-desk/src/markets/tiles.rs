@@ -119,8 +119,8 @@ impl TilesPanel {
             Outline::Own(market) => market.clone(),
             Outline::Watchlist => None,
         };
-        let _ = cx;
-        self.dock.record(PanelKind::Tiles, outlined.as_ref(), None)
+        self.dock
+            .record(PanelKind::Tiles, outlined.as_ref(), None, cx)
     }
 
     /// The panel's title.

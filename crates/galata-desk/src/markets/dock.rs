@@ -53,6 +53,44 @@ pub enum PanelKind {
 }
 
 impl PanelKind {
+    /// The panel's name in the links view and the Add panel menu.
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Chart => "Chart",
+            Self::Tiles => "Watchlist tiles",
+            Self::Detail => "Market detail",
+            Self::Position => "Position",
+            Self::Ticket => "Order ticket",
+            Self::Blotter => "Blotter",
+        }
+    }
+
+    /// The catalogue actions a panel of this kind can send.
+    pub fn sends(self) -> &'static [Action] {
+        match self {
+            Self::Chart => &[Action::TimeCursor, Action::LimitPrice],
+            Self::Tiles | Self::Blotter => &[Action::SetMarket, Action::FilterBlotter],
+            Self::Detail | Self::Position | Self::Ticket => &[],
+        }
+    }
+
+    /// A new panel's links: tiles, blotter and charts send on channel A,
+    /// the others listen there; set market, the time cursor and the limit
+    /// price on, filter blotter off. A chart listens too, and a blotter
+    /// listens for its filter.
+    pub fn default_links(self) -> ([Role; 3], Vec<Action>) {
+        let on_a = |role| [role, Role::Off, Role::Off];
+        match self {
+            Self::Chart => (
+                on_a(Role::Both),
+                vec![Action::SetMarket, Action::TimeCursor, Action::LimitPrice],
+            ),
+            Self::Tiles => (on_a(Role::Send), vec![Action::SetMarket]),
+            Self::Blotter => (on_a(Role::Both), vec![Action::SetMarket]),
+            Self::Detail | Self::Position | Self::Ticket => (on_a(Role::Listen), Vec::new()),
+        }
+    }
+
     pub fn panel_name(self) -> &'static str {
         match self {
             Self::Chart => CHART,
@@ -86,27 +124,19 @@ pub enum Action {
     FilterBlotter,
 }
 
-/// A market as saved: by dex and ticker, as the watchlist file has it.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct SavedMarket {
-    pub dex: String,
-    pub ticker: String,
-}
-
-impl From<&MarketId> for SavedMarket {
-    fn from(market: &MarketId) -> Self {
-        Self {
-            dex: market.dex().to_string(),
-            ticker: market.ticker().to_string(),
+impl Action {
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::SetMarket => "Set market",
+            Self::TimeCursor => "Sync time cursor",
+            Self::LimitPrice => "Limit price from chart",
+            Self::FilterBlotter => "Filter blotter",
         }
     }
 }
 
-impl From<&SavedMarket> for MarketId {
-    fn from(saved: &SavedMarket) -> Self {
-        MarketId::from_parts(&saved.dex, &saved.ticker)
-    }
-}
+/// A market as saved: by dex and ticker, as the watchlist file has it.
+pub use galata_desk_core::store::SavedMarket;
 
 /// A period as saved: its label in lower case, `24h` for a day.
 pub fn period_name(period: MarketPeriod) -> String {
@@ -143,14 +173,15 @@ pub struct PanelRecord {
 impl PanelRecord {
     /// A new panel's: a fresh key, no tab and no links.
     pub fn fresh(kind: PanelKind, market: Option<&MarketId>, period: Option<MarketPeriod>) -> Self {
+        let (roles, actions) = kind.default_links();
         Self {
             key: new_key(),
             kind,
             market: market.map(SavedMarket::from),
             interval: period.map(period_name),
             tab: None,
-            roles: [Role::Off; 3],
-            actions: Vec::new(),
+            roles,
+            actions,
         }
     }
 
@@ -236,6 +267,7 @@ impl DockMeta {
         kind: PanelKind,
         market: Option<&MarketId>,
         period: Option<MarketPeriod>,
+        cx: &App,
     ) -> PanelRecord {
         PanelRecord {
             key: self.key.clone(),
@@ -243,8 +275,24 @@ impl DockMeta {
             market: market.map(SavedMarket::from),
             interval: period.map(period_name),
             tab: None,
-            roles: self.roles,
-            actions: self.actions.clone(),
+            roles: self.roles(cx),
+            actions: self.actions(cx),
+        }
+    }
+
+    /// The panel's roles: the bus's once it has joined, which the header,
+    /// the links view and tests may have changed.
+    pub fn roles(&self, cx: &App) -> [Role; 3] {
+        match &self.bus {
+            Some(bus) => bus.read(cx).roles(&self.key),
+            None => self.roles,
+        }
+    }
+
+    pub fn actions(&self, cx: &App) -> Vec<Action> {
+        match &self.bus {
+            Some(bus) => bus.read(cx).actions(&self.key),
+            None => self.actions.clone(),
         }
     }
 }
@@ -529,9 +577,14 @@ macro_rules! dock_panel {
             fn title_suffix(
                 &mut self,
                 _: &mut gpui_kit::Window,
-                _: &mut gpui_kit::Context<Self>,
+                cx: &mut gpui_kit::Context<Self>,
             ) -> Option<impl gpui_kit::IntoElement> {
-                $crate::markets::dock::channel_marks(&self.dock.roles)
+                // Only a workspace panel has links to set.
+                self.dock.bus.as_ref()?;
+                Some($crate::markets::dock::channel_menu(
+                    cx.entity().downgrade(),
+                    self.dock.roles(cx),
+                ))
             }
 
             /// Close, in the header. The dock's own refuses to close the
@@ -602,44 +655,155 @@ pub fn panel_title(text: String) -> gpui_kit::AnyElement {
         .into_any_element()
 }
 
-/// Each link channel's letter and colour: A amber, B blue, C violet.
-pub const CHANNELS: [(&str, u32); 3] = [("A", 0xf0a73a), ("B", 0x5fa8f5), ("C", 0xb48cf0)];
+/// A channel mark's shape, so channels can be told apart without colour.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Shape {
+    Square,
+    Circle,
+    Triangle,
+}
 
-/// The marks of the channels a panel takes part in, for its header; none
-/// for a panel that is not linked.
-pub fn channel_marks(roles: &[Role; 3]) -> Option<gpui_kit::AnyElement> {
+impl Shape {
+    fn glyph(self) -> &'static str {
+        match self {
+            Self::Square => "\u{25a0}",
+            Self::Circle => "\u{25cf}",
+            Self::Triangle => "\u{25b2}",
+        }
+    }
+}
+
+/// Each link channel's letter, colour and shape: A an amber square, B a
+/// blue circle, C a violet triangle.
+pub const CHANNELS: [(&str, u32, Shape); 3] = [
+    ("A", 0xf0a73a, Shape::Square),
+    ("B", 0x5fa8f5, Shape::Circle),
+    ("C", 0xb48cf0, Shape::Triangle),
+];
+
+impl Role {
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Off => "Off",
+            Self::Listen => "Listens",
+            Self::Send => "Sends",
+            Self::Both => "Sends and listens",
+        }
+    }
+
+    pub const ALL: [Role; 4] = [Role::Off, Role::Listen, Role::Send, Role::Both];
+}
+
+/// The marks of the channels a panel takes part in, or a dashed mark for a
+/// pinned panel, on no channel.
+pub fn channel_marks(roles: &[Role; 3]) -> gpui_kit::AnyElement {
     use gpui_kit::TestSupportExt as _;
     if roles.iter().all(|r| *r == Role::Off) {
-        return None;
+        return div()
+            .id("channel-pinned")
+            .px_1()
+            .rounded(gpui_kit::px(3.))
+            .border_1()
+            .border_dashed()
+            .border_color(crate::theme::Palette::muted())
+            .text_size(gpui_kit::px(10.))
+            .text_color(crate::theme::Palette::muted())
+            .child("Pinned")
+            .test_support()
+            .into_any_element();
     }
     let marks = roles
         .iter()
         .enumerate()
         .filter(|(_, role)| **role != Role::Off)
         .map(|(ix, _)| {
-            let (letter, colour) = CHANNELS[ix];
+            let (letter, colour, shape) = CHANNELS[ix];
             let colour = gpui_kit::rgb(colour);
-            div()
+            gpui_kit::component::h_flex()
                 .id(("channel-mark", ix))
-                .size(gpui_kit::px(16.))
-                .flex()
-                .items_center()
-                .justify_center()
-                .rounded(gpui_kit::px(3.))
-                .border_1()
-                .border_color(colour)
+                .gap(gpui_kit::px(2.))
                 .text_size(gpui_kit::px(10.))
                 .font_weight(gpui_kit::FontWeight::SEMIBOLD)
                 .text_color(colour)
+                .child(shape.glyph())
                 .child(letter)
                 .test_support()
         });
-    Some(
-        gpui_kit::component::h_flex()
-            .gap_1()
-            .children(marks)
-            .into_any_element(),
-    )
+    gpui_kit::component::h_flex()
+        .gap_2()
+        .children(marks)
+        .into_any_element()
+}
+
+/// The header's channel control: the marks, opening a menu to set the
+/// panel's role on each channel, or to pin it.
+pub fn channel_menu<P: Linked>(panel: WeakEntity<P>, roles: [Role; 3]) -> gpui_kit::AnyElement {
+    use gpui_kit::component::Sizable as _;
+    use gpui_kit::component::button::{Button, ButtonVariants as _};
+    use gpui_kit::component::menu::{DropdownMenu as _, PopupMenuItem};
+    let name = roles
+        .iter()
+        .enumerate()
+        .filter(|(_, r)| **r != Role::Off)
+        .map(|(ix, r)| format!("{} {}", CHANNELS[ix].0, r.label().to_lowercase()))
+        .collect::<Vec<_>>()
+        .join(", ");
+    Button::new("channel-menu")
+        .ghost()
+        .xsmall()
+        .child(channel_marks(&roles))
+        .accessibility_label(if name.is_empty() {
+            "Channels: pinned".to_string()
+        } else {
+            format!("Channels: {name}")
+        })
+        .dropdown_menu(move |mut menu, _, _| {
+            for (ix, (letter, _, _)) in CHANNELS.iter().enumerate() {
+                menu = menu.label(format!("Channel {letter}"));
+                for role in Role::ALL {
+                    let panel = panel.clone();
+                    menu = menu.item(
+                        PopupMenuItem::new(format!("Channel {letter} \u{b7} {}", role.label()))
+                            .checked(roles[ix] == role)
+                            .on_click(move |_, window, cx| {
+                                let _ = panel.update(cx, |p, cx| set_role(p, ix, role, window, cx));
+                            }),
+                    );
+                }
+            }
+            let panel = panel.clone();
+            menu.separator().item(
+                PopupMenuItem::new("Pinned: on no channel")
+                    .checked(roles.iter().all(|r| *r == Role::Off))
+                    .on_click(move |_, window, cx| {
+                        let _ = panel.update(cx, |p, cx| {
+                            for ix in 0..3 {
+                                set_role(p, ix, Role::Off, window, cx);
+                            }
+                        });
+                    }),
+            )
+        })
+        .into_any_element()
+}
+
+/// Give `panel` `role` on `channel`. Listening, it shows the channel's market
+/// at once.
+pub fn set_role<P: Linked>(
+    panel: &mut P,
+    channel: usize,
+    role: Role,
+    window: &mut Window,
+    cx: &mut Context<P>,
+) {
+    let d = panel.dock_mut();
+    d.roles[channel] = role;
+    let (key, bus) = (d.key.clone(), d.bus.clone());
+    let _ = window;
+    if let Some(bus) = bus {
+        bus.update(cx, |b, cx| b.set_role(&key, channel, role, cx));
+    }
+    cx.notify();
 }
 
 /// How a panel names a market in its title.

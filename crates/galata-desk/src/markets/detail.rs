@@ -62,7 +62,7 @@ impl DetailPanel {
     /// What the panel saves in a layout.
     pub fn record(&self, cx: &gpui_kit::App) -> PanelRecord {
         self.dock
-            .record(PanelKind::Detail, self.market(cx).as_ref(), None)
+            .record(PanelKind::Detail, self.market(cx).as_ref(), None, cx)
     }
 
     /// The panel's title: the market it describes.

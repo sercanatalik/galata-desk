@@ -110,7 +110,7 @@ impl ChartPanel {
     /// What the chart saves in a layout.
     pub fn record(&self, cx: &gpui_kit::App) -> PanelRecord {
         self.dock
-            .record(PanelKind::Chart, self.market(cx).as_ref(), self.period)
+            .record(PanelKind::Chart, self.market(cx).as_ref(), self.period, cx)
     }
 
     /// The panel's title: the market and the period it covers.

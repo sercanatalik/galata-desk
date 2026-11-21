@@ -188,8 +188,8 @@ impl BlotterPanel {
     }
 
     /// What the blotter saves in a layout: its tab.
-    pub fn record(&self, _: &App) -> PanelRecord {
-        let mut record = self.dock.record(PanelKind::Blotter, None, None);
+    pub fn record(&self, cx: &App) -> PanelRecord {
+        let mut record = self.dock.record(PanelKind::Blotter, None, None, cx);
         record.tab = Some(self.tab.name().to_string());
         record
     }

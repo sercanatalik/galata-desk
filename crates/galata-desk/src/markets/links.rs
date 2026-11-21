@@ -86,7 +86,29 @@ impl LinkBus {
         self.roles.insert(panel.to_string(), roles);
     }
 
-    #[allow(dead_code, reason = "the links view (task 4.6) lists them")]
+    /// Give `panel` `role` on `channel`, from its header or the links view.
+    /// Listening there, it shows the channel's market at once: the market is
+    /// delivered again, from no panel, which the channel's other listeners
+    /// already show.
+    pub fn set_role(&mut self, panel: &str, channel: usize, role: Role, cx: &mut Context<Self>) {
+        let mut roles = self.roles(panel);
+        let Some(slot) = roles.get_mut(channel) else {
+            return;
+        };
+        *slot = role;
+        self.set_roles(panel, roles);
+        if matches!(role, Role::Listen | Role::Both)
+            && let Some(market) = self.market(channel).cloned()
+        {
+            cx.emit(Delivered {
+                channel,
+                from: String::new(),
+                event: LinkEvent::SetMarket(market),
+            });
+        }
+        cx.notify();
+    }
+
     pub fn actions(&self, panel: &str) -> Vec<Action> {
         let mut actions: Vec<Action> = self
             .actions
@@ -97,7 +119,6 @@ impl LinkBus {
         actions
     }
 
-    #[allow(dead_code, reason = "the links view (task 4.6) switches them")]
     pub fn set_action(&mut self, panel: &str, action: Action, on: bool) {
         let actions = self.actions.entry(panel.to_string()).or_default();
         if on {
