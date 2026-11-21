@@ -25,6 +25,7 @@ use serde::{Deserialize, Serialize};
 use super::blotter::{BlotterPanel, BlotterTab};
 use super::chart::ChartPanel;
 use super::detail::DetailPanel;
+use super::links::{Delivered, LinkBus, LinkEvent};
 use super::model::{MarketSource, MarketsModel};
 use super::position::PositionPanel;
 use super::ticket::TicketPanel;
@@ -183,6 +184,10 @@ pub struct DockMeta {
     /// The dock area the panel is in, for its own Close; none in the fixed
     /// layout.
     pub area: Option<WeakEntity<DockArea>>,
+    /// The workspace's link channels, once the panel has joined them.
+    pub bus: Option<Entity<LinkBus>>,
+    /// What keeps it joined: its deliveries, and leaving when it closes.
+    pub links: Vec<gpui_kit::Subscription>,
     pub key: String,
     pub roles: [Role; 3],
     pub actions: Vec<Action>,
@@ -194,6 +199,8 @@ impl DockMeta {
     pub fn fresh(cx: &mut App) -> Self {
         Self {
             area: None,
+            bus: None,
+            links: Vec::new(),
             key: new_key(),
             roles: [Role::Off; 3],
             actions: Vec::new(),
@@ -205,10 +212,21 @@ impl DockMeta {
     pub fn restored(record: &PanelRecord, area: WeakEntity<DockArea>, cx: &mut App) -> Self {
         Self {
             area: Some(area),
+            bus: None,
+            links: Vec::new(),
             key: record.key.clone(),
             roles: record.roles,
             actions: record.actions.clone(),
             focus: cx.focus_handle(),
+        }
+    }
+
+    /// Tell the panels linked to this one about `event`. Only a user's input
+    /// calls this.
+    pub fn publish(&self, event: LinkEvent, cx: &mut App) {
+        if let Some(bus) = self.bus.clone() {
+            let key = self.key.clone();
+            bus.update(cx, |b, cx| b.publish(&key, event, cx));
         }
     }
 
@@ -244,15 +262,20 @@ fn new_key() -> String {
 /// Which model each dock area's panels are built on. The registry's builders
 /// are global; the model is the window's.
 #[derive(Default)]
-struct Models(HashMap<EntityId, WeakEntity<MarketsModel>>);
+struct Models(HashMap<EntityId, (WeakEntity<MarketsModel>, WeakEntity<LinkBus>)>);
 
 impl Global for Models {}
 
 /// Build `area`'s panels on `model` when a layout is loaded into it.
-pub fn bind(area: &Entity<DockArea>, model: &Entity<MarketsModel>, cx: &mut App) {
+pub fn bind(
+    area: &Entity<DockArea>,
+    model: &Entity<MarketsModel>,
+    bus: &Entity<LinkBus>,
+    cx: &mut App,
+) {
     cx.default_global::<Models>()
         .0
-        .insert(area.entity_id(), model.downgrade());
+        .insert(area.entity_id(), (model.downgrade(), bus.downgrade()));
 }
 
 /// Teach the dock to build each Markets panel from what it saved.
@@ -277,12 +300,12 @@ fn build(
     window: &mut Window,
     cx: &mut App,
 ) -> Arc<dyn BasePanelView> {
-    let model = cx
+    let bound = cx
         .try_global::<Models>()
         .and_then(|models| models.0.get(&context.dock_area().entity_id()))
-        .and_then(WeakEntity::upgrade);
+        .and_then(|(model, bus)| Some((model.upgrade()?, bus.upgrade()?)));
     let record = PanelRecord::from_state(context.state()).filter(|r| r.kind == kind);
-    let (Some(model), Some(record)) = (model, record) else {
+    let (Some((model, bus)), Some(record)) = (bound, record) else {
         // Nothing to build it on: keep what was saved, so the next save
         // does not lose it.
         let state = context.state().clone();
@@ -291,6 +314,7 @@ fn build(
     let home = Home {
         model,
         area: context.dock_area(),
+        bus,
     };
     new_panel(kind, &home, &record, window, cx)
 }
@@ -300,6 +324,8 @@ fn build(
 pub struct Home {
     pub model: Entity<MarketsModel>,
     pub area: WeakEntity<DockArea>,
+    /// The workspace's link channels, which the panel joins.
+    pub bus: Entity<LinkBus>,
 }
 
 /// A panel of `kind` from `record`, on `model`, wrapped for the dock.
@@ -313,29 +339,40 @@ pub fn new_panel(
     let model = home.model.clone();
     let meta = DockMeta::restored(record, home.area.clone(), cx);
     let market = record.market();
+    let bus = &home.bus;
     match kind {
         PanelKind::Chart => {
             let period = record.period();
-            panel_handle(cx.new(|cx| ChartPanel::docked(model, market, period, meta, cx)))
+            let panel = cx.new(|cx| ChartPanel::docked(model, market, period, meta, cx));
+            linked(panel, bus, window, cx)
         }
-        PanelKind::Tiles => panel_handle(cx.new(|cx| {
-            TilesPanel::new(
-                model,
-                Outline::Own(market),
-                std::rc::Rc::new(|_, _, _| {}),
-                cx,
-            )
-            .with_dock(meta)
-        })),
-        PanelKind::Detail => panel_handle(
-            cx.new(|cx| DetailPanel::new(model, MarketSource::Own(market), cx).with_dock(meta)),
-        ),
-        PanelKind::Position => panel_handle(cx.new(|cx| {
-            PositionPanel::new(model, MarketSource::Own(market), window, cx).with_dock(meta)
-        })),
+        PanelKind::Tiles => {
+            let panel = cx.new(|cx| {
+                TilesPanel::new(
+                    model,
+                    Outline::Own(market),
+                    std::rc::Rc::new(|_, _, _| {}),
+                    cx,
+                )
+                .with_dock(meta)
+            });
+            linked(panel, bus, window, cx)
+        }
+        PanelKind::Detail => {
+            let panel =
+                cx.new(|cx| DetailPanel::new(model, MarketSource::Own(market), cx).with_dock(meta));
+            linked(panel, bus, window, cx)
+        }
+        PanelKind::Position => {
+            let panel = cx.new(|cx| {
+                PositionPanel::new(model, MarketSource::Own(market), window, cx).with_dock(meta)
+            });
+            linked(panel, bus, window, cx)
+        }
         PanelKind::Ticket => {
             let portfolio = model.read(cx).portfolio.clone();
-            panel_handle(cx.new(|cx| TicketPanel::new(portfolio, meta, cx)))
+            let panel = cx.new(|cx| TicketPanel::new(portfolio, meta, cx));
+            linked(panel, bus, window, cx)
         }
         PanelKind::Blotter => {
             let tab = record
@@ -343,9 +380,57 @@ pub fn new_panel(
                 .as_deref()
                 .and_then(BlotterTab::named)
                 .unwrap_or_default();
-            panel_handle(cx.new(|cx| BlotterPanel::new(model, tab, meta, window, cx)))
+            let panel = cx.new(|cx| BlotterPanel::new(model, tab, meta, window, cx));
+            linked(panel, bus, window, cx)
         }
     }
+}
+
+/// A panel that takes part in linking: it has a key and links, and applies
+/// what is delivered to it.
+pub trait Linked: Panel {
+    fn dock(&self) -> &DockMeta;
+    fn dock_mut(&mut self) -> &mut DockMeta;
+    /// Apply a delivered event. This never publishes: only a user's input
+    /// does, so nothing echoes.
+    fn apply_link(&mut self, event: &LinkEvent, window: &mut Window, cx: &mut Context<Self>);
+}
+
+/// Join `panel` to `bus` with its links, have it apply what it is delivered,
+/// and leave the bus when it closes. Returns it wrapped for the dock.
+fn linked<P: Linked>(
+    panel: Entity<P>,
+    bus: &Entity<LinkBus>,
+    window: &mut Window,
+    cx: &mut App,
+) -> Arc<dyn BasePanelView> {
+    let (key, roles, actions) = {
+        let d = panel.read(cx).dock();
+        (d.key.clone(), d.roles, d.actions.clone())
+    };
+    bus.update(cx, |b, _| b.join(&key, roles, &actions));
+    panel.update(cx, |p, cx| {
+        let delivered = cx.subscribe_in(
+            bus,
+            window,
+            |this: &mut P, bus, delivered: &Delivered, window, cx| {
+                if bus.read(cx).applies(&this.dock().key, delivered) {
+                    this.apply_link(&delivered.event, window, cx);
+                }
+            },
+        );
+        let leaving = {
+            let bus = bus.downgrade();
+            cx.on_release(move |this: &mut P, cx| {
+                let key = this.dock().key.clone();
+                let _ = bus.update(cx, |b, _| b.leave(&key));
+            })
+        };
+        let d = p.dock_mut();
+        d.bus = Some(bus.clone());
+        d.links = vec![delivered, leaving];
+    });
+    panel_handle(panel)
 }
 
 /// A saved panel that could not be built: it draws nothing and saves what it
@@ -413,6 +498,25 @@ macro_rules! dock_panel {
             }
         }
 
+        impl $crate::markets::dock::Linked for $panel {
+            fn dock(&self) -> &$crate::markets::dock::DockMeta {
+                &self.dock
+            }
+
+            fn dock_mut(&mut self) -> &mut $crate::markets::dock::DockMeta {
+                &mut self.dock
+            }
+
+            fn apply_link(
+                &mut self,
+                event: &$crate::markets::links::LinkEvent,
+                window: &mut gpui_kit::Window,
+                cx: &mut gpui_kit::Context<Self>,
+            ) {
+                self.apply(event, window, cx)
+            }
+        }
+
         impl gpui_kit::component::dock::Panel for $panel {
             fn title(
                 &mut self,
@@ -438,7 +542,7 @@ macro_rules! dock_panel {
                 _: &mut gpui_kit::Window,
                 cx: &mut gpui_kit::Context<Self>,
             ) -> Option<Vec<gpui_kit::component::button::Button>> {
-                $crate::markets::dock::close_button(self.dock.area.clone(), cx.entity())
+                $crate::markets::dock::close_button(self.dock.area.clone(), cx.entity(), cx)
                     .map(|button| vec![button])
             }
 
@@ -459,14 +563,20 @@ macro_rules! dock_panel {
 }
 pub(super) use dock_panel;
 
-/// A panel's Close: it leaves `area`. None outside a dock area.
+/// A panel's Close: it leaves `area`. None outside a dock area, or while
+/// the layout is locked.
 pub fn close_button<P: BasePanel>(
     area: Option<WeakEntity<DockArea>>,
     panel: Entity<P>,
+    cx: &App,
 ) -> Option<gpui_kit::component::button::Button> {
     use gpui_kit::component::IconName;
     use gpui_kit::component::button::{Button, ButtonVariants as _};
     let area = area?;
+    // A locked layout closes nothing.
+    if area.upgrade().is_some_and(|a| a.read(cx).is_locked()) {
+        return None;
+    }
     Some(
         Button::new("panel-close")
             .icon(IconName::Close)

@@ -38,6 +38,16 @@ impl TicketPanel {
         }
     }
 
+    /// Apply a linked panel's event. Nothing here yet: this panel follows
+    /// its links from task 4.3 on.
+    pub fn apply(
+        &mut self,
+        _: &super::links::LinkEvent,
+        _: &mut gpui_kit::Window,
+        _: &mut gpui_kit::Context<Self>,
+    ) {
+    }
+
     /// What the panel saves in a layout: nothing but its key and links. The
     /// ticket's market is whatever it was last filled with.
     pub fn record(&self, _: &gpui_kit::App) -> PanelRecord {

@@ -29,7 +29,7 @@ use gpui_kit::component::plot::scale::{Scale, ScaleBand};
 use gpui_kit::component::skeleton::Skeleton;
 use gpui_kit::component::tab::TabBar;
 use gpui_kit::component::tooltip::Tooltip;
-use gpui_kit::component::{Sizable, h_flex, v_flex};
+use gpui_kit::component::{Disableable, Selectable, Sizable, h_flex, v_flex};
 use gpui_kit::prelude::*;
 use gpui_kit::{
     AnyElement, Context, Entity, SharedString, Subscription, TestSupportExt, Window, deferred, div,
@@ -71,6 +71,7 @@ mod blotter;
 mod chart;
 mod detail;
 pub mod dock;
+pub mod links;
 mod model;
 mod position;
 mod ticket;
@@ -194,7 +195,10 @@ impl Markets {
     /// The window left fullscreen: the fixed layout shows channel A's market,
     /// and the ticket opens over the screen again.
     fn leave_workspace(&mut self, cx: &mut Context<Self>) {
-        let channel_a = self.workspace.as_ref().and_then(|w| w.channels[0].clone());
+        let channel_a = self
+            .workspace
+            .as_ref()
+            .and_then(|w| w.channel_market(0, cx));
         if let Some(market) = channel_a {
             self.select(&market, cx);
         }
@@ -241,11 +245,13 @@ impl Markets {
     /// Add panel: every kind of panel, the order ticket only while there is
     /// none.
     fn add_panel_menu(&self, id: &'static str, cx: &mut Context<Self>) -> AnyElement {
+        let locked = self.workspace.as_ref().is_some_and(|w| w.is_locked(cx));
         let ticket_docked = self.model.read(cx).portfolio.read(cx).ticket_is_docked();
         let markets = cx.entity().downgrade();
         Button::new(id)
             .small()
             .outline()
+            .disabled(locked)
             .label("Add panel \u{25be}")
             .dropdown_menu(move |mut menu, _, _| {
                 for (kind, name) in workspace::CATALOGUE {
@@ -267,7 +273,33 @@ impl Markets {
             .into_any_element()
     }
 
-    /// Add a panel of `kind` to the workspace. Never a second order ticket.
+    /// Lock layout: a switch in the workspace's toolbar.
+    fn lock_switch(&self, cx: &mut Context<Self>) -> AnyElement {
+        let locked = self.workspace.as_ref().is_some_and(|w| w.is_locked(cx));
+        Button::new("workspace-lock")
+            .small()
+            .outline()
+            .selected(locked)
+            .label(if locked {
+                "Layout locked"
+            } else {
+                "Lock layout"
+            })
+            .on_click(cx.listener(|this, _, window, cx| this.toggle_lock(window, cx)))
+            .into_any_element()
+    }
+
+    /// Lock the layout, or unlock it.
+    pub fn toggle_lock(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if let Some(workspace) = &self.workspace {
+            let locked = workspace.is_locked(cx);
+            workspace.set_locked(!locked, window, cx);
+            cx.notify();
+        }
+    }
+
+    /// Add a panel of `kind` to the workspace. Never a second order ticket,
+    /// and nothing while the layout is locked.
     pub fn add_panel(
         &mut self,
         kind: dock::PanelKind,
@@ -277,6 +309,9 @@ impl Markets {
         let Some(workspace) = &self.workspace else {
             return;
         };
+        if workspace.is_locked(cx) {
+            return;
+        }
         let portfolio = self.model.read(cx).portfolio.clone();
         if kind == dock::PanelKind::Ticket && portfolio.read(cx).ticket_is_docked() {
             return;
@@ -290,15 +325,12 @@ impl Markets {
         let Some(workspace) = &self.workspace else {
             return;
         };
+        let channel_a = workspace.channel_market(0, cx);
         let second = {
             let m = self.model.read(cx);
             m.watchlist
                 .as_ref()
-                .and_then(|w| {
-                    w.markets()
-                        .iter()
-                        .find(|x| Some(*x) != workspace.channels[0].as_ref())
-                })
+                .and_then(|w| w.markets().iter().find(|x| Some(*x) != channel_a.as_ref()))
                 .cloned()
         };
         workspace.apply_trader(&self.model, second, window, cx);
@@ -528,6 +560,7 @@ impl Markets {
                 self.workspace_shown()
                     .then(|| self.add_panel_menu("workspace-add", cx)),
             )
+            .children(self.workspace_shown().then(|| self.lock_switch(cx)))
             .child(h_flex().gap_2().child(ui::label("Period")).child(period))
             .child(h_flex().gap_2().child(ui::label("Sort")).child(sort_menu))
             .child(h_flex().gap_2().child(ui::label("Colour by")).child(colour))
@@ -878,10 +911,34 @@ impl Render for Markets {
                 .id("markets-workspace")
                 .child(self.empty_workspace(cx))
                 .test_support(),
-            Some(workspace) => page
-                .id("markets-workspace")
-                .child(div().flex_1().min_h_0().child(workspace.area.clone()))
-                .test_support(),
+            Some(workspace) => {
+                // Locked, the dividers do not move: they are covered.
+                let strips = if workspace.is_locked(cx) {
+                    workspace.divider_strips(cx)
+                } else {
+                    Vec::new()
+                };
+                page.id("markets-workspace")
+                    .child(
+                        div()
+                            .relative()
+                            .flex_1()
+                            .min_h_0()
+                            .child(workspace.area.clone())
+                            .children(strips.into_iter().enumerate().map(|(ix, b)| {
+                                div()
+                                    .id(("divider-lock", ix))
+                                    .absolute()
+                                    .left(b.origin.x)
+                                    .top(b.origin.y)
+                                    .w(b.size.width)
+                                    .h(b.size.height)
+                                    .occlude()
+                                    .test_support()
+                            })),
+                    )
+                    .test_support()
+            }
             None => page
                 .id("markets-fixed")
                 // The selected market, above the tiles and always in view.
@@ -1301,9 +1358,27 @@ struct PlotPointer {
     /// How wide the whole chart was last drawn, which decides its compact
     /// form.
     width: std::rc::Rc<std::cell::Cell<Option<gpui_kit::Pixels>>>,
+    /// Each candle's open time, oldest first, as last drawn.
+    times: std::rc::Rc<std::cell::RefCell<Vec<u64>>>,
+    /// The time cursor: the candle the pointer is over, here or on a linked
+    /// chart.
+    cursor: std::rc::Rc<std::cell::Cell<Option<u64>>>,
 }
 
 impl PlotPointer {
+    /// The open time of the candle under `at`, in window coordinates; none
+    /// off the plot.
+    fn time_at(&self, at: gpui_kit::Point<gpui_kit::Pixels>) -> Option<u64> {
+        let bounds = self.bounds.get()?;
+        if !bounds.contains(&at) {
+            return None;
+        }
+        let times = self.times.borrow();
+        let share = f32::from(at.x - bounds.origin.x) / f32::from(bounds.size.width);
+        let ix = ((share * times.len() as f32).floor() as usize).min(times.len().checked_sub(1)?);
+        times.get(ix).copied()
+    }
+
     fn price(&self) -> Option<Decimal> {
         let (low, high, like) = self.range.get()?;
         Some(round_price(price_at(self.y.get()?, low, high), like))
@@ -1523,6 +1598,24 @@ fn candle_chart(
     plot: &PlotPointer,
 ) -> AnyElement {
     let measured = &plot.width;
+    plot.times
+        .replace(candles.iter().map(|c| c.open_ms).collect());
+    // The time cursor, across the candle it names.
+    let cursor = plot.cursor.get().and_then(|t| {
+        let ix = candles.iter().position(|c| c.open_ms == t)?;
+        let share = (ix as f32 + 0.5) / candles.len() as f32;
+        Some(
+            div()
+                .id("time-cursor")
+                .absolute()
+                .top_0()
+                .bottom_0()
+                .left(gpui_kit::relative(share))
+                .w(px(1.))
+                .bg(Palette::muted().opacity(0.7))
+                .test_support(),
+        )
+    });
     // Too narrow for the price axis: the candles alone. And never more time
     // labels than fit, so none is cut off. The width is what the chart was
     // last drawn at; a change draws it again.
@@ -1873,6 +1966,7 @@ fn candle_chart(
                         // The account's fills: a B under the candle where
                         // it bought, an S above the candle where it sold.
                         .children(marks)
+                        .children(cursor)
                         // The last price, across the plot.
                         .children(last.map(|last| {
                             div()
@@ -1960,10 +2054,16 @@ impl Markets {
         self.workspace.as_ref().map(|w| w.area.clone())
     }
 
+    /// The workspace's link channels, once it has been made.
+    pub fn workspace_bus(&self) -> Option<Entity<links::LinkBus>> {
+        self.workspace.as_ref().map(|w| w.bus.clone())
+    }
+
     /// Show `market` on the workspace's channel A.
-    pub fn set_channel_a(&mut self, market: &str) {
-        if let Some(w) = &mut self.workspace {
-            w.channels[0] = Some(MarketId::new(market));
+    pub fn set_channel_a(&mut self, market: &str, cx: &mut Context<Self>) {
+        if let Some(w) = &self.workspace {
+            w.bus
+                .update(cx, |bus, _| bus.set_market(0, Some(MarketId::new(market))));
         }
     }
 

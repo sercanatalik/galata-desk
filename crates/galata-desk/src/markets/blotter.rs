@@ -112,6 +112,16 @@ impl BlotterPanel {
         self.tab
     }
 
+    /// Apply a linked panel's event. Nothing here yet: this panel follows
+    /// its links from task 4.3 on.
+    pub fn apply(
+        &mut self,
+        _: &super::links::LinkEvent,
+        _: &mut gpui_kit::Window,
+        _: &mut gpui_kit::Context<Self>,
+    ) {
+    }
+
     pub fn set_tab(&mut self, tab: BlotterTab, cx: &mut Context<Self>) {
         if self.tab != tab {
             self.tab = tab;

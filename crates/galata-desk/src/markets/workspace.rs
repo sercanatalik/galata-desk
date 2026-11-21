@@ -10,9 +10,10 @@ use gpui_kit::component::dock::{
     DockArea, DockLayout, DockPlacement, DockSkin, InsertTarget, NodeId, PanelInfo, PanelState,
     PanelStyle,
 };
-use gpui_kit::{App, Bounds, Entity, Pixels, Window, point, px, size};
+use gpui_kit::{App, AppContext as _, Bounds, Entity, Pixels, Window, point, px, size};
 
 use super::dock::{self, PanelKind, PanelRecord};
+use super::links::LinkBus;
 use super::model::MarketsModel;
 use super::ticket::TicketPanel;
 
@@ -33,10 +34,11 @@ pub const DOCK_VERSION: usize = 1;
 pub struct Workspace {
     pub area: Entity<DockArea>,
     /// The dock's appearance, kept to change its settings.
-    #[allow(dead_code, reason = "the Lock switch (task 3.9) changes it")]
+    #[allow(dead_code, reason = "kept to change the dock's settings")]
     pub skin: Rc<DockSkin>,
-    /// Each link channel's market: A, B and C.
-    pub channels: [Option<MarketId>; 3],
+    /// The link channels: what each shows, and which panels send and
+    /// listen on it.
+    pub bus: Entity<LinkBus>,
 }
 
 impl Workspace {
@@ -50,7 +52,7 @@ impl Workspace {
         // Close is the panel's own button (see `dock::close_button`).
         skin.set_close_button_visible(false, cx);
         skin.set_toggle_button_visible(false, cx);
-        dock::bind(&area, model, cx);
+
         let (selected, other) = {
             let m = model.read(cx);
             let selected = m.selected().cloned();
@@ -61,11 +63,13 @@ impl Workspace {
                 .cloned();
             (selected, other)
         };
-        let this = Self {
-            area,
-            skin,
-            channels: [selected, None, None],
-        };
+        let bus = cx.new(|_| {
+            let mut bus = LinkBus::default();
+            bus.set_market(0, selected.clone());
+            bus
+        });
+        dock::bind(&area, model, &bus, cx);
+        let this = Self { area, skin, bus };
         this.apply_trader(model, other, window, cx);
         this
     }
@@ -82,8 +86,10 @@ impl Workspace {
         let home = dock::Home {
             model: model.clone(),
             area: self.area.downgrade(),
+            bus: self.bus.clone(),
         };
-        let layout = trader(&home, self.channels[0].clone(), second, window, cx);
+        let first = self.channel_market(0, cx);
+        let layout = trader(&home, first, second, window, cx);
         self.area
             .update(cx, |area, cx| area.set_center(layout, window, cx));
     }
@@ -99,14 +105,15 @@ impl Workspace {
         window: &mut Window,
         cx: &mut App,
     ) {
-        let market = self.channels[0]
-            .clone()
+        let market = self
+            .channel_market(0, cx)
             .or_else(|| model.read(cx).selected().cloned());
         let shows_market = !matches!(kind, PanelKind::Ticket | PanelKind::Blotter);
         let record = PanelRecord::fresh(kind, market.as_ref().filter(|_| shows_market), None);
         let home = dock::Home {
             model: model.clone(),
             area: self.area.downgrade(),
+            bus: self.bus.clone(),
         };
         let largest = self.largest_group(cx);
         let panel = dock::new_panel(kind, &home, &record, window, cx);
@@ -155,6 +162,50 @@ impl Workspace {
                 let size = |b: &Bounds<Pixels>| f32::from(b.size.width) * f32::from(b.size.height);
                 size(&a.1).total_cmp(&size(&b.1))
             })
+    }
+
+    /// The market a link channel shows.
+    pub fn channel_market(&self, channel: usize, cx: &App) -> Option<MarketId> {
+        self.bus.read(cx).market(channel).cloned()
+    }
+
+    /// Whether the layout is locked: no panel dragged, resized, closed or
+    /// added.
+    pub fn is_locked(&self, cx: &App) -> bool {
+        self.area.read(cx).is_locked()
+    }
+
+    pub fn set_locked(&self, locked: bool, window: &mut Window, cx: &mut App) {
+        self.area
+            .update(cx, |area, cx| area.set_locked(locked, window, cx));
+    }
+
+    /// Where the dividers between panels are, relative to the dock area: a
+    /// strip along each group edge that another group shares. The dock's
+    /// lock does not stop resizing, so a locked workspace covers these.
+    pub fn divider_strips(&self, cx: &App) -> Vec<Bounds<Pixels>> {
+        const STRIP: f32 = 10.;
+        let area = self.area.read(cx);
+        let whole = area.bounds();
+        let mut groups = Vec::new();
+        group_bounds(&area.dump(cx).center, whole, &mut groups);
+        let mut strips = Vec::new();
+        for (_, b) in groups {
+            let (x, y) = (b.origin.x - whole.origin.x, b.origin.y - whole.origin.y);
+            if b.right() < whole.right() - px(1.) {
+                strips.push(Bounds::new(
+                    point(x + b.size.width - px(STRIP / 2.), y),
+                    size(px(STRIP), b.size.height),
+                ));
+            }
+            if b.bottom() < whole.bottom() - px(1.) {
+                strips.push(Bounds::new(
+                    point(x, y + b.size.height - px(STRIP / 2.)),
+                    size(b.size.width, px(STRIP)),
+                ));
+            }
+        }
+        strips
     }
 
     /// Whether the last panel was closed.

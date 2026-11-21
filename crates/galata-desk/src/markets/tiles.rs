@@ -94,6 +94,16 @@ impl TilesPanel {
         }
     }
 
+    /// Apply a linked panel's event. Nothing here yet: this panel follows
+    /// its links from task 4.3 on.
+    pub fn apply(
+        &mut self,
+        _: &super::links::LinkEvent,
+        _: &mut gpui_kit::Window,
+        _: &mut gpui_kit::Context<Self>,
+    ) {
+    }
+
     /// The same panel, with a saved panel's key and links.
     pub fn with_dock(mut self, dock: DockMeta) -> Self {
         self.dock = dock;

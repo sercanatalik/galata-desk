@@ -17,6 +17,7 @@ use gpui_kit::{
 };
 
 use super::dock::{DockMeta, PanelKind, PanelRecord, dock_panel, market_name};
+use super::links::LinkEvent;
 use super::model::{MarketSource, MarketsModel};
 use super::{
     CallMenu, Calls, Entry, OrderLevel, PlotPointer, candle_chart, ghost_candles, interval_words,
@@ -35,6 +36,8 @@ pub struct ChartPanel {
     plot: PlotPointer,
     /// Why the last call level added from the chart was not saved.
     call_problem: Option<SharedString>,
+    /// The time cursor this chart last told its links about.
+    sent_cursor: Option<u64>,
     /// The chart's own period; `None` follows the toolbar's.
     period: Option<MarketPeriod>,
     /// The chart this panel holds in the feed, while it keeps its own
@@ -89,6 +92,7 @@ impl ChartPanel {
             drawn_chart: std::cell::Cell::new(("none", 0, 0, None)),
             plot: PlotPointer::default(),
             call_problem: None,
+            sent_cursor: None,
             period,
             held: None,
             dock,
@@ -119,6 +123,44 @@ impl ChartPanel {
             ),
             None => "Chart".to_string(),
         }
+    }
+
+    /// The pointer moved over the chart, or left it: show the time cursor
+    /// at the candle under it, and tell the linked charts.
+    fn pointer_moved(
+        &mut self,
+        at: Option<gpui_kit::Point<gpui_kit::Pixels>>,
+        cx: &mut Context<Self>,
+    ) {
+        let time = at.and_then(|at| self.plot.time_at(at));
+        if time == self.sent_cursor {
+            return;
+        }
+        self.sent_cursor = time;
+        self.plot.cursor.set(time);
+        cx.notify();
+        self.dock.publish(LinkEvent::TimeCursor(time), cx);
+    }
+
+    /// Apply a linked panel's event. This never publishes.
+    pub fn apply(&mut self, event: &LinkEvent, _: &mut Window, cx: &mut Context<Self>) {
+        match event {
+            LinkEvent::TimeCursor(time) => self.apply_time_cursor(*time, cx),
+            LinkEvent::SetMarket(market) => self.set_market(Some(market.clone()), cx),
+            LinkEvent::LimitPrice(_) | LinkEvent::FilterBlotter(_) => {}
+        }
+    }
+
+    fn apply_time_cursor(&mut self, time: Option<u64>, cx: &mut Context<Self>) {
+        if self.plot.cursor.replace(time) != time {
+            cx.notify();
+        }
+    }
+
+    /// Where the time cursor is drawn, for tests.
+    #[cfg(test)]
+    pub fn time_cursor(&self) -> Option<u64> {
+        self.plot.cursor.get()
     }
 
     /// Cover `period`, or follow the toolbar's with `None`.
@@ -477,7 +519,7 @@ impl Render for ChartPanel {
                     }
                 })
         });
-        self.chart(
+        let chart = self.chart(
             period,
             chart_failed,
             tile,
@@ -488,6 +530,21 @@ impl Render for ChartPanel {
             entry,
             since,
             cx.reduce_motion(),
-        )
+        );
+        // The pointer over the candles moves the time cursor here and on the
+        // linked charts.
+        div()
+            .id("chart-panel")
+            .size_full()
+            .on_mouse_move(cx.listener(|this, e: &gpui_kit::MouseMoveEvent, _, cx| {
+                this.pointer_moved(Some(e.position), cx)
+            }))
+            .on_hover(cx.listener(|this, hovered: &bool, _, cx| {
+                if !*hovered {
+                    this.pointer_moved(None, cx)
+                }
+            }))
+            .child(chart)
+            .into_any_element()
     }
 }

@@ -6127,7 +6127,8 @@ fn each_panel_kind_comes_back_from_a_saved_layout_with_its_market_and_period(
     cx.update_window(window.into(), |_, window, cx| {
         let new_area = |window: &mut gpui_kit::Window, cx: &mut gpui_kit::App| {
             let (area, _skin) = DockSkin::dock_area("markets-workspace", Some(1), window, cx);
-            dock::bind(&area, &model, cx);
+            let bus = cx.new(|_| crate::markets::links::LinkBus::default());
+            dock::bind(&area, &model, &bus, cx);
             area
         };
         let fresh = |kind, market: Option<&str>, interval: Option<&str>| PanelRecord {
@@ -6150,6 +6151,7 @@ fn each_panel_kind_comes_back_from_a_saved_layout_with_its_market_and_period(
             let home = dock::Home {
                 model: model.clone(),
                 area: area.downgrade(),
+                bus: cx.new(|_| crate::markets::links::LinkBus::default()),
             };
             let panel = dock::new_panel(record.kind, &home, record, window, cx);
             layout = layout.child(DockLayout::tabs().panel_view(panel, cx), None);
@@ -6437,7 +6439,7 @@ fn entering_fullscreen_shows_the_workspace_and_leaving_shows_channel_as_market(
     .unwrap();
 
     // Leaving while channel A shows NVDA: the fixed layout, on NVDA.
-    cx.update(|cx| markets.update(cx, |m, _| m.set_channel_a("xyz:NVDA")));
+    cx.update(|cx| markets.update(cx, |m, cx| m.set_channel_a("xyz:NVDA", cx)));
     fullscreen(cx, window, &markets, false);
     cx.update_window(window.into(), |_, window, cx| {
         assert!(window.try_find("markets-fixed").is_some());
@@ -6545,6 +6547,7 @@ fn a_panel_header_shows_its_title_channel_maximise_and_close(cx: &mut TestAppCon
             let home = dock::Home {
                 model: model.clone(),
                 area: area.downgrade(),
+                bus: markets.read(cx).workspace_bus().unwrap(),
             };
             let panel = dock::new_panel(PanelKind::Chart, &home, &record, window, cx);
             let chart = panel
@@ -6620,6 +6623,7 @@ fn workspace_with(
             let home = dock::Home {
                 model,
                 area: area.downgrade(),
+                bus: markets.read(cx).workspace_bus().unwrap(),
             };
             let mut keys = Vec::new();
             let mut panel = |kind,
@@ -7113,6 +7117,194 @@ fn there_is_only_ever_one_order_ticket(cx: &mut TestAppContext) {
         });
         window.render_frame(cx);
         assert_eq!(center_panels(&markets, cx), 7, "no second ticket");
+    })
+    .unwrap();
+}
+
+#[gpui_kit::test]
+fn a_locked_layout_moves_resizes_closes_and_adds_nothing(cx: &mut TestAppContext) {
+    use crate::markets::dock::PanelKind;
+    use gpui_kit::component::dock::DockLayout;
+    let (window, _desk, markets, _keys, _dir) =
+        workspace_with(cx, &["BTC", "ETH"], |panel, window, cx| {
+            DockLayout::h_split()
+                .child(panel(PanelKind::Chart, Some("BTC"), window, cx), None)
+                .child(panel(PanelKind::Chart, Some("ETH"), window, cx), None)
+        });
+    let before = cx
+        .update_window(window.into(), |_, window, cx| {
+            assert!(!window.find_all("panel-close").is_empty());
+            window.click("workspace-lock", cx);
+            window.render_frame(cx);
+            window.render_frame(cx);
+            let area = markets.read(cx).workspace_area().unwrap();
+            assert!(area.read(cx).is_locked());
+            assert!(window.find_all("panel-close").is_empty(), "no Close");
+            assert!(window.try_find(("divider-lock", 0usize)).is_some());
+            let before = area.read(cx).dump(cx);
+            // A header dragged onto the other chart.
+            let from = titles(window)[1].center();
+            let to = window.find_all("tab-panel")[0].bounds().center();
+            drag_drawn(window, from, to, false, cx);
+            before
+        })
+        .unwrap();
+    cx.update_window(window.into(), |_, window, cx| {
+        window.render_frame(cx);
+        // The divider dragged far left.
+        let edge = window.find_all(("resizable-handle", 0usize))[0]
+            .bounds()
+            .center();
+        drag_drawn(
+            window,
+            edge,
+            gpui_kit::point(gpui_kit::px(40.), edge.y),
+            false,
+            cx,
+        );
+    })
+    .unwrap();
+    cx.update_window(window.into(), |_, window, cx| {
+        window.render_frame(cx);
+        let area = markets.read(cx).workspace_area().unwrap();
+        assert_eq!(area.read(cx).dump(cx), before, "nothing moved");
+        // Nothing can be added.
+        markets.update(cx, |m, cx| m.add_panel(PanelKind::Chart, window, cx));
+        window.render_frame(cx);
+        assert_eq!(center_panels(&markets, cx), 2);
+        // Unlocked, it all comes back.
+        window.click("workspace-lock", cx);
+        window.render_frame(cx);
+        assert!(!window.find_all("panel-close").is_empty());
+        assert!(window.try_find(("divider-lock", 0usize)).is_none());
+    })
+    .unwrap();
+}
+
+#[gpui_kit::test]
+fn a_locked_layouts_panels_still_work(cx: &mut TestAppContext) {
+    use crate::markets::dock::PanelKind;
+    use gpui_kit::component::dock::DockLayout;
+    let (window, _desk, markets, _keys, _dir) =
+        workspace_with(cx, &["BTC", "ETH", "SOL"], |panel, window, cx| {
+            DockLayout::h_split()
+                .child(panel(PanelKind::Tiles, Some("BTC"), window, cx), None)
+                .child(panel(PanelKind::Chart, Some("BTC"), window, cx), None)
+        });
+    cx.update(|cx| {
+        markets.update(cx, |m, cx| {
+            m.set_snapshot(snapshot(&["BTC", "ETH", "SOL"], &["BTC", "ETH", "SOL"]), cx)
+        })
+    });
+    cx.update_window(window.into(), |_, window, cx| {
+        window.click("workspace-lock", cx);
+        window.render_frame(cx);
+        window.render_frame(cx);
+        window.click(("tile", 1usize), cx);
+        window.render_frame(cx);
+        let area = markets.read(cx).workspace_area().unwrap();
+        let tiles = {
+            let a = area.read(cx);
+            a.layout(gpui_kit::component::dock::DockPlacement::Center)
+                .unwrap()
+                .panels()
+                .find_map(|id| {
+                    a.panel(id)?
+                        .view()
+                        .downcast::<crate::markets::TilesPanel>()
+                        .ok()
+                })
+                .unwrap()
+        };
+        assert_eq!(
+            tiles.read(cx).outlined(cx).as_ref().map(MarketId::coin),
+            Some("ETH"),
+            "the clicked tile is selected"
+        );
+        assert!(area.read(cx).is_locked());
+    })
+    .unwrap();
+}
+
+#[gpui_kit::test]
+fn two_linked_charts_share_the_time_cursor_without_echoing_it(cx: &mut TestAppContext) {
+    use crate::markets::ChartPanel;
+    use crate::markets::dock::{Action, PanelKind, Role};
+    use galata_desk_core::market::feed::{ChartKey, ChartView};
+    use gpui_kit::component::dock::DockLayout;
+    let (window, _desk, markets, keys, _dir) =
+        workspace_with(cx, &["BTC", "ETH"], |panel, window, cx| {
+            DockLayout::h_split()
+                .child(panel(PanelKind::Chart, Some("BTC"), window, cx), None)
+                .child(panel(PanelKind::Chart, Some("BTC"), window, cx), None)
+        });
+    // Both charts send and listen on channel A, with the time cursor on.
+    let bus = cx.update(|cx| markets.read(cx).workspace_bus().unwrap());
+    cx.update(|cx| {
+        bus.update(cx, |b, _| {
+            for key in &keys {
+                b.join(
+                    key,
+                    [Role::Both, Role::Off, Role::Off],
+                    &[Action::TimeCursor],
+                );
+            }
+        });
+        let mut snapshot = charted("BTC", &["BTC", "ETH"], 96);
+        let chart = snapshot.chart.take().unwrap();
+        snapshot.charts.insert(
+            ChartKey {
+                market: MarketId::new("BTC"),
+                period: MarketPeriod::Day,
+            },
+            ChartView::Ready(chart),
+        );
+        markets.update(cx, |m, cx| m.set_snapshot(snapshot, cx));
+    });
+    let charts: Vec<Entity<ChartPanel>> = cx.update(|cx| {
+        let area = markets.read(cx).workspace_area().unwrap();
+        let a = area.read(cx);
+        a.layout(gpui_kit::component::dock::DockPlacement::Center)
+            .unwrap()
+            .panels()
+            .filter_map(|id| a.panel(id)?.view().downcast::<ChartPanel>().ok())
+            .collect()
+    });
+    let cursor = cx
+        .update_window(window.into(), |_, window, cx| {
+            window.render_frame(cx);
+            window.render_frame(cx);
+            // The pointer over the first chart's candles.
+            let plot = window.find_all("chart-plot")[0].bounds();
+            let at = gpui_kit::point(
+                plot.origin.x + plot.size.width * 0.5,
+                plot.origin.y + plot.size.height * 0.5,
+            );
+            window.pointer_move(at, None, cx);
+            window.render_frame(cx);
+            let cursor = charts[0].read(cx).time_cursor();
+            assert!(cursor.is_some(), "the first chart shows its cursor");
+            cursor
+        })
+        .unwrap();
+    cx.update_window(window.into(), |_, window, cx| {
+        window.render_frame(cx);
+        assert_eq!(
+            charts[1].read(cx).time_cursor(),
+            cursor,
+            "the second chart follows"
+        );
+        assert_eq!(
+            charts[0].read(cx).time_cursor(),
+            cursor,
+            "the first did not move again"
+        );
+        assert_eq!(
+            bus.read(cx).published,
+            1,
+            "applying the cursor sent nothing back"
+        );
+        assert_eq!(window.find_all("time-cursor").len(), 2);
     })
     .unwrap();
 }
