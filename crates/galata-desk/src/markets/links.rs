@@ -16,17 +16,14 @@ use super::dock::{Action, Role};
 
 /// Something one panel tells the panels linked to it.
 #[derive(Debug, Clone, PartialEq)]
-#[allow(
-    dead_code,
-    reason = "tiles, chart prices and the blotter send these from task 4.3"
-)]
 pub enum LinkEvent {
     /// Show this market.
     SetMarket(MarketId),
     /// The pointer is over this time on a chart, or has left it.
     TimeCursor(Option<u64>),
-    /// A price picked on a chart, for the ticket's limit price.
-    LimitPrice(Decimal),
+    /// A price picked on a chart of this market, for the ticket's limit
+    /// price.
+    LimitPrice(MarketId, Decimal),
     /// Show only this market's rows, or every row.
     FilterBlotter(Option<MarketId>),
 }
@@ -37,7 +34,7 @@ impl LinkEvent {
         match self {
             Self::SetMarket(_) => Action::SetMarket,
             Self::TimeCursor(_) => Action::TimeCursor,
-            Self::LimitPrice(_) => Action::LimitPrice,
+            Self::LimitPrice(..) => Action::LimitPrice,
             Self::FilterBlotter(_) => Action::FilterBlotter,
         }
     }

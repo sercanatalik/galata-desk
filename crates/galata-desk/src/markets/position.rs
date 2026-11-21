@@ -81,14 +81,17 @@ impl PositionPanel {
         }
     }
 
-    /// Apply a linked panel's event. Nothing here yet: this panel follows
-    /// its links from task 4.3 on.
+    /// Apply a linked panel's event: a listening panel shows the channel's
+    /// market. This never publishes.
     pub fn apply(
         &mut self,
-        _: &super::links::LinkEvent,
+        event: &super::links::LinkEvent,
         _: &mut gpui_kit::Window,
-        _: &mut gpui_kit::Context<Self>,
+        cx: &mut gpui_kit::Context<Self>,
     ) {
+        if let super::links::LinkEvent::SetMarket(market) = event {
+            self.set_market(Some(market.clone()), cx);
+        }
     }
 
     /// The same panel, with a saved panel's key and links.

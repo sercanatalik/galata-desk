@@ -142,12 +142,25 @@ impl ChartPanel {
         self.dock.publish(LinkEvent::TimeCursor(time), cx);
     }
 
+    /// A click on the candles: tell the linked order ticket the price under
+    /// the pointer, for its limit price. Nothing is sent.
+    fn price_clicked(&mut self, at: gpui_kit::Point<gpui_kit::Pixels>, cx: &mut Context<Self>) {
+        if !self.plot.bounds.get().is_some_and(|b| b.contains(&at)) {
+            return;
+        }
+        self.plot.track(at);
+        let (Some(market), Some(price)) = (self.market(cx), self.plot.price()) else {
+            return;
+        };
+        self.dock.publish(LinkEvent::LimitPrice(market, price), cx);
+    }
+
     /// Apply a linked panel's event. This never publishes.
     pub fn apply(&mut self, event: &LinkEvent, _: &mut Window, cx: &mut Context<Self>) {
         match event {
             LinkEvent::TimeCursor(time) => self.apply_time_cursor(*time, cx),
             LinkEvent::SetMarket(market) => self.set_market(Some(market.clone()), cx),
-            LinkEvent::LimitPrice(_) | LinkEvent::FilterBlotter(_) => {}
+            LinkEvent::LimitPrice(..) | LinkEvent::FilterBlotter(_) => {}
         }
     }
 
@@ -155,6 +168,12 @@ impl ChartPanel {
         if self.plot.cursor.replace(time) != time {
             cx.notify();
         }
+    }
+
+    /// The price under the pointer, for tests.
+    #[cfg(test)]
+    pub fn pointer_price(&self) -> Option<galata_desk_core::rust_decimal::Decimal> {
+        self.plot.price()
     }
 
     /// Where the time cursor is drawn, for tests.
@@ -544,6 +563,12 @@ impl Render for ChartPanel {
                     this.pointer_moved(None, cx)
                 }
             }))
+            .on_mouse_down(
+                gpui_kit::MouseButton::Left,
+                cx.listener(|this, e: &gpui_kit::MouseDownEvent, _, cx| {
+                    this.price_clicked(e.position, cx)
+                }),
+            )
             .child(chart)
             .into_any_element()
     }

@@ -15,7 +15,6 @@ use gpui_kit::{App, AppContext as _, Bounds, Entity, Pixels, Window, point, px, 
 use super::dock::{self, PanelKind, PanelRecord};
 use super::links::LinkBus;
 use super::model::MarketsModel;
-use super::ticket::TicketPanel;
 
 /// What Add panel offers, in its order, by name.
 pub const CATALOGUE: [(PanelKind, &str); 6] = [
@@ -214,19 +213,6 @@ impl Workspace {
             .read(cx)
             .layout(DockPlacement::Center)
             .is_none_or(|tree| tree.panels().next().is_none())
-    }
-
-    /// Whether an order ticket panel is in the workspace.
-    pub fn has_ticket(&self, cx: &App) -> bool {
-        let area = self.area.read(cx);
-        area.layout(DockPlacement::Center)
-            .map(|tree| {
-                tree.panels().any(|id| {
-                    area.panel(id)
-                        .is_some_and(|p| p.view().downcast::<TicketPanel>().is_ok())
-                })
-            })
-            .unwrap_or(false)
     }
 }
 

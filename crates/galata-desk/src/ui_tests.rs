@@ -7308,3 +7308,420 @@ fn two_linked_charts_share_the_time_cursor_without_echoing_it(cx: &mut TestAppCo
     })
     .unwrap();
 }
+
+// ---- Link actions ----------------------------------------------------------
+
+/// The workspace's panels of one kind, in layout order.
+fn panels_of<T: 'static>(markets: &Entity<Markets>, cx: &gpui_kit::App) -> Vec<Entity<T>> {
+    let area = markets.read(cx).workspace_area().unwrap();
+    let a = area.read(cx);
+    a.layout(gpui_kit::component::dock::DockPlacement::Center)
+        .unwrap()
+        .panels()
+        .filter_map(|id| a.panel(id)?.view().downcast::<T>().ok())
+        .collect()
+}
+
+/// Set a workspace panel's links on the bus, by its key.
+fn link(
+    markets: &Entity<Markets>,
+    key: &str,
+    roles: [crate::markets::dock::Role; 3],
+    actions: &[crate::markets::dock::Action],
+    cx: &mut TestAppContext,
+) {
+    cx.update(|cx| {
+        let bus = markets.read(cx).workspace_bus().unwrap();
+        bus.update(cx, |b, _| b.join(key, roles, actions));
+    });
+}
+
+#[gpui_kit::test]
+fn panels_follow_their_channel_and_pinned_ones_keep_their_market(cx: &mut TestAppContext) {
+    use crate::markets::dock::{Action, PanelKind, Role};
+    use crate::markets::{ChartPanel, PositionPanel, TilesPanel};
+    use gpui_kit::component::dock::DockLayout;
+    let watched = ["BTC", "ETH", "xyz:GOLD"];
+    let (window, _desk, markets, keys, _dir) = workspace_with(cx, &watched, |panel, window, cx| {
+        DockLayout::h_split()
+            .child(panel(PanelKind::Tiles, Some("BTC"), window, cx), None)
+            .child(panel(PanelKind::Chart, Some("BTC"), window, cx), None)
+            .child(panel(PanelKind::Position, Some("ETH"), window, cx), None)
+    });
+    cx.update(|cx| markets.update(cx, |m, cx| m.set_snapshot(snapshot(&watched, &watched), cx)));
+    // Tiles send on A; the chart listens on A; the position panel is pinned.
+    link(
+        &markets,
+        &keys[0],
+        [Role::Send, Role::Off, Role::Off],
+        &[Action::SetMarket],
+        cx,
+    );
+    link(
+        &markets,
+        &keys[1],
+        [Role::Listen, Role::Off, Role::Off],
+        &[],
+        cx,
+    );
+    cx.update_window(window.into(), |_, window, cx| {
+        window.render_frame(cx);
+        // Selecting the GOLD tile.
+        window.click(("tile", 2usize), cx);
+        window.render_frame(cx);
+    })
+    .unwrap();
+    cx.update_window(window.into(), |_, window, cx| {
+        window.render_frame(cx);
+        let gold = Some("xyz:GOLD");
+        let tiles = &panels_of::<TilesPanel>(&markets, cx)[0];
+        assert_eq!(
+            tiles.read(cx).outlined(cx).as_ref().map(MarketId::coin),
+            gold,
+            "the tile is outlined"
+        );
+        let bus = markets.read(cx).workspace_bus().unwrap();
+        assert_eq!(
+            bus.read(cx).market(0).map(MarketId::coin),
+            gold,
+            "channel A shows GOLD"
+        );
+        let chart = &panels_of::<ChartPanel>(&markets, cx)[0];
+        assert_eq!(
+            chart.read(cx).market(cx).as_ref().map(MarketId::coin),
+            gold,
+            "the listening chart"
+        );
+        let position = &panels_of::<PositionPanel>(&markets, cx)[0];
+        assert_eq!(
+            position.read(cx).market(cx).as_ref().map(MarketId::coin),
+            Some("ETH"),
+            "the pinned panel keeps its market"
+        );
+    })
+    .unwrap();
+}
+
+#[gpui_kit::test]
+fn a_panel_on_two_channels_follows_the_last_to_change(cx: &mut TestAppContext) {
+    use crate::markets::dock::{Action, PanelKind, Role};
+    use crate::markets::{ChartPanel, TilesPanel};
+    use gpui_kit::component::dock::DockLayout;
+    let watched = ["BTC", "ETH", "SOL"];
+    let (window, _desk, markets, keys, _dir) = workspace_with(cx, &watched, |panel, window, cx| {
+        DockLayout::h_split()
+            .child(panel(PanelKind::Tiles, Some("BTC"), window, cx), None)
+            .child(panel(PanelKind::Tiles, Some("BTC"), window, cx), None)
+            .child(panel(PanelKind::Chart, Some("BTC"), window, cx), None)
+    });
+    cx.update(|cx| markets.update(cx, |m, cx| m.set_snapshot(snapshot(&watched, &watched), cx)));
+    link(
+        &markets,
+        &keys[0],
+        [Role::Send, Role::Off, Role::Off],
+        &[Action::SetMarket],
+        cx,
+    );
+    link(
+        &markets,
+        &keys[1],
+        [Role::Off, Role::Send, Role::Off],
+        &[Action::SetMarket],
+        cx,
+    );
+    link(
+        &markets,
+        &keys[2],
+        [Role::Listen, Role::Listen, Role::Off],
+        &[],
+        cx,
+    );
+    cx.update_window(window.into(), |_, window, cx| {
+        let tiles = panels_of::<TilesPanel>(&markets, cx);
+        tiles[0].update(cx, |t, cx| {
+            t.select_for_test(&MarketId::new("ETH"), window, cx)
+        });
+        tiles[1].update(cx, |t, cx| {
+            t.select_for_test(&MarketId::new("SOL"), window, cx)
+        });
+    })
+    .unwrap();
+    cx.update_window(window.into(), |_, _, cx| {
+        let chart = &panels_of::<ChartPanel>(&markets, cx)[0];
+        assert_eq!(
+            chart.read(cx).market(cx).as_ref().map(MarketId::coin),
+            Some("SOL")
+        );
+    })
+    .unwrap();
+}
+
+#[gpui_kit::test]
+fn a_price_clicked_on_a_chart_fills_the_tickets_limit_price_and_sends_nothing(
+    cx: &mut TestAppContext,
+) {
+    use crate::markets::ChartPanel;
+    use crate::markets::dock::{Action, PanelKind, Role};
+    use galata_desk_core::market::feed::{ChartKey, ChartView};
+    use gpui_kit::component::dock::DockLayout;
+    let watched = ["BTC", "ETH"];
+    let (window, desk, markets, keys, _dir) = workspace_with(cx, &watched, |panel, window, cx| {
+        DockLayout::h_split()
+            .child(panel(PanelKind::Chart, Some("BTC"), window, cx), None)
+            .child(panel(PanelKind::Ticket, None, window, cx), None)
+    });
+    let staged = Rc::new(Staged::new(Ok(())));
+    let portfolio = cx.update(|cx| desk.read(cx).portfolio_view().unwrap());
+    cx.update(|cx| {
+        portfolio.update(cx, |p, _| p.use_trading(staged.clone()));
+        let mut snapshot = charted("BTC", &watched, 96);
+        let chart = snapshot.chart.take().unwrap();
+        snapshot.charts.insert(
+            ChartKey {
+                market: MarketId::new("BTC"),
+                period: MarketPeriod::Day,
+            },
+            ChartView::Ready(chart),
+        );
+        markets.update(cx, |m, cx| m.set_snapshot(snapshot, cx));
+    });
+    link(
+        &markets,
+        &keys[0],
+        [Role::Send, Role::Off, Role::Off],
+        &[Action::LimitPrice],
+        cx,
+    );
+    link(
+        &markets,
+        &keys[1],
+        [Role::Listen, Role::Off, Role::Off],
+        &[],
+        cx,
+    );
+    cx.update_window(window.into(), |_, window, cx| {
+        window.render_frame(cx);
+        window.render_frame(cx);
+        let plot = window.find_all("chart-plot")[0].bounds();
+        let at = gpui_kit::point(
+            plot.origin.x + plot.size.width * 0.4,
+            plot.origin.y + plot.size.height * 0.3,
+        );
+        window.pointer_move(at, None, cx);
+        window.pointer_down(at, gpui_kit::MouseButton::Left, cx);
+        window.pointer_up(at, gpui_kit::MouseButton::Left, cx);
+    })
+    .unwrap();
+    cx.run_until_parked();
+    cx.update_window(window.into(), |_, window, cx| {
+        window.render_frame(cx);
+        let chart = &panels_of::<ChartPanel>(&markets, cx)[0];
+        let price = chart
+            .read(cx)
+            .pointer_price()
+            .expect("a price under the pointer");
+        let p = portfolio.read(cx);
+        assert_eq!(
+            p.ticket_open(),
+            Some(("BTC".into(), true, false)),
+            "a limit ticket for BTC"
+        );
+        assert_eq!(
+            p.ticket_price_text(cx),
+            Some(galata_desk_core::trade::rules::wire(price)),
+            "the price clicked"
+        );
+        assert_eq!(p.open_dialog(), None, "no confirmation");
+        assert!(staged.placed.borrow().is_empty(), "nothing sent");
+    })
+    .unwrap();
+}
+
+#[gpui_kit::test]
+fn a_selected_tile_filters_a_listening_blotter_when_that_action_is_on(cx: &mut TestAppContext) {
+    use crate::markets::dock::{Action, PanelKind, Role};
+    use crate::markets::{BlotterPanel, TilesPanel};
+    use gpui_kit::component::dock::DockLayout;
+    let watched = ["BTC", "ETH"];
+    let (window, _desk, markets, keys, _dir) = workspace_with(cx, &watched, |panel, window, cx| {
+        DockLayout::h_split()
+            .child(panel(PanelKind::Tiles, Some("BTC"), window, cx), None)
+            .child(panel(PanelKind::Blotter, None, window, cx), None)
+    });
+    cx.update(|cx| markets.update(cx, |m, cx| m.set_snapshot(snapshot(&watched, &watched), cx)));
+    link(
+        &markets,
+        &keys[0],
+        [Role::Send, Role::Off, Role::Off],
+        &[Action::SetMarket],
+        cx,
+    );
+    link(
+        &markets,
+        &keys[1],
+        [Role::Listen, Role::Off, Role::Off],
+        &[],
+        cx,
+    );
+    let select = |cx: &mut TestAppContext, coin: &str| {
+        cx.update_window(window.into(), |_, window, cx| {
+            let tiles = panels_of::<TilesPanel>(&markets, cx);
+            tiles[0].update(cx, |t, cx| {
+                t.select_for_test(&MarketId::new(coin), window, cx)
+            });
+        })
+        .unwrap();
+    };
+    // Filter blotter is off: the blotter shows every row.
+    select(cx, "ETH");
+    cx.update(|cx| {
+        assert_eq!(
+            panels_of::<BlotterPanel>(&markets, cx)[0].read(cx).filter(),
+            None
+        )
+    });
+    // Switched on, it shows only the selected market's rows.
+    link(
+        &markets,
+        &keys[0],
+        [Role::Send, Role::Off, Role::Off],
+        &[Action::SetMarket, Action::FilterBlotter],
+        cx,
+    );
+    select(cx, "BTC");
+    cx.update(|cx| {
+        let blotter = &panels_of::<BlotterPanel>(&markets, cx)[0];
+        assert_eq!(blotter.read(cx).filter().map(MarketId::coin), Some("BTC"));
+    });
+}
+
+#[gpui_kit::test]
+fn no_link_event_sends_anything_opens_a_confirmation_or_changes_an_order(cx: &mut TestAppContext) {
+    use crate::markets::dock::{Action, PanelKind, Role};
+    use crate::markets::{BlotterPanel, BlotterTab, TilesPanel};
+    use galata_desk_core::market::feed::{ChartKey, ChartView};
+    use gpui_kit::component::dock::DockLayout;
+    let watched = ["BTC", "SOL", "xyz:NVDA"];
+    let (window, desk, markets, keys, _dir) = workspace_with(cx, &watched, |panel, window, cx| {
+        DockLayout::h_split()
+            .child(panel(PanelKind::Tiles, Some("BTC"), window, cx), None)
+            .child(panel(PanelKind::Chart, Some("BTC"), window, cx), None)
+            .child(panel(PanelKind::Detail, Some("BTC"), window, cx), None)
+            .child(panel(PanelKind::Position, Some("BTC"), window, cx), None)
+            .child(panel(PanelKind::Ticket, None, window, cx), None)
+            .child(panel(PanelKind::Blotter, None, window, cx), None)
+    });
+    // The account holds NVDA and has an order resting: things a stray
+    // action could close or cancel.
+    let staged = Rc::new(Staged::new(Ok(())));
+    let portfolio = cx.update(|cx| desk.read(cx).portfolio_view().unwrap());
+    cx.update(|cx| {
+        portfolio.update(cx, |p, cx| {
+            p.use_trading(staged.clone());
+            p.set_orders(vec![level(7, Tpsl::Tp, "180")], cx);
+            p.set_positions(vec![long_nvda()], cx);
+        });
+        let mut snapshot = charted("BTC", &watched, 96);
+        let chart = snapshot.chart.take().unwrap();
+        snapshot.charts.insert(
+            ChartKey {
+                market: MarketId::new("BTC"),
+                period: MarketPeriod::Day,
+            },
+            ChartView::Ready(chart),
+        );
+        markets.update(cx, |m, cx| m.set_snapshot(snapshot, cx));
+    });
+    // Every panel on channel A, sending and listening, with every action on.
+    let all = [
+        Action::SetMarket,
+        Action::TimeCursor,
+        Action::LimitPrice,
+        Action::FilterBlotter,
+    ];
+    for key in &keys {
+        link(&markets, key, [Role::Both, Role::Off, Role::Off], &all, cx);
+    }
+    // The chart only sends, so it keeps the BTC candles to click on.
+    link(
+        &markets,
+        &keys[1],
+        [Role::Send, Role::Off, Role::Off],
+        &all,
+        cx,
+    );
+    // And the blotter, so it keeps every row to select from.
+    link(
+        &markets,
+        &keys[5],
+        [Role::Send, Role::Off, Role::Off],
+        &all,
+        cx,
+    );
+    let orders_before = cx.update(|cx| portfolio.read(cx).orders_grid(cx).column_texts(0));
+
+    // Selecting the SOL tile, by click and by Enter.
+    cx.update_window(window.into(), |_, window, cx| {
+        window.render_frame(cx);
+        window.render_frame(cx);
+        window.click(("tile", 1usize), cx);
+        window.press("enter", cx);
+        window.render_frame(cx);
+    })
+    .unwrap();
+    cx.run_until_parked();
+    cx.update_window(window.into(), |_, window, cx| {
+        // The linked ticket shows SOL as a newly opened ticket would.
+        let p = portfolio.read(cx);
+        assert_eq!(p.ticket_open(), Some(("SOL".into(), true, true)));
+        assert_eq!(p.ticket_size_text(cx).as_deref(), Some(""));
+        assert_eq!(p.ticket_price_text(cx).as_deref(), Some(""));
+        // No order form over the screen, and no confirmation.
+        assert_eq!(p.open_dialog(), None);
+        assert!(window.try_find("ticket-dialog").is_none());
+        let tiles = &panels_of::<TilesPanel>(&markets, cx)[0];
+        assert_eq!(
+            tiles.read(cx).outlined(cx).as_ref().map(MarketId::coin),
+            Some("SOL")
+        );
+
+        // The pointer over the chart, and a price clicked on it.
+        let plot = window.find_all("chart-plot")[0].bounds();
+        let at = gpui_kit::point(
+            plot.origin.x + plot.size.width * 0.5,
+            plot.origin.y + plot.size.height * 0.5,
+        );
+        window.pointer_move(at, None, cx);
+        window.pointer_down(at, gpui_kit::MouseButton::Left, cx);
+        window.pointer_up(at, gpui_kit::MouseButton::Left, cx);
+        window.render_frame(cx);
+    })
+    .unwrap();
+    cx.run_until_parked();
+    cx.update_window(window.into(), |_, window, cx| {
+        // A blotter row selected: the NVDA position.
+        let blotter = &panels_of::<BlotterPanel>(&markets, cx)[0];
+        blotter.update(cx, |b, cx| b.select_row(BlotterTab::Positions, 0, cx));
+        window.render_frame(cx);
+    })
+    .unwrap();
+    cx.run_until_parked();
+    cx.update_window(window.into(), |_, _, cx| {
+        let p = portfolio.read(cx);
+        assert_eq!(p.open_dialog(), None, "no confirmation opened");
+        assert!(staged.placed.borrow().is_empty(), "no order placed");
+        assert!(staged.cancels.borrow().is_empty(), "no order cancelled");
+        assert!(staged.amends.borrow().is_empty(), "no order changed");
+        assert!(staged.closes.borrow().is_empty(), "no position closed");
+        assert!(staged.close_alls.borrow().is_empty());
+        assert!(staged.tpsl_changes.borrow().is_empty(), "no TP/SL changed");
+        assert_eq!(
+            p.orders_grid(cx).column_texts(0),
+            orders_before,
+            "orders unchanged"
+        );
+        // The ticket only had fields filled in: NVDA from the blotter row.
+        assert_eq!(p.ticket_open().map(|t| t.0), Some("xyz:NVDA".into()));
+    })
+    .unwrap();
+}

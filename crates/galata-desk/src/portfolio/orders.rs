@@ -438,6 +438,9 @@ pub struct Actions {
     /// A ticket panel is docked in the Markets workspace: the ticket is drawn
     /// there, not over the screen.
     pub(super) ticket_docked: bool,
+    /// How many ticket panels exist, and whether they are on screen.
+    pub(super) ticket_panels: usize,
+    pub(super) ticket_panels_shown: bool,
     /// Fetching what the ticket needs: its market, the account's limits in
     /// it, and its mid.
     pub(super) ticket_pricing: Option<Task<()>>,
@@ -473,6 +476,8 @@ impl Actions {
             dialog: None,
             ticket: None,
             ticket_docked: false,
+            ticket_panels: 0,
+            ticket_panels_shown: true,
             ticket_pricing: None,
             pending: None,
             report: None,

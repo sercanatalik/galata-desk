@@ -22,13 +22,13 @@ dock_panel!(TicketPanel, PanelKind::Ticket);
 
 impl TicketPanel {
     pub fn new(portfolio: Entity<Portfolio>, dock: DockMeta, cx: &mut Context<Self>) -> Self {
-        portfolio.update(cx, |p, cx| p.set_ticket_docked(true, cx));
+        portfolio.update(cx, |p, cx| p.ticket_panel_added(cx));
         let subscriptions = vec![
             cx.observe(&portfolio, |_, _, cx| cx.notify()),
             // Closed, the ticket goes back over the screen.
             cx.on_release(|this: &mut Self, cx| {
                 this.portfolio
-                    .update(cx, |p, cx| p.set_ticket_docked(false, cx));
+                    .update(cx, |p, cx| p.ticket_panel_removed(cx));
             }),
         ];
         Self {
@@ -38,14 +38,25 @@ impl TicketPanel {
         }
     }
 
-    /// Apply a linked panel's event. Nothing here yet: this panel follows
-    /// its links from task 4.3 on.
+    /// Apply a linked panel's event: the market, or a limit price picked on
+    /// a chart. Either only fills in the ticket, as typing would: nothing is
+    /// sent and no confirmation opens. This never publishes.
     pub fn apply(
         &mut self,
-        _: &super::links::LinkEvent,
-        _: &mut gpui_kit::Window,
-        _: &mut gpui_kit::Context<Self>,
+        event: &super::links::LinkEvent,
+        window: &mut gpui_kit::Window,
+        cx: &mut gpui_kit::Context<Self>,
     ) {
+        use super::links::LinkEvent;
+        match event {
+            LinkEvent::SetMarket(market) => self
+                .portfolio
+                .update(cx, |p, cx| p.show_ticket_market(market.clone(), window, cx)),
+            LinkEvent::LimitPrice(market, price) => self.portfolio.update(cx, |p, cx| {
+                p.fill_ticket_limit(market.clone(), *price, window, cx)
+            }),
+            LinkEvent::TimeCursor(_) | LinkEvent::FilterBlotter(_) => {}
+        }
     }
 
     /// What the panel saves in a layout: nothing but its key and links. The

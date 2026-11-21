@@ -187,9 +187,8 @@ impl Markets {
         if self.workspace.is_none() {
             self.workspace = Some(workspace::Workspace::new(&self.model, window, cx));
         }
-        let docked = self.workspace.as_ref().is_some_and(|w| w.has_ticket(cx));
         let portfolio = self.model.read(cx).portfolio.clone();
-        portfolio.update(cx, |p, cx| p.set_ticket_docked(docked, cx));
+        portfolio.update(cx, |p, cx| p.set_ticket_panels_shown(true, cx));
     }
 
     /// The window left fullscreen: the fixed layout shows channel A's market,
@@ -203,7 +202,7 @@ impl Markets {
             self.select(&market, cx);
         }
         let portfolio = self.model.read(cx).portfolio.clone();
-        portfolio.update(cx, |p, cx| p.set_ticket_docked(false, cx));
+        portfolio.update(cx, |p, cx| p.set_ticket_panels_shown(false, cx));
     }
 
     /// The workspace with every panel closed: what can fill it again.

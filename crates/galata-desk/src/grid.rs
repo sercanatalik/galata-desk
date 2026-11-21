@@ -257,6 +257,9 @@ pub struct Grid {
     /// What to say when there are no rows.
     empty: SharedString,
     on_press: Option<OnPress>,
+    /// Each row's market, where the list knows it: for a blotter to send
+    /// and filter by.
+    markets: Vec<Option<galata_desk_core::market::MarketId>>,
 }
 
 impl Grid {
@@ -269,7 +272,19 @@ impl Grid {
             order: Vec::new(),
             empty: empty.into(),
             on_press: None,
+            markets: Vec::new(),
         }
+    }
+
+    /// Each row's market, in the order the rows were given.
+    pub fn set_row_markets(&mut self, markets: Vec<Option<galata_desk_core::market::MarketId>>) {
+        self.markets = markets;
+    }
+
+    /// The market of the row drawn at `row_ix`.
+    pub fn market_at(&self, row_ix: usize) -> Option<&galata_desk_core::market::MarketId> {
+        let ix = *self.order.get(row_ix)?;
+        self.markets.get(ix)?.as_ref()
     }
 
     /// What to say when there are no rows, from now on.
@@ -300,16 +315,37 @@ impl Grid {
             order: Vec::new(),
             empty: self.empty.clone(),
             on_press: self.on_press.clone(),
+            markets: Vec::new(),
         };
-        grid.copy_rows_from(self);
+        grid.copy_rows_from(self, None);
         grid
     }
 
     /// Take `other`'s rows and what it says when empty, keeping this grid's
-    /// own sort.
-    pub fn copy_rows_from(&mut self, other: &Grid) {
+    /// own sort. With `only`, just that market's rows.
+    pub fn copy_rows_from(
+        &mut self,
+        other: &Grid,
+        only: Option<&galata_desk_core::market::MarketId>,
+    ) {
         self.empty = other.empty.clone();
-        self.set_keyed_rows(other.rows.clone(), other.keys.clone());
+        let keep = |ix: usize| match only {
+            None => true,
+            Some(market) => other.markets.get(ix).and_then(Option::as_ref) == Some(market),
+        };
+        let rows = (0..other.rows.len()).filter(|ix| keep(*ix));
+        let mut cells = Vec::new();
+        let mut keys = Vec::new();
+        let mut markets = Vec::new();
+        for ix in rows {
+            cells.push(other.rows[ix].clone());
+            if let Some(k) = other.keys.get(ix) {
+                keys.push(k.clone());
+            }
+            markets.push(other.markets.get(ix).cloned().flatten());
+        }
+        self.set_keyed_rows(cells, keys);
+        self.markets = markets;
     }
 
     /// Press a row button, as a click on it does, for tests.

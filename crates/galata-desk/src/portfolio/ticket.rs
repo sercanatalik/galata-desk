@@ -126,6 +126,17 @@ impl Portfolio {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        self.start_ticket(market, buy, true, window, cx);
+    }
+
+    fn start_ticket(
+        &mut self,
+        market: MarketId,
+        buy: bool,
+        focus: bool,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         if self.actions.pending.is_some() {
             return;
         }
@@ -167,7 +178,9 @@ impl Portfolio {
         // A result from an earlier action is not this ticket's.
         self.actions.report = None;
         self.actions.ticket = Some(Box::new(ticket));
-        if self.actions.ticket_docked {
+        if !focus {
+            // Filled in by a linked panel: the keyboard stays where it is.
+        } else if self.actions.ticket_docked {
             // The panel holds it: keys go to its size field.
             self.focus_ticket(window, cx);
         } else {
@@ -219,6 +232,49 @@ impl Portfolio {
         }
     }
 
+    /// Show `market` in the docked ticket, as a linked panel asks. What was
+    /// typed for another market goes; the side stays. The keyboard is left
+    /// where it is.
+    pub fn show_ticket_market(
+        &mut self,
+        market: MarketId,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if !self.actions.ticket_docked || self.actions.pending.is_some() {
+            return;
+        }
+        match &self.actions.ticket {
+            Some(t) if t.market == market && !t.sent => {}
+            other => {
+                let buy = other.as_ref().is_none_or(|t| t.buy);
+                self.start_ticket(market, buy, false, window, cx);
+            }
+        }
+    }
+
+    /// Put `price` in the docked ticket's limit price field, for `market`,
+    /// as typing it would: the ticket becomes a limit order at that price.
+    pub fn fill_ticket_limit(
+        &mut self,
+        market: MarketId,
+        price: Decimal,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if !self.actions.ticket_docked {
+            return;
+        }
+        self.show_ticket_market(market, window, cx);
+        let Some(t) = self.ticket_mut() else {
+            return;
+        };
+        t.at_market = false;
+        let input = t.price.clone();
+        input.update(cx, |i, cx| i.set_value(rules::wire(price), window, cx));
+        cx.notify();
+    }
+
     /// Move the keyboard to the ticket's size field.
     pub fn focus_ticket(&self, window: &mut Window, cx: &mut App) {
         if let Some(t) = &self.actions.ticket {
@@ -235,8 +291,32 @@ impl Portfolio {
         })
     }
 
+    /// A ticket panel was made, or closed. While one is on screen the
+    /// ticket is drawn there. Counted, since a new layout can make its
+    /// ticket panel before the old one's is closed.
+    pub fn ticket_panel_added(&mut self, cx: &mut Context<Self>) {
+        self.actions.ticket_panels += 1;
+        self.redock_ticket(cx);
+    }
+
+    pub fn ticket_panel_removed(&mut self, cx: &mut Context<Self>) {
+        self.actions.ticket_panels = self.actions.ticket_panels.saturating_sub(1);
+        self.redock_ticket(cx);
+    }
+
+    /// The workspace, and any ticket panel in it, is on screen, or not.
+    pub fn set_ticket_panels_shown(&mut self, shown: bool, cx: &mut Context<Self>) {
+        self.actions.ticket_panels_shown = shown;
+        self.redock_ticket(cx);
+    }
+
+    fn redock_ticket(&mut self, cx: &mut Context<Self>) {
+        let docked = self.actions.ticket_panels > 0 && self.actions.ticket_panels_shown;
+        self.set_ticket_docked(docked, cx);
+    }
+
     /// Whether a ticket panel is docked, so the ticket is drawn there.
-    pub fn set_ticket_docked(&mut self, docked: bool, cx: &mut Context<Self>) {
+    fn set_ticket_docked(&mut self, docked: bool, cx: &mut Context<Self>) {
         if self.actions.ticket_docked != docked {
             self.actions.ticket_docked = docked;
             // A ticket left over the screen goes with its panel, and the
@@ -1267,6 +1347,14 @@ impl Portfolio {
 
 #[cfg(test)]
 impl Portfolio {
+    /// The ticket's limit price field, as typed.
+    pub fn ticket_price_text(&self, cx: &App) -> Option<String> {
+        self.actions
+            .ticket
+            .as_ref()
+            .map(|t| t.price.read(cx).value().to_string())
+    }
+
     /// Whether the ticket is open, and on which side and type.
     pub fn ticket_open(&self) -> Option<(String, bool, bool)> {
         self.actions

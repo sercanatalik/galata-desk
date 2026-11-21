@@ -1062,6 +1062,12 @@ impl Funding {
             }))
             .collect();
         grid.set_rows(all);
+        grid.set_row_markets(
+            rows.iter()
+                .map(|r| Some(MarketId::from_parts(&r.dex, &r.market)))
+                .chain(watched.iter().map(|w| Some(w.market.clone())))
+                .collect(),
+        );
         grid
     }
 }

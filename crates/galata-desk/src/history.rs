@@ -485,6 +485,13 @@ impl History {
             });
         };
         fill(&self.trades, trade_rows, format!("No trades {words}."), cx);
+        let trade_markets = listed
+            .trades
+            .iter()
+            .map(|t| Some(galata_desk_core::market::MarketId::new(t.coin.clone())))
+            .collect();
+        self.trades
+            .update(cx, |t, _| t.delegate_mut().set_row_markets(trade_markets));
         fill(&self.orders, order_rows, format!("No orders {words}."), cx);
         fill(
             &self.by_market,

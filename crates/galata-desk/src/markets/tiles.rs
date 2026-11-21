@@ -94,14 +94,17 @@ impl TilesPanel {
         }
     }
 
-    /// Apply a linked panel's event. Nothing here yet: this panel follows
-    /// its links from task 4.3 on.
+    /// Apply a linked panel's event: a listening tiles panel outlines the
+    /// channel's market. This never publishes.
     pub fn apply(
         &mut self,
-        _: &super::links::LinkEvent,
+        event: &super::links::LinkEvent,
         _: &mut gpui_kit::Window,
-        _: &mut gpui_kit::Context<Self>,
+        cx: &mut gpui_kit::Context<Self>,
     ) {
+        if let super::links::LinkEvent::SetMarket(market) = event {
+            self.set_outlined(Some(market.clone()), cx);
+        }
     }
 
     /// The same panel, with a saved panel's key and links.
@@ -144,11 +147,30 @@ impl TilesPanel {
 
     /// Only a click, or Enter or Space on a focused tile, comes here;
     /// pointing at a tile does not.
+    /// Select `market`'s tile, as a click on it does, for tests.
+    #[cfg(test)]
+    pub fn select_for_test(
+        &mut self,
+        market: &MarketId,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.select(market, window, cx);
+    }
+
     fn select(&mut self, market: &MarketId, window: &mut Window, cx: &mut Context<Self>) {
         if let Outline::Own(own) = &mut self.outline {
             *own = Some(market.clone());
         }
         (self.on_event)(&TilesEvent::Selected(market.clone()), window, cx);
+        // In the workspace, the channels it sends on show the market, and
+        // linked blotters may show only its rows.
+        self.dock
+            .publish(super::links::LinkEvent::SetMarket(market.clone()), cx);
+        self.dock.publish(
+            super::links::LinkEvent::FilterBlotter(Some(market.clone())),
+            cx,
+        );
         cx.notify();
     }
 

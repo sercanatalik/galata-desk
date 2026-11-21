@@ -349,8 +349,18 @@ impl Portfolio {
             .map(|p| position_row(p, self.position_buttons(p), self.tpsl_cell(p)))
             .collect();
         let keys = holdings.positions.iter().map(position_keys).collect();
+        let markets = holdings
+            .positions
+            .iter()
+            .map(|p| {
+                Some(galata_desk_core::market::MarketId::from_parts(
+                    &p.dex, &p.market,
+                ))
+            })
+            .collect();
         self.positions.update(cx, |t, cx| {
             t.delegate_mut().set_keyed_rows(rows, keys);
+            t.delegate_mut().set_row_markets(markets);
             t.refresh(cx);
         });
     }

@@ -314,8 +314,17 @@ impl Portfolio {
             .iter()
             .map(|o| order_row(o, self.order_buttons(o)))
             .collect();
+        let markets = orders
+            .iter()
+            .map(|o| {
+                Some(galata_desk_core::market::MarketId::from_parts(
+                    &o.dex, &o.market,
+                ))
+            })
+            .collect();
         self.orders.update(cx, |t, cx| {
             t.delegate_mut().set_rows(rows);
+            t.delegate_mut().set_row_markets(markets);
             t.refresh(cx);
         });
     }
