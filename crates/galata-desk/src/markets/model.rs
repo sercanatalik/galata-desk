@@ -105,6 +105,10 @@ pub struct MarketsModel {
     pub(super) feed: MarketFeed,
     /// The charts the panels show of their own.
     pub(super) holds: ChartHolds,
+    /// The History and Funding views, whose lists a blotter mirrors. Set by
+    /// the window once Markets is made.
+    pub(super) history: Option<Entity<crate::history::History>>,
+    pub(super) funding: Option<Entity<crate::funding::Funding>>,
     pub(super) snapshot: MarketSnapshot,
     /// `None` until the default list can be decided, which needs the
     /// account's positions.
@@ -222,6 +226,8 @@ impl MarketsModel {
             portfolio,
             feed,
             holds: ChartHolds::default(),
+            history: None,
+            funding: None,
             snapshot: MarketSnapshot::default(),
             watchlist: stored,
             period: MarketPeriod::default(),
@@ -451,6 +457,10 @@ impl MarketsModel {
             && let Err(error) = Core::get(cx).store.save_watchlist(list)
         {
             self.warning = Some(format!("The watchlist could not be saved: {error}").into());
+        }
+        // The watcher's market update lists these markets.
+        if let Some(link) = &self.watcher {
+            link.update(cx, |link, cx| link.sync_watchlist(cx));
         }
     }
 

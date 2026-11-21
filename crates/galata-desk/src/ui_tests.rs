@@ -74,6 +74,8 @@ fn open_at(
     let (window, desk) = cx.update(|cx| {
         gpui_kit::init(cx);
         crate::theme::install(cx);
+        // The workspace's panels can be rebuilt from a saved layout.
+        crate::markets::dock::register(cx);
         let stored = store.settings();
         let store_network = stored.network;
         cx.set_global(Core {
@@ -6090,4 +6092,432 @@ fn two_charts_of_one_market_and_period_share_one_hold_and_closing_both_lets_it_g
     // Dropped entities are released when the app next flushes its effects.
     cx.update(|_| {});
     cx.update(|cx| assert!(model.read(cx).chart_holds().is_empty()));
+}
+
+// ---- Dock panels ---------------------------------------------------------
+
+/// The records of every Markets panel in a saved layout, by key.
+fn saved_records(
+    state: &gpui_kit::component::dock::PanelState,
+) -> Vec<crate::markets::dock::PanelRecord> {
+    let mut records = Vec::new();
+    if let Some(record) = crate::markets::dock::PanelRecord::from_state(state) {
+        records.push(record);
+    }
+    for child in &state.children {
+        records.extend(saved_records(child));
+    }
+    records.sort_by(|a, b| a.key.cmp(&b.key));
+    records
+}
+
+#[gpui_kit::test]
+fn each_panel_kind_comes_back_from_a_saved_layout_with_its_market_and_period(
+    cx: &mut TestAppContext,
+) {
+    use crate::markets::dock::{self, PanelKind, PanelRecord, Role, SavedMarket};
+    use crate::markets::{ChartPanel, DetailPanel, PositionPanel};
+    use galata_desk_core::market::MarketPeriod;
+    use gpui_kit::component::dock::{DockLayout, DockSkin};
+
+    let (window, desk, _dir) = open_with(cx, Some(&["BTC", "ETH", "xyz:NVDA"]));
+    let markets = go_to_markets(window, &desk, cx);
+    let model = cx.update(|cx| markets.read(cx).model());
+
+    cx.update_window(window.into(), |_, window, cx| {
+        let new_area = |window: &mut gpui_kit::Window, cx: &mut gpui_kit::App| {
+            let (area, _skin) = DockSkin::dock_area("markets-workspace", Some(1), window, cx);
+            dock::bind(&area, &model, cx);
+            area
+        };
+        let fresh = |kind, market: Option<&str>, interval: Option<&str>| PanelRecord {
+            key: format!("{kind:?}"),
+            kind,
+            market: market.map(|m| SavedMarket::from(&MarketId::new(m))),
+            interval: interval.map(str::to_string),
+            tab: None,
+            roles: [Role::Listen, Role::Off, Role::Both],
+            actions: vec![],
+        };
+        let chart = fresh(PanelKind::Chart, Some("ETH"), Some("7d"));
+        let tiles = fresh(PanelKind::Tiles, Some("BTC"), None);
+        let detail = fresh(PanelKind::Detail, Some("xyz:NVDA"), None);
+        let position = fresh(PanelKind::Position, Some("BTC"), None);
+
+        let area = new_area(window, cx);
+        let mut layout = DockLayout::h_split();
+        for record in [&chart, &tiles, &detail, &position] {
+            let panel = dock::new_panel(record.kind, model.clone(), record, window, cx);
+            layout = layout.child(DockLayout::tabs().panel_view(panel, cx), None);
+        }
+        area.update(cx, |area, cx| area.set_center(layout, window, cx));
+        let saved = area.read(cx).dump(cx);
+        assert_eq!(
+            saved_records(&saved.center),
+            {
+                let mut all = vec![
+                    chart.clone(),
+                    tiles.clone(),
+                    detail.clone(),
+                    position.clone(),
+                ];
+                all.sort_by(|a, b| a.key.cmp(&b.key));
+                all
+            },
+            "each panel saves its kind, market, period and links"
+        );
+
+        // Loaded into a new area, each comes back as it was.
+        let restored = new_area(window, cx);
+        restored
+            .update(cx, |area, cx| area.load(saved.clone(), window, cx))
+            .unwrap();
+        let again = restored.read(cx).dump(cx);
+        assert_eq!(saved_records(&again.center), saved_records(&saved.center));
+
+        // And they are the real panels, on the same markets.
+        let views: Vec<_> = {
+            let area = restored.read(cx);
+            area.layout(gpui_kit::component::dock::DockPlacement::Center)
+                .unwrap()
+                .panels()
+                .filter_map(|id| area.panel(id).cloned())
+                .collect()
+        };
+        assert_eq!(views.len(), 4);
+        let mut titles: Vec<String> = Vec::new();
+        for view in views {
+            let view = view.view();
+            if let Ok(chart) = view.clone().downcast::<ChartPanel>() {
+                let chart = chart.read(cx);
+                assert_eq!(chart.market(cx).as_ref().map(MarketId::coin), Some("ETH"));
+                assert_eq!(chart.period(cx), MarketPeriod::Week);
+                titles.push(chart.title_text(cx));
+            } else if let Ok(detail) = view.clone().downcast::<DetailPanel>() {
+                titles.push(detail.read(cx).title_text(cx));
+            } else if let Ok(position) = view.clone().downcast::<PositionPanel>() {
+                titles.push(position.read(cx).title_text(cx));
+            } else {
+                let tiles = view
+                    .downcast::<crate::markets::TilesPanel>()
+                    .expect("the fourth is the tiles");
+                assert_eq!(
+                    tiles.read(cx).outlined(cx).as_ref().map(MarketId::coin),
+                    Some("BTC")
+                );
+                titles.push(tiles.read(cx).title_text(cx));
+            }
+        }
+        titles.sort();
+        assert_eq!(
+            titles,
+            [
+                "ETH \u{b7} 7D",
+                "NVDA (xyz)",
+                "Position \u{b7} BTC",
+                "Watchlist"
+            ]
+        );
+        // The restored chart holds its own candles in the feed.
+        assert!(
+            model
+                .read(cx)
+                .chart_holds()
+                .iter()
+                .any(|(key, _)| key.market.coin() == "ETH" && key.period == MarketPeriod::Week)
+        );
+    })
+    .unwrap();
+}
+
+#[gpui_kit::test]
+fn with_a_ticket_panel_buy_fills_and_focuses_it_and_opens_no_dialog(cx: &mut TestAppContext) {
+    use crate::markets::TicketPanel;
+    use crate::markets::dock::DockMeta;
+
+    let (window, desk, _dir) = open_with(cx, Some(&["BTC", "ETH"]));
+    let markets = go_to_markets(window, &desk, cx);
+    let portfolio = cx.update(|cx| desk.read(cx).portfolio_view().unwrap());
+
+    // Without a ticket panel, Buy opens the ticket over the screen.
+    cx.update_window(window.into(), |_, window, cx| {
+        give_account(&desk, Some(vec![]), None, cx);
+        markets.update(cx, |view, cx| view.focus_market("BTC", window, cx));
+        window.render_frame(cx);
+        window.click("trade-buy", cx);
+        window.render_frame(cx);
+        assert_eq!(portfolio.read(cx).open_dialog(), Some("ticket"));
+        assert!(window.try_find("ticket-dialog").is_some());
+        portfolio.update(cx, |p, cx| p.dismiss_dialog(cx));
+        window.render_frame(cx);
+        assert_eq!(portfolio.read(cx).ticket_open(), None);
+    })
+    .unwrap();
+
+    // With one docked, Buy fills it and puts the keyboard in it.
+    let panel = cx.update(|cx| {
+        let dock = DockMeta::fresh(cx);
+        cx.new(|cx| TicketPanel::new(portfolio.clone(), dock, cx))
+    });
+    cx.update_window(window.into(), |_, window, cx| {
+        window.render_frame(cx);
+        window.click("trade-buy", cx);
+        window.render_frame(cx);
+        let p = portfolio.read(cx);
+        assert_eq!(p.open_dialog(), None, "no dialog over the screen");
+        assert!(window.try_find("ticket-dialog").is_none());
+        assert_eq!(p.ticket_open(), Some(("BTC".into(), true, true)));
+        assert!(
+            p.ticket_focused(window, cx),
+            "the keyboard is in the ticket"
+        );
+    })
+    .unwrap();
+
+    // Sell on the same market keeps what was typed and changes side.
+    cx.update_window(window.into(), |_, window, cx| {
+        portfolio.update(cx, |p, cx| p.type_ticket("25", "", window, cx));
+        window.click("trade-sell", cx);
+        window.render_frame(cx);
+        let p = portfolio.read(cx);
+        assert_eq!(p.ticket_open(), Some(("BTC".into(), false, true)));
+        assert_eq!(p.ticket_size_text(cx).as_deref(), Some("25"));
+        assert_eq!(p.open_dialog(), None);
+    })
+    .unwrap();
+
+    // Closing the panel takes its ticket; Buy then opens one over the screen.
+    drop(panel);
+    cx.update(|_| {});
+    cx.update_window(window.into(), |_, window, cx| {
+        assert_eq!(portfolio.read(cx).ticket_open(), None);
+        window.render_frame(cx);
+        window.click("trade-buy", cx);
+        window.render_frame(cx);
+        assert_eq!(portfolio.read(cx).open_dialog(), Some("ticket"));
+    })
+    .unwrap();
+}
+
+#[gpui_kit::test]
+fn the_blotter_shows_the_sections_lists_and_closes_only_through_their_confirmation(
+    cx: &mut TestAppContext,
+) {
+    use crate::markets::dock::DockMeta;
+    use crate::markets::{BlotterPanel, BlotterTab};
+
+    let staged = Rc::new(Staged::new(Ok(())));
+    let (window, desk, portfolio, _dir) = positions_tab(
+        cx,
+        &staged,
+        vec![long_nvda()],
+        vec![level(7, Tpsl::Tp, "180")],
+    );
+    // Funding draws its table once shown; Markets is where the blotter lives.
+    cx.update_window(window.into(), |_, window, cx| {
+        desk.update(cx, |d, cx| d.show(Section::Funding, window, cx));
+        window.render_frame(cx);
+        desk.update(cx, |d, cx| d.show(Section::Markets, window, cx));
+        window.render_frame(cx);
+    })
+    .unwrap();
+    let markets = cx.update(|cx| desk.read(cx).markets_view().unwrap());
+    let model = cx.update(|cx| markets.read(cx).model());
+    let blotter = cx
+        .update_window(window.into(), |_, window, cx| {
+            let dock = DockMeta::fresh(cx);
+            cx.new(|cx| BlotterPanel::new(model.clone(), BlotterTab::default(), dock, window, cx))
+        })
+        .unwrap();
+
+    cx.update_window(window.into(), |_, _, cx| {
+        let b = blotter.read(cx);
+        assert_eq!(b.tab(), BlotterTab::Positions);
+        let same = |tab: BlotterTab, source: &crate::grid::Grid| {
+            let table = b.table(tab);
+            let mirror = table.read(cx).delegate();
+            assert_eq!(mirror.col_count(), source.col_count(), "{tab:?}");
+            assert_eq!(mirror.empty_text(), source.empty_text(), "{tab:?}");
+            for col in 0..source.col_count() {
+                assert_eq!(
+                    mirror.column_texts(col),
+                    source.column_texts(col),
+                    "{tab:?} column {col}"
+                );
+            }
+        };
+        let p = portfolio.read(cx);
+        assert_eq!(p.positions_grid(cx).column_texts(0).len(), 1);
+        same(BlotterTab::Positions, p.positions_grid(cx));
+        assert_eq!(p.orders_grid(cx).column_texts(0).len(), 1);
+        same(BlotterTab::Orders, p.orders_grid(cx));
+        let history = desk.read(cx).history_view().unwrap();
+        same(BlotterTab::Trades, history.read(cx).trades_grid(cx));
+
+        // Funding: the same figures, row by row, as the section draws them.
+        let drawn = desk.read(cx).funding_view().unwrap().read(cx).drawn();
+        let table = b.table(BlotterTab::Funding);
+        let mirror = table.read(cx).delegate();
+        let rows: Vec<String> = (0..drawn.figures_by_row.len())
+            .map(|row| {
+                (1..8)
+                    .map(|col| mirror.cell(row, col).unwrap().plain())
+                    .collect::<Vec<_>>()
+                    .join("|")
+            })
+            .collect();
+        assert!(!rows.is_empty());
+        assert_eq!(rows, drawn.figures_by_row);
+    })
+    .unwrap();
+
+    // Close at market from the blotter opens Portfolio's confirmation, and
+    // nothing is sent.
+    cx.update_window(window.into(), |_, window, cx| {
+        let table = blotter.read(cx).table(BlotterTab::Positions);
+        let grid = table.read(cx).delegate().mirror();
+        grid.press("close-market", 110_000, window, cx);
+        window.render_frame(cx);
+        assert_eq!(portfolio.read(cx).open_dialog(), Some("close-market"));
+        assert!(staged.closes.borrow().is_empty());
+    })
+    .unwrap();
+}
+
+// ---- The fullscreen workspace --------------------------------------------
+
+/// Draw Markets as fullscreen, or not, and draw the window.
+fn fullscreen(
+    cx: &mut TestAppContext,
+    window: WindowHandle<Root>,
+    markets: &Entity<Markets>,
+    on: bool,
+) {
+    cx.update_window(window.into(), |_, window, cx| {
+        markets.update(cx, |m, cx| m.set_fullscreen(on, cx));
+        window.render_frame(cx);
+        // What the switch changed shows on the next frame.
+        window.render_frame(cx);
+    })
+    .unwrap();
+}
+
+#[gpui_kit::test]
+fn entering_fullscreen_shows_the_workspace_and_leaving_shows_channel_as_market(
+    cx: &mut TestAppContext,
+) {
+    let (window, desk, _dir) = open_with(cx, Some(&["BTC", "ETH", "xyz:NVDA"]));
+    let markets = go_to_markets(window, &desk, cx);
+    cx.update_window(window.into(), |_, window, _| {
+        assert!(window.try_find("markets-fixed").is_some());
+        assert!(window.try_find("markets-workspace").is_none());
+    })
+    .unwrap();
+
+    // Entering fullscreen: the workspace, with its panels.
+    fullscreen(cx, window, &markets, true);
+    cx.update_window(window.into(), |_, window, cx| {
+        assert!(window.try_find("markets-workspace").is_some());
+        assert!(window.try_find("markets-fixed").is_none());
+        let area = markets.read(cx).workspace_area().unwrap();
+        let panels = area
+            .read(cx)
+            .layout(gpui_kit::component::dock::DockPlacement::Center)
+            .unwrap()
+            .panels()
+            .count();
+        assert_eq!(panels, 7, "the Trader layout's panels");
+        assert!(window.try_find("blotter").is_some());
+        assert!(window.try_find("ticket-panel").is_some());
+    })
+    .unwrap();
+
+    // Leaving while channel A shows NVDA: the fixed layout, on NVDA.
+    cx.update(|cx| markets.update(cx, |m, _| m.set_channel_a("xyz:NVDA")));
+    fullscreen(cx, window, &markets, false);
+    cx.update_window(window.into(), |_, window, cx| {
+        assert!(window.try_find("markets-fixed").is_some());
+        assert!(window.try_find("markets-workspace").is_none());
+        assert_eq!(
+            markets.read(cx).selected_market(cx).as_deref(),
+            Some("xyz:NVDA")
+        );
+    })
+    .unwrap();
+}
+
+#[gpui_kit::test]
+fn coming_back_to_fullscreen_finds_the_panels_where_they_were(cx: &mut TestAppContext) {
+    let (window, desk, _dir) = open_with(cx, Some(&["BTC", "ETH"]));
+    let markets = go_to_markets(window, &desk, cx);
+    fullscreen(cx, window, &markets, true);
+    // The user changes the layout: here, a chart closed.
+    let before = cx
+        .update_window(window.into(), |_, window, cx| {
+            use gpui_kit::component::dock::DockPlacement;
+            let area = markets.read(cx).workspace_area().unwrap();
+            let count = |cx: &gpui_kit::App| {
+                area.read(cx)
+                    .layout(DockPlacement::Center)
+                    .unwrap()
+                    .panels()
+                    .count()
+            };
+            let chart = {
+                let a = area.read(cx);
+                a.layout(DockPlacement::Center)
+                    .unwrap()
+                    .panels()
+                    .find_map(|id| {
+                        a.panel(id)?
+                            .view()
+                            .downcast::<crate::markets::ChartPanel>()
+                            .ok()
+                    })
+                    .unwrap()
+            };
+            let was = count(cx);
+            area.update(cx, |a, cx| a.remove_panel(chart, window, cx));
+            assert_eq!(count(cx), was - 1);
+            // Sizes are what was last drawn.
+            window.render_frame(cx);
+            window.render_frame(cx);
+            let state = area.read(cx).dump(cx);
+            (area.entity_id(), state)
+        })
+        .unwrap();
+    fullscreen(cx, window, &markets, false);
+    fullscreen(cx, window, &markets, true);
+    cx.update_window(window.into(), |_, _, cx| {
+        let area = markets.read(cx).workspace_area().unwrap();
+        assert_eq!(area.entity_id(), before.0, "the same workspace");
+        assert_eq!(area.read(cx).dump(cx), before.1, "laid out as it was");
+    })
+    .unwrap();
+}
+
+#[gpui_kit::test]
+fn other_sections_look_the_same_in_fullscreen(cx: &mut TestAppContext) {
+    let (window, desk, _dir) = open_with(cx, Some(&["BTC", "ETH"]));
+    let markets = go_to_markets(window, &desk, cx);
+    fullscreen(cx, window, &markets, true);
+    for section in [Section::Portfolio, Section::Funding, Section::History] {
+        cx.update_window(window.into(), |_, window, cx| {
+            desk.update(cx, |d, cx| d.show(section, window, cx));
+            window.render_frame(cx);
+            assert!(
+                window.try_find("markets-workspace").is_none(),
+                "{section:?} shows no workspace"
+            );
+            assert_eq!(desk.read(cx).section(), Some(section));
+        })
+        .unwrap();
+    }
+    // Back on Markets, still fullscreen: the workspace again.
+    cx.update_window(window.into(), |_, window, cx| {
+        desk.update(cx, |d, cx| d.show(Section::Markets, window, cx));
+        window.render_frame(cx);
+        assert!(window.try_find("markets-workspace").is_some());
+    })
+    .unwrap();
 }

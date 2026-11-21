@@ -164,6 +164,8 @@ fn main() {
         .run(move |cx| {
             gpui_kit::init(cx);
             theme::install(cx);
+            // The workspace's panels can be rebuilt from a saved layout.
+            crate::markets::dock::register(cx);
             #[cfg(target_os = "macos")]
             set_dock_icon();
             let store = store();

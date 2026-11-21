@@ -298,7 +298,10 @@ impl Desk {
         {
             if to == Section::Markets && markets.is_none() {
                 let portfolio = portfolio.clone();
-                *markets = Some(cx.new(|cx| Markets::new(portfolio, window, cx)));
+                let view = cx.new(|cx| Markets::new(portfolio, window, cx));
+                let (history, funding) = (history.clone(), funding.clone());
+                view.update(cx, |view, cx| view.set_sources(history, funding, cx));
+                *markets = Some(view);
             }
             // The watchlist may have changed in Markets since Funding was
             // last shown.

@@ -266,6 +266,17 @@ impl Portfolio {
         }
     }
 
+    /// The positions list as Portfolio draws it, for a blotter to mirror:
+    /// its buttons are Portfolio's own.
+    pub fn positions_grid<'a>(&self, cx: &'a gpui_kit::App) -> &'a Grid {
+        self.positions.read(cx).delegate()
+    }
+
+    /// The open orders list as Portfolio draws it, for a blotter to mirror.
+    pub fn orders_grid<'a>(&self, cx: &'a gpui_kit::App) -> &'a Grid {
+        self.orders.read(cx).delegate()
+    }
+
     pub fn warn(&mut self, text: String, cx: &mut Context<Self>) {
         self.warning = Some(text.into());
         cx.notify();
@@ -1000,7 +1011,7 @@ impl Portfolio {
     /// The open dialog, if any, for a section other than this one to draw
     /// over itself: the order ticket opens from Markets.
     pub fn dialog_layer(&mut self, cx: &mut Context<Self>) -> Option<AnyElement> {
-        self.order_dialog(cx)
+        self.order_dialog(cx).or_else(|| self.ticket_dialog(cx))
     }
 }
 
@@ -1039,7 +1050,7 @@ impl Render for Portfolio {
             .child(self.tables(cx))
             // A confirmation or the amend form, over everything else here.
             .children(
-                self.order_dialog(cx)
+                self.dialog_layer(cx)
                     .map(|dialog| deferred(dialog).with_priority(3)),
             )
     }

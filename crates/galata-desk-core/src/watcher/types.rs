@@ -35,6 +35,15 @@ pub struct WatcherConfig {
     /// setting: then it is never written, since that watcher would refuse it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub pnl_summary: Option<bool>,
+    /// The quarter-hourly market update. `None` from a watcher that predates
+    /// it, and then never written.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub market_update: Option<bool>,
+    /// The markets the market update lists (`BTC`, `xyz:NVDA`), in order:
+    /// the desk keeps it equal to its own watchlist. `None` from a watcher
+    /// that predates it, and then never written.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub watchlist: Option<Vec<String>>,
     #[serde(default)]
     pub levels: Vec<Level>,
     /// Every other field, as read.
@@ -287,6 +296,25 @@ mod tests {
         assert!(!config.rest.contains_key("pnl_summary"));
         let written = serde_json::to_value(&config).unwrap();
         assert!(written.get("pnl_summary").is_none(), "an older watcher would refuse it");
+    }
+
+    #[test]
+    fn the_watchlist_and_market_update_are_written_only_when_the_watcher_has_them() {
+        let mut read: Value = serde_json::from_str(CONFIG).unwrap();
+        let older: WatcherConfig = serde_json::from_value(read.clone()).unwrap();
+        assert_eq!((older.market_update, older.watchlist.clone()), (None, None));
+        let written = serde_json::to_value(&older).unwrap();
+        assert!(written.get("watchlist").is_none() && written.get("market_update").is_none());
+
+        read["market_update"] = json!(true);
+        read["watchlist"] = json!(["BTC"]);
+        let mut config: WatcherConfig = serde_json::from_value(read).unwrap();
+        assert_eq!(config.market_update, Some(true));
+        assert!(!config.rest.contains_key("watchlist"));
+        config.watchlist = Some(vec!["ETH".into(), "xyz:NVDA".into()]);
+        let written = serde_json::to_value(&config).unwrap();
+        assert_eq!(written["watchlist"], json!(["ETH", "xyz:NVDA"]));
+        assert_eq!(written["market_update"], json!(true));
     }
 
     #[test]

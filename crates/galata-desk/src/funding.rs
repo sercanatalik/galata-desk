@@ -35,6 +35,7 @@ use gpui_kit::{
 };
 
 use crate::Core;
+use crate::grid::{Cell, Col, Grid, Tone};
 use crate::portfolio::Portfolio;
 use crate::theme::{MONO, Palette};
 use crate::ui;
@@ -741,7 +742,6 @@ impl Render for Funding {
                     .map(|(ix, (name, _))| cell(ix, div().child(*name).into_any_element())),
             );
 
-        let plain = Palette::text();
         // A figure that depends on the rate: a placeholder while rates load,
         // or a dash when the venue's rates do not include the market.
         let rates_loading = known.is_none();
@@ -770,11 +770,6 @@ impl Render for Funding {
         let mut position_rows = Vec::new();
         for row in rows.iter().flatten() {
             let market = MarketId::from_parts(&row.dex, &row.market);
-            let side = if row.size >= Decimal::ZERO {
-                Palette::gain()
-            } else {
-                Palette::loss()
-            };
             let name = h_flex()
                 .gap_2()
                 .font_family(MONO)
@@ -788,15 +783,7 @@ impl Render for Funding {
                         .child(format!("{}x", row.leverage)),
                 )
                 .into_any_element();
-            let (mut cells, text) = draw(&[
-                Some((f::size(row.size, &row.market), side)),
-                Some((f::usd(row.value), plain)),
-                row.rate.map(|r| (f::funding_hourly(r), plain)),
-                row.rate.map(|r| (f::funding_yearly(r), plain)),
-                row.per_hour.map(|v| (f::usd_signed(v), tone(v))),
-                row.per_day().map(|v| (f::usd_signed(v), tone(v))),
-                Some((f::usd_signed(row.since_open), tone(row.since_open))),
-            ]);
+            let (mut cells, text) = draw(&coloured(held_figures(row)));
             cells.insert(0, name);
             drawn.figures_by_row.push(text);
             position_rows.push(self.row(ix, &market, cells, window, cx));
@@ -816,17 +803,7 @@ impl Render for Funding {
                     )
                 })
                 .into_any_element();
-            // Nothing is held: only the rate columns have a figure.
-            let none = || Some((DASH.to_string(), Palette::muted()));
-            let (mut cells, text) = draw(&[
-                none(),
-                none(),
-                row.rate.map(|r| (f::funding_hourly(r), plain)),
-                row.rate.map(|r| (f::funding_yearly(r), plain)),
-                none(),
-                none(),
-                none(),
-            ]);
+            let (mut cells, text) = draw(&coloured(watched_figures(row)));
             cells.insert(0, name);
             drawn.figures_by_row.push(text);
             watched_rows.push(self.row(ix, &row.market, cells, window, cx));
@@ -966,6 +943,126 @@ impl Render for Funding {
                 .flex_shrink_0(),
             )
             .test_support()
+    }
+}
+
+/// A held position's figures after its market: size, value, the rate
+/// hourly and yearly, and the flows per hour, per day and since it opened.
+/// `None` where the rate is not known.
+fn held_figures(row: &funding::FundingRow) -> [Option<(String, Tone)>; 7] {
+    let signed = |v: Decimal| (f::usd_signed(v), Tone::signed(sign_of(v)));
+    [
+        Some((
+            f::size(row.size, &row.market),
+            if row.size >= Decimal::ZERO {
+                Tone::Gain
+            } else {
+                Tone::Loss
+            },
+        )),
+        Some((f::usd(row.value), Tone::Text)),
+        row.rate.map(|r| (f::funding_hourly(r), Tone::Text)),
+        row.rate.map(|r| (f::funding_yearly(r), Tone::Text)),
+        row.per_hour.map(signed),
+        row.per_day().map(signed),
+        Some(signed(row.since_open)),
+    ]
+}
+
+/// A watched market's figures: nothing is held, so only the rate columns
+/// have one.
+fn watched_figures(row: &WatchedRow) -> [Option<(String, Tone)>; 7] {
+    let none = || Some((DASH.to_string(), Tone::Muted));
+    [
+        none(),
+        none(),
+        row.rate.map(|r| (f::funding_hourly(r), Tone::Text)),
+        row.rate.map(|r| (f::funding_yearly(r), Tone::Text)),
+        none(),
+        none(),
+        none(),
+    ]
+}
+
+fn coloured(figures: [Option<(String, Tone)>; 7]) -> [Option<(String, Hsla)>; 7] {
+    figures.map(|f| f.map(|(text, tone)| (text, tone.color())))
+}
+
+fn sign_of(value: Decimal) -> i32 {
+    if value > Decimal::ZERO {
+        1
+    } else if value < Decimal::ZERO {
+        -1
+    } else {
+        0
+    }
+}
+
+impl Funding {
+    /// The table's rows as a list, for a blotter: the held positions, then
+    /// the watched markets, with the same figures this section shows.
+    pub fn blotter_grid(&self, cx: &Context<Self>) -> Grid {
+        let mut grid = Grid::new(
+            COLUMNS
+                .iter()
+                .enumerate()
+                .map(|(ix, (name, width))| {
+                    if ix == 0 {
+                        Col::text(name, 120. * width)
+                    } else {
+                        Col::number(name, 120. * width)
+                    }
+                })
+                .collect(),
+            "No open positions or watched markets",
+        );
+        let positions = self.positions(cx);
+        let rates = self.rates(cx);
+        let empty = FundingRates::new();
+        let known = rates.data.as_ref();
+        let Some(positions) = positions else {
+            grid.set_empty("Loading\u{2026}");
+            return grid;
+        };
+        let rows = funding::rows(&positions, known.unwrap_or(&empty));
+        let watched = funding::watched(
+            &self.watchlist(Some(&positions)),
+            &positions,
+            known.unwrap_or(&empty),
+        );
+        let line = |name: String, dex: &str, figures: [Option<(String, Tone)>; 7]| {
+            let mut name = Cell::text(name);
+            if !dex.is_empty() {
+                name = name.and(format!(" {dex}"), Tone::Tag);
+            }
+            std::iter::once(name)
+                .chain(figures.into_iter().map(|figure| match figure {
+                    Some((text, tone)) => Cell::new(text, tone),
+                    // As the section draws it: still loading, or none.
+                    None if known.is_none() => Cell::muted("..."),
+                    None => Cell::muted(DASH),
+                }))
+                .collect::<Vec<_>>()
+        };
+        let all = rows
+            .iter()
+            .map(|r| {
+                line(
+                    format!("{} {}x", r.market, r.leverage),
+                    &r.dex,
+                    held_figures(r),
+                )
+            })
+            .chain(watched.iter().map(|w| {
+                line(
+                    w.market.ticker().to_string(),
+                    w.market.dex(),
+                    watched_figures(w),
+                )
+            }))
+            .collect();
+        grid.set_rows(all);
+        grid
     }
 }
 

@@ -61,17 +61,25 @@ const PRICE_AXIS_WIDTH: f32 = 74.;
 /// The component kit draws a chart's highest value this far below its top.
 const PLOT_TOP_INSET: f32 = 10.;
 
+mod blotter;
 mod chart;
 mod detail;
+pub mod dock;
 mod model;
 mod position;
+mod ticket;
 mod tiles;
+mod workspace;
 
+#[cfg(test)]
+pub use blotter::{BlotterPanel, BlotterTab};
 pub use chart::ChartPanel;
 pub use detail::DetailPanel;
 use model::Account;
 pub use model::{MarketSource, MarketsModel};
 pub use position::PositionPanel;
+#[cfg(test)]
+pub use ticket::TicketPanel;
 pub use tiles::{Outline, TilesEvent, TilesHandler, TilesPanel};
 #[cfg(test)]
 use {
@@ -92,6 +100,13 @@ pub struct Markets {
     position: Entity<PositionPanel>,
     picker_open: bool,
     search: Entity<InputState>,
+    /// The fullscreen workspace, made the first time it is needed and kept.
+    workspace: Option<workspace::Workspace>,
+    /// Whether Markets was last drawn fullscreen, to notice the change.
+    was_fullscreen: bool,
+    /// Tests say whether the window is fullscreen.
+    #[cfg(test)]
+    fullscreen: Option<bool>,
     _subscriptions: Vec<Subscription>,
 }
 
@@ -125,6 +140,8 @@ impl Markets {
             }),
             // Anything the panels share redraws them.
             cx.observe(&model, |_, _, cx| cx.notify()),
+            // Going fullscreen, or leaving it, changes the layout.
+            cx.observe_window_bounds(window, |_, _, cx| cx.notify()),
         ];
 
         #[allow(unused_mut)]
@@ -136,12 +153,60 @@ impl Markets {
             position,
             picker_open: false,
             search,
+            workspace: None,
+            was_fullscreen: false,
+            #[cfg(test)]
+            fullscreen: None,
             _subscriptions: subscriptions,
         };
         #[cfg(feature = "shot")]
         this.preselect(cx);
         this.model.update(cx, |m, _| m.start());
         this
+    }
+
+    /// Whether the window is fullscreen: then Markets is the workspace.
+    fn is_fullscreen(&self, window: &Window) -> bool {
+        #[cfg(test)]
+        if let Some(fullscreen) = self.fullscreen {
+            return fullscreen;
+        }
+        window.is_fullscreen()
+    }
+
+    /// The window went fullscreen: show the workspace, made now if this is
+    /// the first time. A ticket panel in it takes the ticket again.
+    fn enter_workspace(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.workspace.is_none() {
+            self.workspace = Some(workspace::Workspace::new(&self.model, window, cx));
+        }
+        let docked = self.workspace.as_ref().is_some_and(|w| w.has_ticket(cx));
+        let portfolio = self.model.read(cx).portfolio.clone();
+        portfolio.update(cx, |p, cx| p.set_ticket_docked(docked, cx));
+    }
+
+    /// The window left fullscreen: the fixed layout shows channel A's market,
+    /// and the ticket opens over the screen again.
+    fn leave_workspace(&mut self, cx: &mut Context<Self>) {
+        let channel_a = self.workspace.as_ref().and_then(|w| w.channels[0].clone());
+        if let Some(market) = channel_a {
+            self.select(&market, cx);
+        }
+        let portfolio = self.model.read(cx).portfolio.clone();
+        portfolio.update(cx, |p, cx| p.set_ticket_docked(false, cx));
+    }
+
+    /// The History and Funding views, for the workspace's blotter.
+    pub fn set_sources(
+        &mut self,
+        history: Entity<crate::history::History>,
+        funding: Entity<crate::funding::Funding>,
+        cx: &mut Context<Self>,
+    ) {
+        self.model.update(cx, |m, _| {
+            m.history = Some(history);
+            m.funding = Some(funding);
+        });
     }
 
     /// Use this connection to the watcher, or none. The window calls this
@@ -674,17 +739,35 @@ impl Render for Markets {
                 .clone()
                 .update(cx, |p, cx| p.stage_ticket_shot(market, mid, window, cx));
         }
+        let fullscreen = self.is_fullscreen(window);
+        if fullscreen != self.was_fullscreen {
+            self.was_fullscreen = fullscreen;
+            if fullscreen {
+                self.enter_workspace(window, cx);
+            } else {
+                self.leave_workspace(cx);
+            }
+        }
         let padding = 12.;
-        v_flex()
+        let page = v_flex()
             .size_full()
             .p(px(padding))
             .gap_3()
             .child(self.toolbar(cx))
             .child(self.legend(&self.account(cx), cx))
-            .children(self.notices(cx))
-            // The selected market, above the tiles and always in view.
-            .children(self.panel(cx))
-            .child(div().flex_1().min_h_0().child(self.tiles.clone()))
+            .children(self.notices(cx));
+        match self.workspace.as_ref().filter(|_| fullscreen) {
+            Some(workspace) => page
+                .id("markets-workspace")
+                .child(div().flex_1().min_h_0().child(workspace.area.clone()))
+                .test_support(),
+            None => page
+                .id("markets-fixed")
+                // The selected market, above the tiles and always in view.
+                .children(self.panel(cx))
+                .child(div().flex_1().min_h_0().child(self.tiles.clone()))
+                .test_support(),
+        }
     }
 }
 
@@ -1678,6 +1761,24 @@ impl Markets {
     /// What every panel shares, for building panels beside the windowed ones.
     pub fn model(&self) -> Entity<MarketsModel> {
         self.model.clone()
+    }
+
+    /// Draw Markets as if the window were fullscreen, or not.
+    pub fn set_fullscreen(&mut self, fullscreen: bool, cx: &mut Context<Self>) {
+        self.fullscreen = Some(fullscreen);
+        cx.notify();
+    }
+
+    /// The workspace's dock area, once it has been made.
+    pub fn workspace_area(&self) -> Option<Entity<gpui_kit::component::dock::DockArea>> {
+        self.workspace.as_ref().map(|w| w.area.clone())
+    }
+
+    /// Show `market` on the workspace's channel A.
+    pub fn set_channel_a(&mut self, market: &str) {
+        if let Some(w) = &mut self.workspace {
+            w.channels[0] = Some(MarketId::new(market));
+        }
     }
 
     pub fn set_snapshot(&mut self, snapshot: MarketSnapshot, cx: &mut Context<Self>) {

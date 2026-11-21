@@ -325,6 +325,11 @@ impl History {
         this
     }
 
+    /// The trades list as History draws it, for a blotter to mirror.
+    pub fn trades_grid<'a>(&self, cx: &'a gpui_kit::App) -> &'a Grid {
+        self.trades.read(cx).delegate()
+    }
+
     /// The section is shown, or hidden: the feed loads and refreshes only
     /// while it is.
     pub fn set_shown(&mut self, shown: bool, cx: &mut Context<Self>) {

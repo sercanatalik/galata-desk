@@ -6,6 +6,10 @@
 //! seconds on the I/O runtime, and copies each snapshot in. Edits go through
 //! [`WatcherLink::save`], which the feed runs one at a time.
 //!
+//! It also keeps the watcher's `watchlist` equal to the desk's own, so the
+//! watcher's market update lists the markets watched here: see
+//! [`WatcherLink::sync_watchlist`].
+//!
 //! The headless tests give a link its snapshots and record its saves instead:
 //! nothing in a test ever reaches a watcher.
 
@@ -18,7 +22,6 @@ use galata_desk_core::watcher::{
 };
 use gpui_kit::{App, AppContext, Context, Entity, Task};
 
-#[cfg(not(test))]
 use crate::Core;
 
 /// How long without a successful check before the watcher is said to be
@@ -27,6 +30,9 @@ pub const STALLED_MS: u64 = 3 * 60 * 1000;
 
 pub struct WatcherLink {
     snapshot: WatcherSnapshot,
+    /// The watchlist being sent to the watcher, or one it would not take:
+    /// not sent again until the desk's list changes.
+    watchlist_tried: Option<Vec<String>>,
     #[cfg(not(test))]
     feed: WatcherFeed,
     #[cfg(not(test))]
@@ -69,6 +75,7 @@ impl WatcherLink {
                 });
                 Self {
                     snapshot: WatcherSnapshot::default(),
+                    watchlist_tried: None,
                     feed,
                     _watch,
                 }
@@ -78,6 +85,7 @@ impl WatcherLink {
                 let _ = (Client::new(url, token), &cx);
                 Self {
                     snapshot: WatcherSnapshot::default(),
+                    watchlist_tried: None,
                     saved: Vec::new(),
                     next_outcome: None,
                     mids: Default::default(),
@@ -93,6 +101,51 @@ impl WatcherLink {
     pub fn set_snapshot(&mut self, snapshot: WatcherSnapshot, cx: &mut Context<Self>) {
         self.snapshot = snapshot;
         cx.notify();
+        self.sync_watchlist(cx);
+    }
+
+    /// Write the desk's saved watchlist to the watcher when the two differ,
+    /// so its market update lists the markets watched here. Called with each
+    /// snapshot and whenever the desk's list changes.
+    ///
+    /// Nothing is written to a watcher that does not report a `watchlist`
+    /// (it predates the setting and would refuse it), to one that cannot be
+    /// edited now or watches another network, or before the desk has ever
+    /// saved a watchlist. A list the watcher refused is not sent again.
+    pub fn sync_watchlist(&mut self, cx: &mut Context<Self>) {
+        let core = Core::get(cx);
+        let Some(list) = core.store.watchlist() else {
+            return;
+        };
+        let wanted: Vec<String> = list
+            .markets()
+            .iter()
+            .map(|m| m.coin().to_string())
+            .collect();
+        let network = core.network;
+        let Some(config) = self.snapshot.editable() else {
+            return;
+        };
+        let Some(has) = &config.watchlist else {
+            return;
+        };
+        if config.network != network
+            || *has == wanted
+            || self.watchlist_tried.as_ref() == Some(&wanted)
+        {
+            return;
+        }
+        self.watchlist_tried = Some(wanted.clone());
+        let saving = self.save(move |c| c.watchlist = Some(wanted), cx);
+        cx.spawn(async move |this, cx| {
+            // Saved, or the configuration changed elsewhere first: either
+            // way the next snapshot decides again. Any other refusal stands
+            // until the desk's list changes.
+            if matches!(saving.await, Ok(_) | Err(WatcherError::Changed { .. })) {
+                let _ = this.update(cx, |link, _| link.watchlist_tried = None);
+            }
+        })
+        .detach();
     }
 
     /// Apply `edit` to the latest configuration and save it with that

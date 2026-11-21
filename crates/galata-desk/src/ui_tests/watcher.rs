@@ -706,6 +706,200 @@ fn older_levels() -> usize {
     recorded_config().levels.len()
 }
 
+/// The recorded configuration as a watcher with the market update reports
+/// it: the switch on, and `watchlist` as given.
+fn with_market_update(watchlist: &[&str]) -> WatcherConfig {
+    let mut config = recorded_config();
+    config.market_update = Some(true);
+    config.watchlist = Some(watchlist.iter().map(|m| m.to_string()).collect());
+    config
+}
+
+fn watchlist_saved(
+    link: &Entity<WatcherLink>,
+    cx: &mut TestAppContext,
+) -> Vec<Option<Vec<String>>> {
+    cx.update(|cx| {
+        link.read(cx)
+            .saved
+            .iter()
+            .map(|c| c.watchlist.clone())
+            .collect()
+    })
+}
+
+fn listed(markets: &[&str]) -> Option<Vec<String>> {
+    Some(markets.iter().map(|m| m.to_string()).collect())
+}
+
+#[gpui_kit::test]
+fn the_market_update_is_one_switch(cx: &mut TestAppContext) {
+    let (window, desk, link, _dir) = open_with_watcher(
+        cx,
+        answered(ConfigState::Read(with_market_update(&[])), now()),
+    );
+    let section = go_to_watcher(cx, window, &desk);
+    cx.update(|cx| assert_eq!(section.read(cx).market_update_shown(cx), Some(true)));
+    click(cx, window, "market-update");
+    cx.update(|cx| {
+        assert_eq!(
+            link.read(cx).saved.last().unwrap().market_update,
+            Some(false)
+        );
+        assert_eq!(section.read(cx).market_update_shown(cx), Some(false));
+        assert_eq!(
+            section.read(cx).message(),
+            Some(("Market update off.".into(), false))
+        );
+    });
+    click(cx, window, "market-update");
+    cx.update(|cx| {
+        assert_eq!(
+            link.read(cx).saved.last().unwrap().market_update,
+            Some(true)
+        )
+    });
+}
+
+#[gpui_kit::test]
+fn an_older_watcher_gets_no_market_update_switch_and_no_watchlist(cx: &mut TestAppContext) {
+    let (window, desk, link, dir) = configured(cx);
+    Store::at(dir.path())
+        .save_watchlist(&super::watchlist(&["BTC", "xyz:NVDA"]))
+        .unwrap();
+    cx.update(|cx| {
+        link.update(cx, |l, cx| {
+            let again = l.snapshot().clone();
+            l.set_snapshot(again, cx);
+        })
+    });
+    cx.run_until_parked();
+    assert!(
+        watchlist_saved(&link, cx).is_empty(),
+        "it would refuse the field"
+    );
+    go_to_watcher(cx, window, &desk);
+    cx.update_window(window.into(), |_, window, cx| {
+        window.render_frame(cx);
+        assert!(window.try_find("market-update").is_none());
+        assert!(window.try_find("pnl-summary").is_some());
+    })
+    .unwrap();
+}
+
+#[gpui_kit::test]
+fn the_desks_watchlist_is_written_to_the_watcher_and_follows_it(cx: &mut TestAppContext) {
+    let (window, desk, link, dir) = open_with_watcher(
+        cx,
+        answered(ConfigState::Read(with_market_update(&[])), now()),
+    );
+    assert!(
+        watchlist_saved(&link, cx).is_empty(),
+        "nothing is written before the desk has a saved watchlist"
+    );
+
+    // The next snapshot finds the desk's list differs from the watcher's.
+    Store::at(dir.path())
+        .save_watchlist(&super::watchlist(&["BTC", "xyz:NVDA", "ETH"]))
+        .unwrap();
+    cx.update(|cx| {
+        link.update(cx, |l, cx| {
+            let again = l.snapshot().clone();
+            l.set_snapshot(again, cx);
+        })
+    });
+    cx.run_until_parked();
+    assert_eq!(
+        watchlist_saved(&link, cx),
+        [listed(&["BTC", "xyz:NVDA", "ETH"])],
+        "written once, in the desk's order"
+    );
+    cx.update(|cx| {
+        let saved = link.read(cx).saved.last().unwrap().clone();
+        assert_eq!(
+            saved.levels,
+            recorded_config().levels,
+            "nothing else changes"
+        );
+        assert_eq!(saved.market_update, Some(true));
+    });
+
+    // Removing a market in Markets writes the shorter list at once.
+    super::go_to_markets(window, &desk, cx);
+    cx.update_window(window.into(), |_, window, cx| {
+        window.render_frame(cx);
+        window.hover(("tile", 1usize), cx);
+        window.render_frame(cx);
+        window.click(("remove", 1usize), cx);
+        window.render_frame(cx);
+    })
+    .unwrap();
+    cx.run_until_parked();
+    assert_eq!(
+        watchlist_saved(&link, cx).last().unwrap(),
+        &listed(&["BTC", "ETH"])
+    );
+}
+
+#[gpui_kit::test]
+fn a_watchlist_is_not_written_to_another_network_or_twice_when_refused(cx: &mut TestAppContext) {
+    // Watching another network: its markets are not the ones shown here.
+    let mut other = with_market_update(&[]);
+    other.network = galata_desk_core::network::Network::Testnet;
+    let (_window, _desk, link, dir) =
+        open_with_watcher(cx, answered(ConfigState::Read(other), now()));
+    Store::at(dir.path())
+        .save_watchlist(&super::watchlist(&["BTC"]))
+        .unwrap();
+    let again = |link: &Entity<WatcherLink>, cx: &mut TestAppContext| {
+        cx.update(|cx| {
+            link.update(cx, |l, cx| {
+                let again = l.snapshot().clone();
+                l.set_snapshot(again, cx);
+            })
+        });
+        cx.run_until_parked();
+    };
+    again(&link, cx);
+    assert!(watchlist_saved(&link, cx).is_empty());
+
+    // Refused: the same list is not sent again with every snapshot.
+    let (_window, _desk, link, dir) = open_with_watcher(
+        cx,
+        answered(ConfigState::Read(with_market_update(&[])), now()),
+    );
+    Store::at(dir.path())
+        .save_watchlist(&super::watchlist(&["BTC"]))
+        .unwrap();
+    cx.update(|cx| {
+        link.update(cx, |l, _| {
+            l.next_outcome = Some(WatcherError::Refused {
+                problems: vec!["`watchlist`: no".into()],
+            })
+        })
+    });
+    again(&link, cx);
+    again(&link, cx);
+    assert!(
+        watchlist_saved(&link, cx).is_empty(),
+        "refused once, not retried"
+    );
+
+    // Changed elsewhere: tried again with the next snapshot.
+    Store::at(dir.path())
+        .save_watchlist(&super::watchlist(&["BTC", "ETH"]))
+        .unwrap();
+    cx.update(|cx| {
+        link.update(cx, |l, _| {
+            l.next_outcome = Some(WatcherError::Changed { version: 9 })
+        })
+    });
+    again(&link, cx);
+    assert!(watchlist_saved(&link, cx).is_empty());
+    again(&link, cx);
+    assert_eq!(watchlist_saved(&link, cx), [listed(&["BTC", "ETH"])]);
+}
+
 #[gpui_kit::test]
 fn the_near_liquidation_distance_is_tuned_within_its_range(cx: &mut TestAppContext) {
     let (window, desk, link, _dir) = configured(cx);

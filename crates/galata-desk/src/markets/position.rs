@@ -17,6 +17,7 @@ use gpui_kit::{
     TestSupportExt, Window, div, px,
 };
 
+use super::dock::{DockMeta, PanelKind, PanelRecord, dock_panel, market_name};
 use super::model::{MarketSource, MarketsModel};
 use super::section_title;
 use crate::Core;
@@ -43,8 +44,12 @@ pub struct PositionPanel {
     alert_price: Entity<InputState>,
     alert_near_liq: Entity<InputState>,
     alert_message: Option<(SharedString, bool)>,
+    /// Its key and links in the workspace.
+    dock: DockMeta,
     _subscriptions: Vec<Subscription>,
 }
+
+dock_panel!(PositionPanel, PanelKind::Position);
 
 impl PositionPanel {
     pub fn new(
@@ -71,7 +76,28 @@ impl PositionPanel {
             alert_price: cx.new(|cx| InputState::new(window, cx).placeholder("Price")),
             alert_near_liq: cx.new(|cx| InputState::new(window, cx).placeholder("15")),
             alert_message: None,
+            dock: DockMeta::fresh(cx),
             _subscriptions: subscriptions,
+        }
+    }
+
+    /// The same panel, with a saved panel's key and links.
+    pub fn with_dock(mut self, dock: DockMeta) -> Self {
+        self.dock = dock;
+        self
+    }
+
+    /// What the panel saves in a layout.
+    pub fn record(&self, cx: &gpui_kit::App) -> PanelRecord {
+        self.dock
+            .record(PanelKind::Position, self.market(cx).as_ref(), None)
+    }
+
+    /// The panel's title: the market whose position it shows.
+    pub fn title_text(&self, cx: &gpui_kit::App) -> String {
+        match self.market(cx) {
+            Some(market) => format!("Position \u{b7} {}", market_name(&market)),
+            None => "Position".to_string(),
         }
     }
 

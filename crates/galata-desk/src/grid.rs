@@ -44,7 +44,7 @@ impl Tone {
         }
     }
 
-    fn color(self) -> Hsla {
+    pub(crate) fn color(self) -> Hsla {
         match self {
             Tone::Text => Palette::text(),
             Tone::Muted | Tone::Tag => Palette::muted(),
@@ -149,7 +149,7 @@ impl Cell {
         &self.buttons
     }
 
-    fn plain(&self) -> String {
+    pub fn plain(&self) -> String {
         self.parts
             .iter()
             .map(|(t, _)| t.as_ref())
@@ -287,6 +287,43 @@ impl Grid {
     #[cfg(test)]
     pub fn cell(&self, row_ix: usize, col_ix: usize) -> Option<&Cell> {
         self.row(row_ix).and_then(|r| r.get(col_ix))
+    }
+
+    /// A copy with the same columns, rows and button handler, for drawing
+    /// the same list in a second place. Its sort is its own.
+    pub fn mirror(&self) -> Grid {
+        let mut grid = Grid {
+            cols: self.cols.clone(),
+            rows: Vec::new(),
+            keys: Vec::new(),
+            sort: None,
+            order: Vec::new(),
+            empty: self.empty.clone(),
+            on_press: self.on_press.clone(),
+        };
+        grid.copy_rows_from(self);
+        grid
+    }
+
+    /// Take `other`'s rows and what it says when empty, keeping this grid's
+    /// own sort.
+    pub fn copy_rows_from(&mut self, other: &Grid) {
+        self.empty = other.empty.clone();
+        self.set_keyed_rows(other.rows.clone(), other.keys.clone());
+    }
+
+    /// Press a row button, as a click on it does, for tests.
+    #[cfg(test)]
+    pub fn press(&self, id: &'static str, key: u64, window: &mut Window, cx: &mut App) {
+        if let Some(on_press) = &self.on_press {
+            on_press(id, key, window, cx);
+        }
+    }
+
+    /// How many columns the list has, for tests.
+    #[cfg(test)]
+    pub fn col_count(&self) -> usize {
+        self.cols.len()
     }
 
     /// Report presses of row buttons to `on_press`.

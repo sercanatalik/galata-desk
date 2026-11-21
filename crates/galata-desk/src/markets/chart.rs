@@ -16,6 +16,7 @@ use gpui_kit::{
     AnyElement, Context, Entity, SharedString, Subscription, TestSupportExt, Window, div, px,
 };
 
+use super::dock::{DockMeta, PanelKind, PanelRecord, dock_panel, market_name};
 use super::model::{MarketSource, MarketsModel};
 use super::{
     CallMenu, Calls, Entry, OrderLevel, PlotPointer, candle_chart, ghost_candles, interval_words,
@@ -40,11 +41,37 @@ pub struct ChartPanel {
     /// market. The windowed chart follows the selection, which the feed
     /// charts anyway, and holds nothing.
     held: Option<ChartKey>,
+    /// Its key and links in the workspace.
+    dock: DockMeta,
     _subscriptions: Vec<Subscription>,
 }
 
+dock_panel!(ChartPanel, PanelKind::Chart);
+
 impl ChartPanel {
     pub fn new(model: Entity<MarketsModel>, source: MarketSource, cx: &mut Context<Self>) -> Self {
+        let dock = DockMeta::fresh(cx);
+        Self::build(model, source, None, dock, cx)
+    }
+
+    /// A workspace chart of its own market and period.
+    pub fn docked(
+        model: Entity<MarketsModel>,
+        market: Option<MarketId>,
+        period: Option<MarketPeriod>,
+        dock: DockMeta,
+        cx: &mut Context<Self>,
+    ) -> Self {
+        Self::build(model, MarketSource::Own(market), period, dock, cx)
+    }
+
+    fn build(
+        model: Entity<MarketsModel>,
+        source: MarketSource,
+        period: Option<MarketPeriod>,
+        dock: DockMeta,
+        cx: &mut Context<Self>,
+    ) -> Self {
         let subscriptions = vec![
             cx.observe(&model, |_, _, cx| cx.notify()),
             // Fills, orders and the entry are the portfolio's.
@@ -62,8 +89,9 @@ impl ChartPanel {
             drawn_chart: std::cell::Cell::new(("none", 0, 0, None)),
             plot: PlotPointer::default(),
             call_problem: None,
-            period: None,
+            period,
             held: None,
+            dock,
             _subscriptions: subscriptions,
         };
         this.hold(cx);
@@ -73,6 +101,24 @@ impl ChartPanel {
     /// The period the chart covers: its own, or the toolbar's.
     pub fn period(&self, cx: &gpui_kit::App) -> MarketPeriod {
         self.period.unwrap_or(self.model.read(cx).period)
+    }
+
+    /// What the chart saves in a layout.
+    pub fn record(&self, cx: &gpui_kit::App) -> PanelRecord {
+        self.dock
+            .record(PanelKind::Chart, self.market(cx).as_ref(), self.period)
+    }
+
+    /// The panel's title: the market and the period it covers.
+    pub fn title_text(&self, cx: &gpui_kit::App) -> String {
+        match self.market(cx) {
+            Some(market) => format!(
+                "{} \u{b7} {}",
+                market_name(&market),
+                self.period(cx).label()
+            ),
+            None => "Chart".to_string(),
+        }
     }
 
     /// Cover `period`, or follow the toolbar's with `None`.

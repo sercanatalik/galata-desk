@@ -19,6 +19,7 @@ use gpui_kit::{
 };
 use std::collections::HashMap;
 
+use super::dock::{DockMeta, PanelKind, PanelRecord, dock_panel};
 use super::model::{Account, MarketsModel};
 use super::{DASH, GAP, SOFT, TILE_HEIGHT, TILE_MIN, TileBounds, dex_tag, range_bar};
 use crate::market_tile;
@@ -61,8 +62,12 @@ pub struct TilesPanel {
     on_event: TilesHandler,
     /// How wide the panel was last drawn, which decides how many columns fit.
     width: std::rc::Rc<std::cell::Cell<Option<Pixels>>>,
+    /// Its key and links in the workspace.
+    dock: DockMeta,
     _subscriptions: Vec<Subscription>,
 }
+
+dock_panel!(TilesPanel, PanelKind::Tiles);
 
 /// What the holder runs for each [`TilesEvent`].
 pub type TilesHandler = std::rc::Rc<dyn Fn(&TilesEvent, &mut Window, &mut gpui_kit::App)>;
@@ -84,8 +89,30 @@ impl TilesPanel {
             tile_bounds: TileBounds::default(),
             on_event,
             width: Default::default(),
+            dock: DockMeta::fresh(cx),
             _subscriptions: subscriptions,
         }
+    }
+
+    /// The same panel, with a saved panel's key and links.
+    pub fn with_dock(mut self, dock: DockMeta) -> Self {
+        self.dock = dock;
+        self
+    }
+
+    /// What the panel saves in a layout: the tile it outlines.
+    pub fn record(&self, cx: &gpui_kit::App) -> PanelRecord {
+        let outlined = match &self.outline {
+            Outline::Own(market) => market.clone(),
+            Outline::Watchlist => None,
+        };
+        let _ = cx;
+        self.dock.record(PanelKind::Tiles, outlined.as_ref(), None)
+    }
+
+    /// The panel's title.
+    pub fn title_text(&self, _: &gpui_kit::App) -> String {
+        "Watchlist".to_string()
     }
 
     /// The market whose tile is outlined.

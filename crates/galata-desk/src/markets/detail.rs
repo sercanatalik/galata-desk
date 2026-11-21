@@ -9,6 +9,7 @@ use gpui_kit::component::{h_flex, v_flex};
 use gpui_kit::prelude::*;
 use gpui_kit::{AnyElement, Context, Entity, Subscription, TestSupportExt, Window, div, px};
 
+use super::dock::{DockMeta, PanelKind, PanelRecord, dock_panel, market_name};
 use super::model::{MarketSource, MarketsModel};
 use super::{DETAIL_WIDTH, dex_tag, sign};
 use crate::portfolio::Portfolio;
@@ -19,8 +20,12 @@ pub struct DetailPanel {
     model: Entity<MarketsModel>,
     portfolio: Entity<Portfolio>,
     source: MarketSource,
+    /// Its key and links in the workspace.
+    dock: DockMeta,
     _subscriptions: Vec<Subscription>,
 }
+
+dock_panel!(DetailPanel, PanelKind::Detail);
 
 impl DetailPanel {
     pub fn new(model: Entity<MarketsModel>, source: MarketSource, cx: &mut Context<Self>) -> Self {
@@ -30,7 +35,28 @@ impl DetailPanel {
             model,
             portfolio,
             source,
+            dock: DockMeta::fresh(cx),
             _subscriptions: subscriptions,
+        }
+    }
+
+    /// The same panel, with a saved panel's key and links.
+    pub fn with_dock(mut self, dock: DockMeta) -> Self {
+        self.dock = dock;
+        self
+    }
+
+    /// What the panel saves in a layout.
+    pub fn record(&self, cx: &gpui_kit::App) -> PanelRecord {
+        self.dock
+            .record(PanelKind::Detail, self.market(cx).as_ref(), None)
+    }
+
+    /// The panel's title: the market it describes.
+    pub fn title_text(&self, cx: &gpui_kit::App) -> String {
+        match self.market(cx) {
+            Some(market) => market_name(&market),
+            None => "Market detail".to_string(),
         }
     }
 
@@ -75,9 +101,8 @@ impl DetailPanel {
                 .accessibility_label(name)
                 .on_click(cx.listener(move |this, _, window, cx| {
                     let market = market.clone();
-                    this.portfolio.update(cx, |portfolio, cx| {
-                        portfolio.open_ticket(market, buy, window, cx)
-                    });
+                    this.portfolio
+                        .update(cx, |portfolio, cx| portfolio.trade(market, buy, window, cx));
                 }))
         };
         h_flex()

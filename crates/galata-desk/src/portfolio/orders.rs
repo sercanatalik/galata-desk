@@ -397,8 +397,6 @@ pub(super) enum Dialog {
     },
     /// A close, Close all, or a take-profit and stop-loss change.
     Position(super::positions::PositionDialog),
-    /// The order ticket.
-    Ticket(Box<super::ticket::Ticket>),
 }
 
 #[derive(Clone, Copy, PartialEq)]
@@ -433,12 +431,22 @@ pub struct Actions {
     pub(super) availability: Result<(), Unavailable>,
     pub(super) wallet: Option<String>,
     pub(super) dialog: Option<Dialog>,
+    /// The order ticket. It has a slot of its own, apart from the
+    /// confirmations, so it can stay open in a docked panel while one of
+    /// them is open over the screen.
+    pub(super) ticket: Option<Box<super::ticket::Ticket>>,
+    /// A ticket panel is docked in the Markets workspace: the ticket is drawn
+    /// there, not over the screen.
+    pub(super) ticket_docked: bool,
+    /// Fetching what the ticket needs: its market, the account's limits in
+    /// it, and its mid.
+    pub(super) ticket_pricing: Option<Task<()>>,
     pub(super) pending: Option<Pending>,
     pub(super) report: Option<Report>,
     pub(super) task: Option<Task<()>>,
     /// Fetching the mid prices a market close needs.
     pub(super) pricing: Option<Task<()>>,
-    focus: FocusHandle,
+    pub(super) focus: FocusHandle,
     /// How many times the orders were asked for again after an action.
     pub(super) refreshes: usize,
     /// A screenshot run's state to show once the orders have loaded.
@@ -463,6 +471,9 @@ impl Actions {
             availability,
             wallet,
             dialog: None,
+            ticket: None,
+            ticket_docked: false,
+            ticket_pricing: None,
             pending: None,
             report: None,
             task: None,
@@ -782,9 +793,15 @@ impl Portfolio {
         cx.notify();
     }
 
+    /// Close the confirmation that is open; with none, the ticket drawn over
+    /// the screen, which is then the one dialog showing.
     pub(super) fn close_dialog(&mut self, cx: &mut Context<Self>) {
-        self.actions.dialog = None;
-        self.actions.pricing = None;
+        if self.actions.dialog.is_some() {
+            self.actions.dialog = None;
+            self.actions.pricing = None;
+        } else if !self.actions.ticket_docked {
+            self.close_ticket(cx);
+        }
         cx.notify();
     }
 
@@ -818,7 +835,6 @@ impl Portfolio {
         };
         match dialog {
             Dialog::Position(dialog) => self.confirm_position(dialog, cx),
-            Dialog::Ticket(ticket) => self.confirm_ticket(ticket, cx),
             Dialog::Cancel(order) => {
                 let reply = self.actions.trading.cancel(vec![target(&order)]);
                 self.send(
@@ -1068,7 +1084,6 @@ impl Portfolio {
 
         let (id, title, body, buttons): (&'static str, String, AnyElement, AnyElement) = match dialog {
             Dialog::Position(dialog) => return self.position_dialog(dialog, cx),
-            Dialog::Ticket(ticket) => return self.ticket_dialog(ticket, cx),
             Dialog::Cancel(order) => (
                 "cancel-dialog",
                 "Cancel this order?".into(),
@@ -1602,16 +1617,20 @@ impl Portfolio {
         }
     }
 
-    /// Which dialog is open: `cancel`, `cancel-all` or `amend`.
+    /// Which dialog is open over the screen: `cancel`, `cancel-all`,
+    /// `amend`, a position dialog, or `ticket`.
     pub fn open_dialog(&self) -> Option<&'static str> {
-        self.actions.dialog.as_ref().map(|d| match d {
-            Dialog::Cancel(_) => "cancel",
-            Dialog::CancelAll(_, None) => "cancel-all",
-            Dialog::CancelAll(_, Some(_)) => "cancel-market",
-            Dialog::Amend { .. } => "amend",
-            Dialog::Position(d) => d.name(),
-            Dialog::Ticket(_) => "ticket",
-        })
+        match &self.actions.dialog {
+            Some(d) => Some(match d {
+                Dialog::Cancel(_) => "cancel",
+                Dialog::CancelAll(_, None) => "cancel-all",
+                Dialog::CancelAll(_, Some(_)) => "cancel-market",
+                Dialog::Amend { .. } => "amend",
+                Dialog::Position(d) => d.name(),
+            }),
+            None if self.actions.ticket.is_some() && !self.actions.ticket_docked => Some("ticket"),
+            None => None,
+        }
     }
 
     /// The order ids an action is in progress for.

@@ -237,6 +237,15 @@ impl WatcherSection {
         self.save(move |c| c.pnl_summary = Some(on), done, cx);
     }
 
+    fn set_market_update(&mut self, on: bool, cx: &mut Context<Self>) {
+        let done = if on {
+            "Market update on."
+        } else {
+            "Market update off."
+        };
+        self.save(move |c| c.market_update = Some(on), done, cx);
+    }
+
     fn save_near_liq(&mut self, cx: &mut Context<Self>) {
         let text = self
             .near_liq
@@ -528,16 +537,25 @@ impl WatcherSection {
     fn stops_panel(&self, editable: bool, cx: &mut Context<Self>) -> AnyElement {
         let on = self.stop_alerts_on(cx);
         let summary = self.pnl_summary_on(cx);
+        let update = self.market_update_on(cx);
+        let mut about =
+            "An alert each time a take-profit or stop-loss order fills, on every ticker".to_string();
+        about.push_str(match (summary.is_some(), update.is_some()) {
+            (true, true) => {
+                ", a PnL summary every half hour and the watchlist's prices every 15 minutes, from 07:00 to 23:00."
+            }
+            (true, false) => ", and a PnL summary every half hour from 07:00 to 22:30.",
+            (false, true) => {
+                ", and the watchlist's prices every 15 minutes from 07:00 to 22:45."
+            }
+            (false, false) => ".",
+        });
         ui::panel()
             .px_5()
             .py_4()
             .gap_2()
             .child(heading("ALERTS"))
-            .child(ui::label(if summary.is_some() {
-                "An alert each time a take-profit or stop-loss order fills, on every ticker, and a PnL summary every half hour from 07:00 to 22:30."
-            } else {
-                "An alert each time a take-profit or stop-loss order fills, on every ticker."
-            }))
+            .child(ui::label(about))
             .child(
                 h_flex()
                     .gap_3()
@@ -580,7 +598,37 @@ impl WatcherSection {
                             ),
                     )
             }))
+            .children(update.map(|on| {
+                h_flex()
+                    .gap_3()
+                    .py(px(4.))
+                    .child(div().flex_1().child("Market update every 15 minutes"))
+                    .child(
+                        div()
+                            .text_size(px(12.5))
+                            .text_color(Palette::muted())
+                            .child(if on { "on" } else { "off" }),
+                    )
+                    .child(
+                        Switch::new("market-update")
+                            .checked(on)
+                            .disabled(!editable)
+                            .accessibility_label("Market update every 15 minutes")
+                            .on_click(cx.listener(|this, on: &bool, _, cx| {
+                                this.set_market_update(*on, cx)
+                            })),
+                    )
+            }))
             .into_any_element()
+    }
+
+    /// The market update switch's state, when the watcher reports the
+    /// setting: the watchlist's last prices and 24-hour changes, on Telegram.
+    fn market_update_on(&self, cx: &gpui_kit::App) -> Option<bool> {
+        self.snapshot(cx)
+            .config
+            .config()
+            .and_then(|c| c.market_update)
     }
 
     /// The PnL summary switch's state, when the watcher reports the setting.
@@ -809,6 +857,11 @@ impl WatcherSection {
     /// The PnL summary switch as drawn: `None` when it is not shown.
     pub fn pnl_summary_shown(&self, cx: &gpui_kit::App) -> Option<bool> {
         self.pnl_summary_on(cx)
+    }
+
+    /// The market update switch as drawn: `None` when it is not shown.
+    pub fn market_update_shown(&self, cx: &gpui_kit::App) -> Option<bool> {
+        self.market_update_on(cx)
     }
 
     pub fn set_near_liq_text(&self, text: &str, window: &mut Window, cx: &mut Context<Self>) {

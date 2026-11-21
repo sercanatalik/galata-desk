@@ -21,8 +21,8 @@ use gpui_kit::component::input::{InputEvent, InputState};
 use gpui_kit::{App, ElementId, Subscription};
 
 use super::orders::{
-    Acting, Dialog, Doing, Report, explain, facts, field, go_button, keep_button, message_line,
-    mono, network_badge, note, refused, signer, unsent,
+    Acting, Doing, Report, explain, facts, field, message_line, mono, network_badge, note, refused,
+    signer, unsent,
 };
 use super::*;
 
@@ -166,18 +166,131 @@ impl Portfolio {
         };
         // A result from an earlier action is not this ticket's.
         self.actions.report = None;
-        self.open(Dialog::Ticket(Box::new(ticket)), window, cx);
+        self.actions.ticket = Some(Box::new(ticket));
+        if self.actions.ticket_docked {
+            // The panel holds it: keys go to its size field.
+            self.focus_ticket(window, cx);
+        } else {
+            // Over the screen, keys go to the dialog: Escape backs out.
+            window.focus(&self.actions.focus, cx);
+        }
         self.fetch_ticket_facts(market, cx);
+        cx.notify();
+    }
+
+    /// Buy or Sell pressed on `market`: a docked ticket is filled and
+    /// focused; without one, the ticket opens over the screen.
+    pub fn trade(
+        &mut self,
+        market: MarketId,
+        buy: bool,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if self.actions.ticket_docked {
+            self.fill_ticket(market, buy, window, cx);
+        } else {
+            self.open_ticket(market, buy, window, cx);
+        }
+    }
+
+    /// Whether a ticket panel is docked.
+    #[allow(
+        dead_code,
+        reason = "the workspace's Add panel menu (task 3.8) reads it"
+    )]
+    pub fn ticket_is_docked(&self) -> bool {
+        self.actions.ticket_docked
+    }
+
+    /// Put `market` and the side in the ticket. A docked ticket that is
+    /// still being filled in for this market keeps what was typed and only
+    /// changes side; anything else starts a new ticket.
+    fn fill_ticket(
+        &mut self,
+        market: MarketId,
+        buy: bool,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        match self.ticket_mut() {
+            Some(t) if t.market == market => {
+                t.buy = buy;
+                self.focus_ticket(window, cx);
+                cx.notify();
+            }
+            _ => self.open_ticket(market, buy, window, cx),
+        }
+    }
+
+    /// Move the keyboard to the ticket's size field.
+    pub fn focus_ticket(&self, window: &mut Window, cx: &mut App) {
+        if let Some(t) = &self.actions.ticket {
+            t.size.update(cx, |input, cx| input.focus(window, cx));
+        }
+    }
+
+    /// Whether the keyboard is in the ticket's size field.
+    #[cfg(test)]
+    pub fn ticket_focused(&self, window: &Window, cx: &App) -> bool {
+        self.actions.ticket.as_ref().is_some_and(|t| {
+            use gpui_kit::Focusable as _;
+            t.size.read(cx).focus_handle(cx).is_focused(window)
+        })
+    }
+
+    /// Whether a ticket panel is docked, so the ticket is drawn there.
+    pub fn set_ticket_docked(&mut self, docked: bool, cx: &mut Context<Self>) {
+        if self.actions.ticket_docked != docked {
+            self.actions.ticket_docked = docked;
+            // A ticket left over the screen goes with its panel, and the
+            // panel does not take over one that was open over the screen.
+            self.close_ticket(cx);
+        }
+    }
+
+    /// Close the ticket. Its form, and anything it was fetching, go with it.
+    pub(super) fn close_ticket(&mut self, cx: &mut Context<Self>) {
+        if self.actions.ticket.take().is_some() {
+            self.actions.ticket_pricing = None;
+            cx.notify();
+        }
+    }
+
+    /// Cancel or Done in the ticket. Over the screen the ticket closes; in a
+    /// docked panel it starts again, empty, on the same market and side.
+    fn finish_ticket(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let again = self
+            .actions
+            .ticket
+            .as_ref()
+            .filter(|_| self.actions.ticket_docked)
+            .map(|t| (t.market.clone(), t.buy));
+        self.close_ticket(cx);
+        if let Some((market, buy)) = again {
+            self.open_ticket(market, buy, window, cx);
+        }
+    }
+
+    /// Place the order the ticket shows. The ticket's button is the
+    /// confirmation: it is enabled only while the form checks out.
+    fn place_ticket(&mut self, cx: &mut Context<Self>) {
+        if !self.can_act() {
+            return;
+        }
+        if let Some(t) = self.actions.ticket.take() {
+            self.confirm_ticket(t, cx);
+        }
     }
 
     /// Ask the venue what the ticket needs: the market's number and size
     /// step, what the account can trade in it, and its mid.
     fn fetch_ticket_facts(&mut self, market: MarketId, cx: &mut Context<Self>) {
         let trading = self.actions.trading.clone();
-        self.actions.pricing = Some(cx.spawn(async move |this, cx| {
+        self.actions.ticket_pricing = Some(cx.spawn(async move |this, cx| {
             fn still<'a>(this: &'a mut Portfolio, market: &MarketId) -> Option<&'a mut Ticket> {
-                match &mut this.actions.dialog {
-                    Some(Dialog::Ticket(t)) if &t.market == market => Some(t),
+                match &mut this.actions.ticket {
+                    Some(t) if &t.market == market => Some(t),
                     _ => None,
                 }
             }
@@ -228,7 +341,7 @@ impl Portfolio {
     }
 
     fn retry_ticket(&mut self, cx: &mut Context<Self>) {
-        let Some(Dialog::Ticket(t)) = &mut self.actions.dialog else {
+        let Some(t) = &mut self.actions.ticket else {
             return;
         };
         t.asset = Fetch::Loading;
@@ -240,8 +353,8 @@ impl Portfolio {
     }
 
     fn ticket_mut(&mut self) -> Option<&mut Ticket> {
-        match &mut self.actions.dialog {
-            Some(Dialog::Ticket(t)) if !t.sent => Some(t),
+        match &mut self.actions.ticket {
+            Some(t) if !t.sent => Some(t),
             _ => None,
         }
     }
@@ -431,7 +544,7 @@ impl Portfolio {
         let checked = self.ticket_check(&t, cx);
         let (Ok((order, pricing)), Some(asset)) = (checked, t.asset.got().copied()) else {
             // The button is disabled while the form is not valid.
-            self.actions.dialog = Some(Dialog::Ticket(t));
+            self.actions.ticket = Some(t);
             return;
         };
         let new_order = NewOrder {
@@ -453,7 +566,7 @@ impl Portfolio {
             at_market: t.at_market,
         };
         t.sent = true;
-        self.actions.dialog = Some(Dialog::Ticket(t));
+        self.actions.ticket = Some(t);
         self.send_for(
             Vec::new(),
             vec![asset.number],
@@ -465,7 +578,45 @@ impl Portfolio {
     }
 
     /// The ticket, over the screen.
-    pub(super) fn ticket_dialog(&self, t: &Ticket, cx: &mut Context<Self>) -> Option<AnyElement> {
+    /// The ticket over the screen, unless a panel holds it or a
+    /// confirmation is showing.
+    pub(super) fn ticket_dialog(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
+        if self.actions.ticket_docked || self.actions.dialog.is_some() {
+            return None;
+        }
+        let t = self.actions.ticket.as_ref()?;
+        let (title, body, buttons) = self.ticket_parts(t, cx);
+        Some(self.dialog_frame("ticket-dialog", title, body, buttons, cx))
+    }
+
+    /// The ticket in its docked panel, if it is open and docked.
+    pub fn ticket_inline(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
+        if !self.actions.ticket_docked {
+            return None;
+        }
+        let t = self.actions.ticket.as_ref()?;
+        let (title, body, buttons) = self.ticket_parts(t, cx);
+        Some(
+            v_flex()
+                .id("ticket-inline")
+                .size_full()
+                .gap_3()
+                .p_3()
+                .child(
+                    div()
+                        .text_size(px(15.))
+                        .font_weight(gpui_kit::FontWeight::SEMIBOLD)
+                        .child(title),
+                )
+                .child(body)
+                .child(buttons)
+                .test_support()
+                .into_any_element(),
+        )
+    }
+
+    /// The ticket's title, form and buttons, wherever it is drawn.
+    fn ticket_parts(&self, t: &Ticket, cx: &mut Context<Self>) -> (String, AnyElement, AnyElement) {
         let network = Core::get(cx).network;
         let ticker = t.market.ticker().to_string();
         let checked = self.ticket_check(t, cx);
@@ -861,7 +1012,9 @@ impl Portfolio {
                         .primary()
                         .label("Done")
                         .disabled(pending)
-                        .on_click(cx.listener(|this, _, _, cx| this.close_dialog(cx))),
+                        .on_click(
+                            cx.listener(|this, _, window, cx| this.finish_ticket(window, cx)),
+                        ),
                 )
                 .into_any_element()
         } else {
@@ -872,21 +1025,31 @@ impl Portfolio {
             h_flex()
                 .gap_2()
                 .justify_end()
-                .child(keep_button("Cancel", cx))
-                .child(go_button(
-                    label,
-                    checked.is_ok() && unavailable.is_none(),
-                    cx,
-                ))
+                // The ticket's own buttons: in a docked panel a confirmation
+                // may be open over the screen at the same time, and these
+                // must not act on it.
+                .child(
+                    Button::new("dialog-keep")
+                        .outline()
+                        .label("Cancel")
+                        .on_click(
+                            cx.listener(|this, _, window, cx| this.finish_ticket(window, cx)),
+                        ),
+                )
+                .child(
+                    Button::new("dialog-confirm")
+                        .primary()
+                        .label(label)
+                        .disabled(!(checked.is_ok() && unavailable.is_none()))
+                        .on_click(cx.listener(|this, _, _, cx| this.place_ticket(cx))),
+                )
                 .into_any_element()
         };
-        Some(self.dialog_frame(
-            "ticket-dialog",
+        (
             format!("Place an order \u{b7} {}", t.label()),
             body.into_any_element(),
             buttons,
-            cx,
-        ))
+        )
     }
 }
 
@@ -1041,7 +1204,7 @@ impl Portfolio {
                    cx: &mut Context<Self>| {
             input.update(cx, |i, cx| i.set_value(text, window, cx));
         };
-        let Some(Dialog::Ticket(t)) = &mut self.actions.dialog else {
+        let Some(t) = &mut self.actions.ticket else {
             return;
         };
         let (size, price, tp, sl) = (
@@ -1110,15 +1273,15 @@ impl Portfolio {
 impl Portfolio {
     /// Whether the ticket is open, and on which side and type.
     pub fn ticket_open(&self) -> Option<(String, bool, bool)> {
-        match &self.actions.dialog {
-            Some(Dialog::Ticket(t)) => Some((t.market.coin().to_string(), t.buy, t.at_market)),
-            _ => None,
-        }
+        self.actions
+            .ticket
+            .as_ref()
+            .map(|t| (t.market.coin().to_string(), t.buy, t.at_market))
     }
 
     /// What the ticket says now, and whether it can be sent.
     pub fn ticket_state(&self, cx: &App) -> Option<(String, bool)> {
-        let Some(Dialog::Ticket(t)) = &self.actions.dialog else {
+        let Some(t) = &self.actions.ticket else {
             return None;
         };
         if let Some(why) = self.actions.availability.as_ref().err() {
@@ -1143,10 +1306,7 @@ impl Portfolio {
 
     /// The ticket's size unit.
     pub fn ticket_unit(&self) -> Option<SizeUnit> {
-        match &self.actions.dialog {
-            Some(Dialog::Ticket(t)) => Some(t.unit),
-            _ => None,
-        }
+        self.actions.ticket.as_ref().map(|t| t.unit)
     }
 
     /// Fill in the ticket, as typing does.
@@ -1157,7 +1317,7 @@ impl Portfolio {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        if let Some(Dialog::Ticket(t)) = &self.actions.dialog {
+        if let Some(t) = &self.actions.ticket {
             let (s, p) = (t.size.clone(), t.price.clone());
             s.update(cx, |input, cx| {
                 input.set_value(size.to_string(), window, cx)
@@ -1176,7 +1336,7 @@ impl Portfolio {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        if let Some(Dialog::Ticket(t)) = &self.actions.dialog {
+        if let Some(t) = &self.actions.ticket {
             let (a, b) = (t.take_profit.clone(), t.stop_loss.clone());
             a.update(cx, |input, cx| input.set_value(tp.to_string(), window, cx));
             b.update(cx, |input, cx| input.set_value(sl.to_string(), window, cx));
@@ -1219,24 +1379,24 @@ impl Portfolio {
     /// The ticket's Quick buttons, and the most that can be traded while
     /// any of them is out of reach.
     pub fn ticket_quick_buttons(&self, cx: &App) -> Option<(Vec<QuickButton>, Option<u64>)> {
-        match &self.actions.dialog {
-            Some(Dialog::Ticket(t)) => Some(self.ticket_quick(t, cx)),
-            _ => None,
-        }
+        self.actions
+            .ticket
+            .as_ref()
+            .map(|t| self.ticket_quick(t, cx))
     }
 
     /// The ticket's size field, as typed.
     pub fn ticket_size_text(&self, cx: &App) -> Option<String> {
-        match &self.actions.dialog {
-            Some(Dialog::Ticket(t)) => Some(t.size.read(cx).value().to_string()),
-            _ => None,
-        }
+        self.actions
+            .ticket
+            .as_ref()
+            .map(|t| t.size.read(cx).value().to_string())
     }
 
     /// The ticket's result line, once it has one.
     pub fn ticket_outcome(&self) -> Option<(String, Option<String>, bool)> {
-        match &self.actions.dialog {
-            Some(Dialog::Ticket(t)) if t.sent => self.actions.report.as_ref().map(|r| {
+        match &self.actions.ticket {
+            Some(t) if t.sent => self.actions.report.as_ref().map(|r| {
                 (
                     r.text.to_string(),
                     r.more.as_ref().map(|m| m.to_string()),
