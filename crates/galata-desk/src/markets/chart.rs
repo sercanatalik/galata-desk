@@ -1,0 +1,354 @@
+//! A candle chart of one market: the account's fills, its open orders and
+//! entry, and the watcher's armed levels drawn on it. The windowed layout's
+//! chart follows the watchlist's selection; a workspace chart keeps its own
+//! market.
+
+use galata_desk_core::format as f;
+use galata_desk_core::market::MarketId;
+use galata_desk_core::market::candles::Candle;
+use galata_desk_core::market::feed::Tile;
+use galata_desk_core::market::fills::{self, CandleFills};
+use galata_desk_core::rust_decimal::Decimal;
+use gpui_kit::component::menu::{PopupMenu, PopupMenuItem};
+use gpui_kit::component::{h_flex, v_flex};
+use gpui_kit::prelude::*;
+use gpui_kit::{
+    AnyElement, Context, Entity, SharedString, Subscription, TestSupportExt, Window, div, px,
+};
+
+use super::model::{MarketSource, MarketsModel};
+use super::{
+    CallMenu, Calls, Entry, OrderLevel, PlotPointer, candle_chart, ghost_candles, interval_words,
+    order_levels, time_label,
+};
+use crate::theme::Palette;
+use crate::ui;
+
+pub struct ChartPanel {
+    model: Entity<MarketsModel>,
+    source: MarketSource,
+    /// What the chart area last drew, for tests: its state, how many buy and
+    /// sell marks, and the "shown since" time.
+    drawn_chart: std::cell::Cell<(&'static str, usize, usize, Option<u64>)>,
+    /// Where the pointer is over the chart, for "Alert at <price>".
+    plot: PlotPointer,
+    /// Why the last call level added from the chart was not saved.
+    call_problem: Option<SharedString>,
+    _subscriptions: Vec<Subscription>,
+}
+
+impl ChartPanel {
+    pub fn new(model: Entity<MarketsModel>, source: MarketSource, cx: &mut Context<Self>) -> Self {
+        let subscriptions = vec![
+            cx.observe(&model, |_, _, cx| cx.notify()),
+            // Fills, orders and the entry are the portfolio's.
+            cx.observe(&model.read(cx).portfolio.clone(), |_, _, cx| cx.notify()),
+        ];
+        Self {
+            model,
+            source,
+            drawn_chart: std::cell::Cell::new(("none", 0, 0, None)),
+            plot: PlotPointer::default(),
+            call_problem: None,
+            _subscriptions: subscriptions,
+        }
+    }
+
+    /// The market the chart shows.
+    pub fn market(&self, cx: &gpui_kit::App) -> Option<MarketId> {
+        self.source.market(&self.model, cx)
+    }
+
+    /// Show `market`, for a chart that keeps its own.
+    #[allow(dead_code, reason = "the workspace's chart panels use it")]
+    pub fn set_market(&mut self, market: Option<MarketId>, cx: &mut Context<Self>) {
+        if self.source.set(market) {
+            cx.notify();
+        }
+    }
+
+    /// What the chart area last drew: `loading`, `failed`, `short`, `chart`
+    /// or `none`; how many `B` and `S` marks; and the "shown since" time.
+    #[cfg(test)]
+    pub fn drawn_chart(&self) -> (&'static str, usize, usize, Option<u64>) {
+        self.drawn_chart.get()
+    }
+
+    /// The price range the chart was last drawn over: low and high.
+    #[cfg(test)]
+    pub fn chart_range(&self) -> Option<(f64, f64)> {
+        self.plot.range.get().map(|(low, high, _)| (low, high))
+    }
+
+    /// Add an armed level in `market` at `price`, its direction from `last`.
+    pub fn add_call(
+        &mut self,
+        market: String,
+        price: Decimal,
+        last: Option<Decimal>,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(link) = self.model.read(cx).watcher.clone() else {
+            return;
+        };
+        let adding = link.update(cx, |link, cx| {
+            link.add_level(market, price, None, None, last, cx)
+        });
+        self.call_problem = None;
+        cx.spawn(async move |this, cx| {
+            if let Err(why) = adding.await {
+                let _ = this.update(cx, |this, cx| {
+                    this.call_problem = Some(why.into());
+                    cx.notify();
+                });
+            }
+        })
+        .detach();
+    }
+
+    /// The panel's right side: the market's candles over the period.
+    #[allow(clippy::too_many_arguments)]
+    fn chart(
+        &self,
+        tile: &Tile,
+        candles: Option<&[Candle]>,
+        grouped: &[CandleFills],
+        levels: &[OrderLevel],
+        calls: Calls,
+        entry: Option<Entry>,
+        since: Option<u64>,
+        // The system asks for reduced motion: placeholders hold still.
+        still: bool,
+        cx: &gpui_kit::App,
+    ) -> AnyElement {
+        let (period, chart_failed) = {
+            let m = self.model.read(cx);
+            (m.period, m.snapshot.chart_failed)
+        };
+        let interval = period.interval();
+        // A period under an hour is too few candles to read, so the chart
+        // shows the hour it ends; the heading says so.
+        let shown = if period.chart_millis() > period.millis() {
+            format!("{}, last hour", interval_words(interval))
+        } else {
+            interval_words(interval).to_string()
+        };
+        // The venue returns only the latest fills: say so when they do not
+        // reach back to the chart's first candle.
+        let span_ms = candles
+            .and_then(|c| Some(c.last()?.open_ms.saturating_sub(c.first()?.open_ms)))
+            .unwrap_or_default();
+        let since_note = since.map(|at| {
+            format!(
+                "Your trades shown since {}",
+                time_label(at, span_ms.max(24 * 3_600_000))
+            )
+        });
+        let heading = h_flex()
+            .gap_4()
+            .text_size(px(12.5))
+            .text_color(Palette::muted())
+            .child(
+                div()
+                    .text_color(Palette::text())
+                    .font_weight(gpui_kit::FontWeight::MEDIUM)
+                    .child(format!(
+                        "{} \u{b7} {}",
+                        tile.market.ticker(),
+                        period.label()
+                    )),
+            )
+            .child(shown)
+            .child(div().flex_1())
+            .children(since_note.map(|note| div().id("trades-since").child(note).test_support()));
+
+        let message = |text: &'static str| {
+            h_flex()
+                .size_full()
+                .justify_center()
+                .text_color(Palette::faint())
+                .child(text)
+                .into_any_element()
+        };
+        let marks = |side: fn(&CandleFills) -> bool| grouped.iter().filter(|c| side(c)).count();
+        let (state, body): (&'static str, AnyElement) = match candles {
+            // The last attempt to load the candles failed. It is tried again.
+            None if chart_failed => (
+                "failed",
+                v_flex()
+                    .id("chart-failed")
+                    .size_full()
+                    .items_center()
+                    .justify_center()
+                    .gap(px(6.))
+                    .child(
+                        div()
+                            .text_color(Palette::amber_text())
+                            .child("The chart's candles could not be loaded"),
+                    )
+                    .child(ui::label(
+                        "Trying again in a few seconds. The figures on the left are live.",
+                    ))
+                    .test_support()
+                    .into_any_element(),
+            ),
+            // Still loading: placeholders in the shape of candles, and what
+            // is being waited for.
+            None => (
+                "loading",
+                v_flex()
+                    .id(if still {
+                        "chart-loading-still"
+                    } else {
+                        "chart-loading"
+                    })
+                    .size_full()
+                    .gap_2()
+                    .child(ghost_candles(still))
+                    .child(ui::label(format!(
+                        "Loading {} {} candles\u{2026}",
+                        tile.market.ticker(),
+                        period.label()
+                    )))
+                    .test_support()
+                    .into_any_element(),
+            ),
+            Some(candles) if candles.len() < 2 => {
+                ("short", message("Not enough history for this period yet"))
+            }
+            Some(candles) => (
+                "chart",
+                candle_chart(
+                    candles,
+                    tile.live.as_ref().map(|l| l.last),
+                    grouped,
+                    levels,
+                    calls,
+                    entry,
+                    &self.plot,
+                ),
+            ),
+        };
+        let drawn = state == "chart";
+        self.drawn_chart.set((
+            state,
+            if drawn {
+                marks(|c| c.bought.is_some())
+            } else {
+                0
+            },
+            if drawn {
+                marks(|c| c.sold.is_some())
+            } else {
+                0
+            },
+            since,
+        ));
+
+        v_flex()
+            .flex_1()
+            .min_w_0()
+            .h_full()
+            .px_4()
+            .py_3()
+            .gap_2()
+            .child(heading)
+            .child(div().flex_1().min_h_0().child(body))
+            .into_any_element()
+    }
+}
+
+impl Render for ChartPanel {
+    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let Some(market) = self.market(cx) else {
+            self.drawn_chart.set(("none", 0, 0, None));
+            return div().flex_1().into_any_element();
+        };
+        let (tile, period, chart, portfolio) = {
+            let m = self.model.read(cx);
+            (
+                m.tile_of(&market),
+                m.period,
+                m.snapshot.chart.clone(),
+                m.portfolio.clone(),
+            )
+        };
+        let tile = &tile;
+        // The chart belongs to the panel only while it is this market's:
+        // just after a new selection the feed may still hold the last one.
+        let candles = chart
+            .as_ref()
+            .filter(|chart| chart.market == market && chart.interval == period.interval())
+            .map(|chart| chart.candles.as_slice());
+        // The account's fills in this market, grouped into these candles.
+        let (grouped, since) = match (portfolio.read(cx).fills(), candles) {
+            (Some(all), Some(candles)) if !candles.is_empty() => (
+                fills::group(&all.rows, &market, candles, period.interval().millis()),
+                fills::shown_since(all, candles[0].open_ms),
+            ),
+            _ => (Vec::new(), None),
+        };
+        // The watcher's armed levels in this market, and the menu that
+        // adds one at the pointer.
+        let calls = {
+            let (levels, can_add) = self.model.read(cx).calls_in(&market, cx);
+            let menu: Option<CallMenu> = can_add.then(|| {
+                let plot = self.plot.clone();
+                let markets = cx.entity().downgrade();
+                let coin = market.coin().to_string();
+                let last = tile.live.as_ref().map(|l| l.last);
+                std::rc::Rc::new(
+                    move |menu: PopupMenu, _: &mut Window, _: &mut Context<PopupMenu>| {
+                        let Some(price) = plot.price() else {
+                            return menu;
+                        };
+                        let (markets, coin) = (markets.clone(), coin.clone());
+                        menu.item(
+                            PopupMenuItem::new(format!("Alert at {}", f::price(price))).on_click(
+                                move |_, _, cx| {
+                                    let _ = markets.update(cx, |m, cx| {
+                                        m.add_call(coin.clone(), price, last, cx)
+                                    });
+                                },
+                            ),
+                        )
+                    },
+                ) as CallMenu
+            });
+            Calls { levels, menu }
+        };
+        // The account's open orders in this market, as levels.
+        let levels = portfolio
+            .read(cx)
+            .orders()
+            .map(|all| order_levels(all, &market))
+            .unwrap_or_default();
+        // The account's entry, while it holds the market.
+        let entry = portfolio.read(cx).positions().and_then(|all| {
+            all.iter()
+                .find(|p| p.dex == market.dex() && p.market == market.ticker() && !p.size.is_zero())
+                .map(|p| {
+                    let size = f::amount(p.size);
+                    Entry {
+                        price: p.entry,
+                        size: if p.size > Decimal::ZERO {
+                            format!("+{size}")
+                        } else {
+                            size
+                        },
+                    }
+                })
+        });
+        self.chart(
+            tile,
+            candles,
+            &grouped,
+            &levels,
+            calls,
+            entry,
+            since,
+            cx.reduce_motion(),
+            cx,
+        )
+    }
+}

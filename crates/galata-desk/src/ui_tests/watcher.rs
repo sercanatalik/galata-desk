@@ -1084,7 +1084,7 @@ fn a_tile_opens_an_alert_form_that_saves_an_armed_level(cx: &mut TestAppContext)
         .update_window(window.into(), |_, window, cx| {
             window.render_frame(cx);
             assert!(window.try_find("tile-alert-form").is_some());
-            markets.read(cx).tile_form().expect("the form is open")
+            markets.read(cx).tile_form(cx).expect("the form is open")
         })
         .unwrap();
     cx.update_window(window.into(), |_, window, cx| {
@@ -1126,7 +1126,7 @@ fn a_tile_opens_an_alert_form_that_saves_an_armed_level(cx: &mut TestAppContext)
         window.render_frame(cx);
         window.click(("tile", 1usize), cx);
         window.render_frame(cx);
-        assert_eq!(markets.read(cx).selected_market().as_deref(), Some("ETH"));
+        assert_eq!(markets.read(cx).selected_market(cx).as_deref(), Some("ETH"));
         window.hover(("tile", 0usize), cx);
         window.render_frame(cx);
         assert!(window.try_find(("remove", 0usize)).is_some());

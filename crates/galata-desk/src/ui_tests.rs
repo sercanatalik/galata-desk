@@ -329,10 +329,10 @@ fn each_sections_selections_survive_a_round_trip(cx: &mut TestAppContext) {
     let (window, desk, _dir) = open_with(cx, Some(&["BTC"]));
     let markets = go_to_markets(window, &desk, cx);
     cx.update_window(window.into(), |_, window, cx| {
-        assert_eq!(markets.read(cx).selections(), "period=24H colour=Change");
+        assert_eq!(markets.read(cx).selections(cx), "period=24H colour=Change");
         choose_period(window, "7 days", cx);
         window.within("colour").click(2usize, cx);
-        assert_eq!(markets.read(cx).selections(), "period=7D colour=Funding");
+        assert_eq!(markets.read(cx).selections(cx), "period=7D colour=Funding");
         // To Portfolio, change something there, and back.
         window.within("sections").click(0usize, cx);
     })
@@ -348,7 +348,7 @@ fn each_sections_selections_survive_a_round_trip(cx: &mut TestAppContext) {
     cx.run_until_parked();
     cx.update_window(window.into(), |_, window, cx| {
         window.render_frame(cx);
-        assert_eq!(markets.read(cx).selections(), "period=7D colour=Funding");
+        assert_eq!(markets.read(cx).selections(cx), "period=7D colour=Funding");
         let portfolio = desk.read(cx).portfolio_view().unwrap();
         assert!(portfolio.read(cx).selections().ends_with("tab=orders"));
         // The same Markets view, not a new one.
@@ -376,7 +376,7 @@ fn the_period_and_colour_controls_each_select(cx: &mut TestAppContext) {
             assert!(
                 markets
                     .read(cx)
-                    .selections()
+                    .selections(cx)
                     .starts_with(&format!("period={period} ")),
                 "{name}"
             );
@@ -392,7 +392,7 @@ fn the_period_and_colour_controls_each_select(cx: &mut TestAppContext) {
             assert!(
                 markets
                     .read(cx)
-                    .selections()
+                    .selections(cx)
                     .ends_with(&format!("colour={colour}"))
             );
         }
@@ -406,26 +406,26 @@ fn clicking_a_tile_selects_its_market_and_pointing_does_not(cx: &mut TestAppCont
     let markets = go_to_markets(window, &desk, cx);
     cx.update_window(window.into(), |_, window, cx| {
         // The first market is selected until another is chosen.
-        assert_eq!(markets.read(cx).selected_market().as_deref(), Some("BTC"));
+        assert_eq!(markets.read(cx).selected_market(cx).as_deref(), Some("BTC"));
         assert!(window.try_find("market-panel").is_some());
 
         // Pointing at tiles changes nothing but which one offers Remove.
         window.hover(("tile", 1usize), cx);
         window.render_frame(cx);
-        assert_eq!(markets.read(cx).hovered_market().as_deref(), Some("ETH"));
+        assert_eq!(markets.read(cx).hovered_market(cx).as_deref(), Some("ETH"));
         window.hover(("tile", 2usize), cx);
         window.render_frame(cx);
-        assert_eq!(markets.read(cx).selected_market().as_deref(), Some("BTC"));
+        assert_eq!(markets.read(cx).selected_market(cx).as_deref(), Some("BTC"));
 
         // A click selects.
         window.click(("tile", 1usize), cx);
         window.render_frame(cx);
-        assert_eq!(markets.read(cx).selected_market().as_deref(), Some("ETH"));
+        assert_eq!(markets.read(cx).selected_market(cx).as_deref(), Some("ETH"));
 
         // Clicking the selected tile leaves it selected.
         window.click(("tile", 1usize), cx);
         window.render_frame(cx);
-        assert_eq!(markets.read(cx).selected_market().as_deref(), Some("ETH"));
+        assert_eq!(markets.read(cx).selected_market(cx).as_deref(), Some("ETH"));
     })
     .unwrap();
     // Remembered at once, with the list unchanged.
@@ -442,16 +442,16 @@ fn enter_or_space_on_a_focused_tile_selects_it(cx: &mut TestAppContext) {
         // Focus alone does not select.
         markets.update(cx, |view, cx| view.focus_market("ETH", window, cx));
         window.render_frame(cx);
-        assert_eq!(markets.read(cx).selected_market().as_deref(), Some("BTC"));
+        assert_eq!(markets.read(cx).selected_market(cx).as_deref(), Some("BTC"));
         window.press("enter", cx);
         window.render_frame(cx);
-        assert_eq!(markets.read(cx).selected_market().as_deref(), Some("ETH"));
+        assert_eq!(markets.read(cx).selected_market(cx).as_deref(), Some("ETH"));
 
         markets.update(cx, |view, cx| view.focus_market("SOL", window, cx));
         window.render_frame(cx);
         window.press("space", cx);
         window.render_frame(cx);
-        assert_eq!(markets.read(cx).selected_market().as_deref(), Some("SOL"));
+        assert_eq!(markets.read(cx).selected_market(cx).as_deref(), Some("SOL"));
     })
     .unwrap();
 }
@@ -468,15 +468,15 @@ fn removing_the_selected_tile_selects_its_neighbour(cx: &mut TestAppContext) {
         window.render_frame(cx);
         window.click(("remove", 1usize), cx);
         window.render_frame(cx);
-        assert_eq!(markets.read(cx).watched(), ["BTC", "SOL"]);
-        assert_eq!(markets.read(cx).selected_market().as_deref(), Some("SOL"));
+        assert_eq!(markets.read(cx).watched(cx), ["BTC", "SOL"]);
+        assert_eq!(markets.read(cx).selected_market(cx).as_deref(), Some("SOL"));
 
         // Remove it again, now the last in the list: the one before it.
         markets.update(cx, |view, cx| view.focus_market("SOL", window, cx));
         window.render_frame(cx);
         window.press("delete", cx);
         window.render_frame(cx);
-        assert_eq!(markets.read(cx).selected_market().as_deref(), Some("BTC"));
+        assert_eq!(markets.read(cx).selected_market(cx).as_deref(), Some("BTC"));
         assert!(window.try_find("market-panel").is_some());
     })
     .unwrap();
@@ -492,7 +492,7 @@ fn the_selection_is_restored_at_start(cx: &mut TestAppContext) {
     Store::at(dir.path()).save_watchlist(&list).unwrap();
     let markets = go_to_markets(window, &desk, cx);
     cx.update_window(window.into(), |_, _, cx| {
-        assert_eq!(markets.read(cx).selected_market().as_deref(), Some("SOL"));
+        assert_eq!(markets.read(cx).selected_market(cx).as_deref(), Some("SOL"));
     })
     .unwrap();
 }
@@ -502,7 +502,7 @@ fn with_nothing_watched_there_is_no_panel(cx: &mut TestAppContext) {
     let (window, desk, _dir) = open_with(cx, Some(&[]));
     let markets = go_to_markets(window, &desk, cx);
     cx.update_window(window.into(), |_, window, cx| {
-        assert_eq!(markets.read(cx).selected_market(), None);
+        assert_eq!(markets.read(cx).selected_market(cx), None);
         assert!(window.try_find("market-panel").is_none());
         assert!(window.try_find("add-first").is_some());
     })
@@ -519,14 +519,14 @@ fn a_tile_is_removed_by_its_button_or_from_the_keyboard(cx: &mut TestAppContext)
         window.render_frame(cx);
         window.click(("remove", 1usize), cx);
         window.render_frame(cx);
-        assert_eq!(markets.read(cx).watched(), ["BTC", "SOL"]);
+        assert_eq!(markets.read(cx).watched(cx), ["BTC", "SOL"]);
 
         // From the keyboard: focus a tile and press Backspace.
         markets.update(cx, |view, cx| view.focus_market("BTC", window, cx));
         window.render_frame(cx);
         window.press("backspace", cx);
         window.render_frame(cx);
-        assert_eq!(markets.read(cx).watched(), ["SOL"]);
+        assert_eq!(markets.read(cx).watched(cx), ["SOL"]);
     })
     .unwrap();
     // Remembered at once.
@@ -542,7 +542,7 @@ fn removing_the_last_market_leaves_an_empty_remembered_list(cx: &mut TestAppCont
         window.render_frame(cx);
         window.press("delete", cx);
         window.render_frame(cx);
-        assert!(markets.read(cx).watched().is_empty());
+        assert!(markets.read(cx).watched(cx).is_empty());
         // The empty state offers the add action.
         assert!(window.try_find("add-first").is_some());
     })
@@ -577,12 +577,12 @@ fn a_market_is_added_by_search_and_not_added_twice(cx: &mut TestAppContext) {
         // Choose the one on `xyz`: only that one is added.
         window.click(("pick", 3usize), cx);
         window.render_frame(cx);
-        assert_eq!(markets.read(cx).watched(), ["BTC", "xyz:TSLA"]);
+        assert_eq!(markets.read(cx).watched(cx), ["BTC", "xyz:TSLA"]);
 
         // It now reads as watched; choosing it again adds nothing.
         window.click(("pick", 3usize), cx);
         window.render_frame(cx);
-        assert_eq!(markets.read(cx).watched(), ["BTC", "xyz:TSLA"]);
+        assert_eq!(markets.read(cx).watched(cx), ["BTC", "xyz:TSLA"]);
     })
     .unwrap();
     assert_eq!(
@@ -606,8 +606,8 @@ fn a_full_watchlist_takes_no_more(cx: &mut TestAppContext) {
         window.render_frame(cx);
         window.click(("pick", 0usize), cx);
         window.render_frame(cx);
-        assert_eq!(markets.read(cx).watched().len(), LIMIT);
-        assert!(!markets.read(cx).watched().contains(&"BTC".to_string()));
+        assert_eq!(markets.read(cx).watched(cx).len(), LIMIT);
+        assert!(!markets.read(cx).watched(cx).contains(&"BTC".to_string()));
     })
     .unwrap();
 }
@@ -618,7 +618,7 @@ fn the_first_watchlist_is_what_the_account_holds(cx: &mut TestAppContext) {
     let markets = go_to_markets(window, &desk, cx);
     cx.update_window(window.into(), |_, _, cx| {
         // Positions have not loaded: nothing is decided yet.
-        assert!(markets.read(cx).watched().is_empty());
+        assert!(markets.read(cx).watched(cx).is_empty());
         let portfolio = desk.read(cx).portfolio_view().unwrap();
         portfolio.update(cx, |view, cx| {
             view.set_positions(
@@ -635,7 +635,7 @@ fn the_first_watchlist_is_what_the_account_holds(cx: &mut TestAppContext) {
     cx.run_until_parked();
     cx.update_window(window.into(), |_, window, cx| {
         window.render_frame(cx);
-        assert_eq!(markets.read(cx).watched(), ["ETH", "xyz:NVDA", "BTC"]);
+        assert_eq!(markets.read(cx).watched(cx), ["ETH", "xyz:NVDA", "BTC"]);
     })
     .unwrap();
     // Remembered, so the next launch shows the same markets in the same order.
@@ -656,7 +656,7 @@ fn with_no_position_the_first_watchlist_is_four_majors(cx: &mut TestAppContext) 
     .unwrap();
     let markets = go_to_markets(window, &desk, cx);
     cx.update_window(window.into(), |_, _, cx| {
-        assert_eq!(markets.read(cx).watched(), ["BTC", "ETH", "SOL", "HYPE"]);
+        assert_eq!(markets.read(cx).watched(cx), ["BTC", "ETH", "SOL", "HYPE"]);
     })
     .unwrap();
 }
@@ -672,7 +672,7 @@ fn a_remembered_watchlist_is_shown_as_it_was_left(cx: &mut TestAppContext) {
             view.set_positions(vec![position("ETH", "", 1)], cx)
         });
         window.render_frame(cx);
-        assert_eq!(markets.read(cx).watched(), ["SOL", "xyz:NVDA", "BTC"]);
+        assert_eq!(markets.read(cx).watched(cx), ["SOL", "xyz:NVDA", "BTC"]);
     })
     .unwrap();
 }
@@ -711,7 +711,7 @@ fn with_nothing_held_the_ticket_is_the_markets_sections_only_trading_control(
         window.click(("tile", 0usize), cx);
         window.press("enter", cx);
         window.render_frame(cx);
-        assert_eq!(markets.read(cx).watched(), ["BTC", "ETH"]);
+        assert_eq!(markets.read(cx).watched(cx), ["BTC", "ETH"]);
         assert_eq!(desk.read(cx).section(), Some(Section::Markets));
     })
     .unwrap();
@@ -799,7 +799,7 @@ fn the_panel_is_detail_then_chart_then_position_and_the_detail_has_no_account_fi
         let size = window.find("position-size").bounds();
         assert!(column.contains(&size.center()), "{size:?} {column:?}");
         assert!(!detail.contains(&size.center()));
-        let model = markets.read(cx).position_panel().unwrap();
+        let model = markets.read(cx).position_panel(cx).unwrap();
         let market_position::Holding::Held(held) = model.holding else {
             panic!("BTC is held")
         };
@@ -942,13 +942,13 @@ fn sorting_reorders_the_tiles_and_leaves_the_watchlist_and_selection_alone(
         });
         window.render_frame(cx);
         // The section opens in watchlist order.
-        assert_eq!(markets.read(cx).drawn(), ["BTC", "SOL", "ETH"]);
+        assert_eq!(markets.read(cx).drawn(cx), ["BTC", "SOL", "ETH"]);
 
         choose_sort(window, "Change, gainers first", cx);
-        assert_eq!(markets.read(cx).drawn(), ["SOL", "ETH", "BTC"]);
+        assert_eq!(markets.read(cx).drawn(cx), ["SOL", "ETH", "BTC"]);
         // Only the drawing order changed.
-        assert_eq!(markets.read(cx).watched(), ["BTC", "SOL", "ETH"]);
-        assert_eq!(markets.read(cx).selected_market().as_deref(), Some("BTC"));
+        assert_eq!(markets.read(cx).watched(cx), ["BTC", "SOL", "ETH"]);
+        assert_eq!(markets.read(cx).selected_market(cx).as_deref(), Some("BTC"));
     })
     .unwrap();
     cx.run_until_parked();
@@ -957,9 +957,9 @@ fn sorting_reorders_the_tiles_and_leaves_the_watchlist_and_selection_alone(
         // A tile keeps its identity wherever it is drawn: this is ETH's.
         window.click(("tile", 2usize), cx);
         window.render_frame(cx);
-        assert_eq!(markets.read(cx).selected_market().as_deref(), Some("ETH"));
+        assert_eq!(markets.read(cx).selected_market(cx).as_deref(), Some("ETH"));
         choose_sort(window, "Change, losers first", cx);
-        assert_eq!(markets.read(cx).drawn(), ["BTC", "ETH", "SOL"]);
+        assert_eq!(markets.read(cx).drawn(cx), ["BTC", "ETH", "SOL"]);
     })
     .unwrap();
     let stored = Store::at(dir.path()).watchlist().unwrap();
@@ -977,29 +977,29 @@ fn a_sorted_order_settles_instead_of_following_every_tick(cx: &mut TestAppContex
         });
         window.render_frame(cx);
         choose_sort(window, "Change, gainers first", cx);
-        assert_eq!(markets.read(cx).drawn(), ["SOL", "ETH", "BTC"]);
+        assert_eq!(markets.read(cx).drawn(cx), ["SOL", "ETH", "BTC"]);
 
         // BTC overtakes: within the interval the tiles stay where they are.
         markets.update(cx, |view, cx| {
             view.set_snapshot(moving(&[("BTC", 2.0), ("SOL", 1.3), ("ETH", 0.2)]), cx)
         });
         window.render_frame(cx);
-        assert_eq!(markets.read(cx).drawn(), ["SOL", "ETH", "BTC"]);
+        assert_eq!(markets.read(cx).drawn(cx), ["SOL", "ETH", "BTC"]);
 
         // Once the interval has passed, the order catches up.
         markets.update(cx, |view, cx| {
-            view.age_order();
+            view.age_order(cx);
             cx.notify();
         });
         window.render_frame(cx);
-        assert_eq!(markets.read(cx).drawn(), ["BTC", "SOL", "ETH"]);
+        assert_eq!(markets.read(cx).drawn(cx), ["BTC", "SOL", "ETH"]);
 
         // A market removed is gone from the order at once.
         markets.update(cx, |view, cx| view.focus_market("SOL", window, cx));
         window.render_frame(cx);
         window.press("delete", cx);
         window.render_frame(cx);
-        assert_eq!(markets.read(cx).drawn(), ["BTC", "ETH"]);
+        assert_eq!(markets.read(cx).drawn(cx), ["BTC", "ETH"]);
     })
     .unwrap();
 }
@@ -1014,7 +1014,7 @@ fn changing_the_period_reorders_at_once(cx: &mut TestAppContext) {
         });
         window.render_frame(cx);
         choose_sort(window, "Change, gainers first", cx);
-        assert_eq!(markets.read(cx).drawn(), ["SOL", "BTC"]);
+        assert_eq!(markets.read(cx).drawn(cx), ["SOL", "BTC"]);
     })
     .unwrap();
     cx.run_until_parked();
@@ -1025,7 +1025,7 @@ fn changing_the_period_reorders_at_once(cx: &mut TestAppContext) {
             view.set_snapshot(moving(&[("BTC", 3.0), ("SOL", 1.3)]), cx)
         });
         choose_period(window, "7 days", cx);
-        assert_eq!(markets.read(cx).drawn(), ["BTC", "SOL"]);
+        assert_eq!(markets.read(cx).drawn(cx), ["BTC", "SOL"]);
     })
     .unwrap();
 }
@@ -1144,7 +1144,7 @@ fn settings_opens_over_a_section_and_returns_to_it_unchanged(cx: &mut TestAppCon
         assert_eq!(desk.read(cx).section(), Some(Section::Markets));
         // The same Markets view, with its selection kept.
         assert_eq!(desk.read(cx).markets_view().unwrap(), markets);
-        assert!(markets.read(cx).selections().ends_with("colour=Funding"));
+        assert!(markets.read(cx).selections(cx).ends_with("colour=Funding"));
     })
     .unwrap();
 }
@@ -1429,7 +1429,7 @@ fn the_chart_area_shows_loading_then_failed_then_the_chart(cx: &mut TestAppConte
             view.set_snapshot(snapshot(&["BTC", "ETH"], &["BTC", "ETH"]), cx)
         });
         window.render_frame(cx);
-        assert_eq!(markets.read(cx).drawn_chart().0, "loading");
+        assert_eq!(markets.read(cx).drawn_chart(cx).0, "loading");
         assert!(window.try_find("chart-loading").is_some());
         assert!(window.try_find("chart-failed").is_none());
 
@@ -1438,7 +1438,7 @@ fn the_chart_area_shows_loading_then_failed_then_the_chart(cx: &mut TestAppConte
         cx.set_reduce_motion(true);
         markets.update(cx, |_, cx| cx.notify());
         window.render_frame(cx);
-        assert_eq!(markets.read(cx).drawn_chart().0, "loading");
+        assert_eq!(markets.read(cx).drawn_chart(cx).0, "loading");
         assert!(window.try_find("chart-loading-still").is_some());
         assert!(window.try_find("chart-loading").is_none());
         cx.set_reduce_motion(false);
@@ -1448,7 +1448,7 @@ fn the_chart_area_shows_loading_then_failed_then_the_chart(cx: &mut TestAppConte
         failed.chart_failed = true;
         markets.update(cx, |view, cx| view.set_snapshot(failed, cx));
         window.render_frame(cx);
-        assert_eq!(markets.read(cx).drawn_chart().0, "failed");
+        assert_eq!(markets.read(cx).drawn_chart(cx).0, "failed");
         assert!(window.try_find("chart-failed").is_some());
         assert!(window.try_find("chart-loading").is_none());
 
@@ -1457,7 +1457,7 @@ fn the_chart_area_shows_loading_then_failed_then_the_chart(cx: &mut TestAppConte
             view.set_snapshot(charted("BTC", &["BTC", "ETH"], 40), cx)
         });
         window.render_frame(cx);
-        assert_eq!(markets.read(cx).drawn_chart().0, "chart");
+        assert_eq!(markets.read(cx).drawn_chart(cx).0, "chart");
         assert!(window.try_find("chart-failed").is_none());
         assert!(window.try_find("chart-loading").is_none());
     })
@@ -1552,7 +1552,7 @@ fn the_accounts_fills_are_marked_on_the_selected_markets_chart(cx: &mut TestAppC
         });
         window.render_frame(cx);
         // Until fills arrive the chart is drawn without marks.
-        assert_eq!(markets.read(cx).drawn_chart(), ("chart", 0, 0, None));
+        assert_eq!(markets.read(cx).drawn_chart(cx), ("chart", 0, 0, None));
 
         let portfolio = desk.read(cx).portfolio_view().unwrap();
         portfolio.update(cx, |view, cx| {
@@ -1571,7 +1571,7 @@ fn the_accounts_fills_are_marked_on_the_selected_markets_chart(cx: &mut TestAppC
         });
         markets.update(cx, |_, cx| cx.notify());
         window.render_frame(cx);
-        assert_eq!(markets.read(cx).drawn_chart(), ("chart", 1, 2, None));
+        assert_eq!(markets.read(cx).drawn_chart(cx), ("chart", 1, 2, None));
         assert!(window.try_find(("fill-b", 5usize)).is_some());
         assert!(window.try_find(("fill-s", 5usize)).is_some());
         assert!(window.try_find(("fill-s", 20usize)).is_some());
@@ -1585,8 +1585,8 @@ fn the_accounts_fills_are_marked_on_the_selected_markets_chart(cx: &mut TestAppC
         });
         window.click(("tile", 1usize), cx);
         window.render_frame(cx);
-        assert_eq!(markets.read(cx).selected_market().as_deref(), Some("ETH"));
-        assert_eq!(markets.read(cx).drawn_chart(), ("chart", 1, 0, None));
+        assert_eq!(markets.read(cx).selected_market(cx).as_deref(), Some("ETH"));
+        assert_eq!(markets.read(cx).drawn_chart(cx), ("chart", 1, 0, None));
         assert!(window.try_find(("fill-b", 7usize)).is_some());
     })
     .unwrap();
@@ -1609,7 +1609,7 @@ fn the_chart_says_from_when_trades_are_shown_only_when_the_venue_cut_them_short(
         portfolio.update(cx, |view, cx| view.set_fills(Fills::new(rows), cx));
         markets.update(cx, |_, cx| cx.notify());
         window.render_frame(cx);
-        let (state, bought, sold, since) = markets.read(cx).drawn_chart();
+        let (state, bought, sold, since) = markets.read(cx).drawn_chart(cx);
         assert_eq!((state, bought, sold), ("chart", 0, 1));
         assert_eq!(since, Some(CANDLE_T0 + 30 * Interval::M15.millis() + 1));
         assert!(window.try_find("trades-since").is_some());
@@ -2819,7 +2819,7 @@ fn watched_rows_ignore_how_markets_is_sorted_and_follow_a_change_to_the_list(
         });
         window.render_frame(cx);
         choose_sort(window, "Change, gainers first", cx);
-        assert_eq!(markets.read(cx).drawn(), ["ETH", "SOL", "BTC"]);
+        assert_eq!(markets.read(cx).drawn(cx), ["ETH", "SOL", "BTC"]);
     })
     .unwrap();
     let funding = go_to_funding(window, &desk, cx);
@@ -5750,7 +5750,7 @@ fn before_positions_arrive_the_panel_shows_placeholders_not_flat(cx: &mut TestAp
     let staged = Rc::new(Staged::new(Ok(())));
     let (window, _desk, markets, _portfolio, _dir) = eth_panel(cx, &staged, None, vec![], None);
     cx.update_window(window.into(), |_, window, cx| {
-        let model = markets.read(cx).position_panel().unwrap();
+        let model = markets.read(cx).position_panel(cx).unwrap();
         assert_eq!(model.holding, market_position::Holding::Loading);
         assert!(window.try_find("position-side").is_none());
         assert!(window.try_find_by_label("Flat").is_none());
@@ -5795,7 +5795,7 @@ fn the_pnl_breakdown_starts_collapsed_opens_from_the_keyboard_and_stays_open(
         );
         assert!(window.try_find("pnl-rows").is_none());
         // The header carries the day's total: -186.20 realised + 70.94 open.
-        let model = markets.read(cx).position_panel().unwrap();
+        let model = markets.read(cx).position_panel(cx).unwrap();
         assert_eq!(model.day_total(), Some(("-$115".into(), -1)));
 
         markets.update(cx, |view, cx| view.focus_pnl_header(window, cx));
@@ -5813,7 +5813,7 @@ fn the_pnl_breakdown_starts_collapsed_opens_from_the_keyboard_and_stays_open(
         markets.update(cx, |view, cx| view.focus_market("BTC", window, cx));
         window.click(("tile", 1usize), cx);
         window.render_frame(cx);
-        assert_eq!(markets.read(cx).selected_market().as_deref(), Some("BTC"));
+        assert_eq!(markets.read(cx).selected_market(cx).as_deref(), Some("BTC"));
         assert_eq!(window.find_by_label("PNL breakdown").expanded(), Some(true));
     })
     .unwrap();
@@ -5831,7 +5831,7 @@ fn the_last_trade_is_shown_or_said_to_be_none(cx: &mut TestAppContext) {
     cx.update_window(window.into(), |_, window, cx| {
         let trade = markets
             .read(cx)
-            .position_panel()
+            .position_panel(cx)
             .unwrap()
             .trade
             .unwrap()
@@ -6023,7 +6023,7 @@ fn the_entry_price_is_a_line_on_the_chart_while_it_is_in_range(cx: &mut TestAppC
 #[gpui_kit::test]
 fn an_entry_outside_the_candles_draws_nothing_and_leaves_the_axis_alone(cx: &mut TestAppContext) {
     let (_w, flat, _d) = btc_chart_with(cx, None);
-    let flat_range = cx.update(|cx| flat.read(cx).chart_range());
+    let flat_range = cx.update(|cx| flat.read(cx).chart_range(cx));
     assert!(flat_range.is_some());
 
     let held = PositionRow {
@@ -6034,7 +6034,7 @@ fn an_entry_outside_the_candles_draws_nothing_and_leaves_the_axis_alone(cx: &mut
     let (window, markets, _dir) = btc_chart_with(cx, Some(held));
     cx.update_window(window.into(), |_, window, cx| {
         assert!(window.try_find("entry-line").is_none());
-        assert_eq!(markets.read(cx).chart_range(), flat_range);
+        assert_eq!(markets.read(cx).chart_range(cx), flat_range);
     })
     .unwrap();
 }
