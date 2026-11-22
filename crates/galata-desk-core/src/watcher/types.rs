@@ -44,6 +44,13 @@ pub struct WatcherConfig {
     /// that predates it, and then never written.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub watchlist: Option<Vec<String>>,
+    /// Alerts when a watched market moves `move_pct` from its pinned price.
+    /// `None` from a watcher that predates them, and then never written.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub move_alerts: Option<bool>,
+    /// Percent of the pinned price, 0.5 to 10. As `move_alerts`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub move_pct: Option<Decimal>,
     #[serde(default)]
     pub levels: Vec<Level>,
     /// Every other field, as read.
@@ -315,6 +322,29 @@ mod tests {
         let written = serde_json::to_value(&config).unwrap();
         assert_eq!(written["watchlist"], json!(["ETH", "xyz:NVDA"]));
         assert_eq!(written["market_update"], json!(true));
+    }
+
+    #[test]
+    fn move_settings_are_written_only_when_the_watcher_has_them() {
+        let mut read: Value = serde_json::from_str(CONFIG).unwrap();
+        let config: WatcherConfig = serde_json::from_value(read.clone()).unwrap();
+        assert_eq!((config.move_alerts, config.move_pct), (Some(true), Some(Decimal::ONE)));
+        let mut set = config.clone();
+        set.move_alerts = Some(false);
+        set.move_pct = Some(Decimal::new(25, 1));
+        let written = serde_json::to_value(&set).unwrap();
+        assert_eq!((written["move_alerts"].clone(), written["move_pct"].clone()), (json!(false), json!("2.5")));
+
+        read.as_object_mut().unwrap().remove("move_alerts");
+        read.as_object_mut().unwrap().remove("move_pct");
+        let older: WatcherConfig = serde_json::from_value(read).unwrap();
+        assert_eq!((older.move_alerts, older.move_pct), (None, None));
+        assert!(!older.rest.contains_key("move_pct"));
+        let written = serde_json::to_value(&older).unwrap();
+        assert!(
+            written.get("move_alerts").is_none() && written.get("move_pct").is_none(),
+            "an older watcher would refuse them"
+        );
     }
 
     #[test]

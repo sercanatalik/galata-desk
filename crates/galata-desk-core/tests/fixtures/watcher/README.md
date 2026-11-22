@@ -9,6 +9,8 @@ address is the example `0x…aa`.
 
 `config.json` was later given `"pnl_summary": true` by hand, as a watcher
 with the PnL summary switch (galata-watcher after `6f62379`) reports it.
+It was then given `"move_alerts": true` and `"move_pct": "1"` by hand, as a
+watcher with move alerts reports them when they were never written.
 
 | File | Answer to |
 |---|---|

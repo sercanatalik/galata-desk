@@ -30,6 +30,9 @@ use crate::watcher_link::{STALLED_MS, WatcherLink, ago, now_ms};
 /// What the section says about liquidation alerts.
 pub const LIQUIDATION_NOTE: &str = "Liquidation and near-liquidation alerts can't be switched off. Only the distance can be tuned, from 2% to 50%.";
 
+/// What the section says when a move percentage is out of range.
+pub const MOVE_RANGE: &str = "The move percentage is from 0.5% to 10%. Nothing was saved.";
+
 /// A level being edited in place.
 struct Editing {
     id: String,
@@ -43,6 +46,7 @@ pub struct WatcherSection {
     add: Entity<LevelForm>,
     editing: Option<Editing>,
     near_liq: Entity<InputState>,
+    move_pct: Entity<InputState>,
     /// The outcome of the last edit, and whether it is a problem.
     message: Option<(SharedString, bool)>,
     /// The alert history is listed only when asked for.
@@ -54,6 +58,7 @@ impl WatcherSection {
     pub fn new(link: Entity<WatcherLink>, window: &mut Window, cx: &mut Context<Self>) -> Self {
         let add = cx.new(|cx| LevelForm::open("add-level", link.clone(), window, cx));
         let near_liq = cx.new(|cx| InputState::new(window, cx).placeholder("15"));
+        let move_pct = cx.new(|cx| InputState::new(window, cx).placeholder("1"));
         let on_add = cx.subscribe(&add, |this, _, event, cx| {
             if let LevelFormEvent::Saved = event {
                 this.message = Some(("Level saved. It is armed.".into(), false));
@@ -69,6 +74,7 @@ impl WatcherSection {
             add,
             editing: None,
             near_liq,
+            move_pct,
             message: None,
             show_history: false,
             _changes: [on_add, link_changes],
@@ -77,28 +83,28 @@ impl WatcherSection {
         this
     }
 
-    /// Keep the distance field in step with the watcher while the user isn't
-    /// changing it.
+    /// Keep the distance and move fields in step with the watcher while the
+    /// user isn't changing them.
     fn on_snapshot(
         &mut self,
         link: &Entity<WatcherLink>,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let Some(pct) = link
+        let Some((near, step)) = link
             .read(cx)
             .snapshot()
             .config
             .config()
-            .map(|c| c.near_liquidation_pct)
+            .map(|c| (c.near_liquidation_pct, c.move_pct))
         else {
             return;
         };
-        let text = pct.normalize().to_string();
-        let focused = self.near_liq.read(cx).focus_handle(cx).is_focused(window);
-        if !focused && self.near_liq.read(cx).value() != text.as_str() {
-            self.near_liq
-                .update(cx, |i, cx| i.set_value(text, window, cx));
+        let near_liq = self.near_liq.clone();
+        follow(&near_liq, near, window, cx);
+        if let Some(step) = step {
+            let move_pct = self.move_pct.clone();
+            follow(&move_pct, step, window, cx);
         }
     }
 
@@ -244,6 +250,35 @@ impl WatcherSection {
             "Market update off."
         };
         self.save(move |c| c.market_update = Some(on), done, cx);
+    }
+
+    fn set_move_alerts(&mut self, on: bool, cx: &mut Context<Self>) {
+        let done = if on {
+            "Move alerts on."
+        } else {
+            "Move alerts off."
+        };
+        self.save(move |c| c.move_alerts = Some(on), done, cx);
+    }
+
+    fn save_move_pct(&mut self, cx: &mut Context<Self>) {
+        let text = self
+            .move_pct
+            .read(cx)
+            .value()
+            .trim()
+            .trim_end_matches('%')
+            .to_string();
+        let Some(pct) = text
+            .parse::<Decimal>()
+            .ok()
+            .filter(|p| *p >= Decimal::new(5, 1) && *p <= Decimal::TEN)
+        else {
+            self.message = Some((MOVE_RANGE.into(), true));
+            cx.notify();
+            return;
+        };
+        self.save(move |c| c.move_pct = Some(pct), "Move percentage saved.", cx);
     }
 
     fn save_near_liq(&mut self, cx: &mut Context<Self>) {
@@ -538,6 +573,7 @@ impl WatcherSection {
         let on = self.stop_alerts_on(cx);
         let summary = self.pnl_summary_on(cx);
         let update = self.market_update_on(cx);
+        let moves = self.move_alerts_on(cx);
         let mut about =
             "An alert each time a take-profit or stop-loss order fills, on every ticker".to_string();
         about.push_str(match (summary.is_some(), update.is_some()) {
@@ -550,6 +586,9 @@ impl WatcherSection {
             }
             (false, false) => ".",
         });
+        if moves.is_some() {
+            about.push_str(" And day and night, each time a watched market moves the set percentage from the price it was last alerted at.");
+        }
         ui::panel()
             .px_5()
             .py_4()
@@ -619,7 +658,42 @@ impl WatcherSection {
                             })),
                     )
             }))
+            .children(moves.map(|on| {
+                h_flex()
+                    .gap_3()
+                    .py(px(4.))
+                    .child(div().flex_1().child("Move alerts at"))
+                    .child(div().w(px(56.)).child(Input::new(&self.move_pct).small()))
+                    .child("%")
+                    .child(
+                        Button::new("move-pct-save")
+                            .small()
+                            .label("Save")
+                            .disabled(!editable)
+                            .on_click(cx.listener(|this, _, _, cx| this.save_move_pct(cx))),
+                    )
+                    .child(
+                        div()
+                            .text_size(px(12.5))
+                            .text_color(Palette::muted())
+                            .child(if on { "on" } else { "off" }),
+                    )
+                    .child(
+                        Switch::new("move-alerts")
+                            .checked(on)
+                            .disabled(!editable)
+                            .accessibility_label("Move alerts")
+                            .on_click(
+                                cx.listener(|this, on: &bool, _, cx| this.set_move_alerts(*on, cx)),
+                            ),
+                    )
+            }))
             .into_any_element()
+    }
+
+    /// The move alerts switch's state, when the watcher reports the setting.
+    fn move_alerts_on(&self, cx: &gpui_kit::App) -> Option<bool> {
+        self.snapshot(cx).config.config().and_then(|c| c.move_alerts)
     }
 
     /// The market update switch's state, when the watcher reports the
@@ -685,6 +759,15 @@ impl WatcherSection {
             .children(rows)
             .test_support()
             .into_any_element()
+    }
+}
+
+/// Show the watcher's `value` in `input`, unless the user is typing there.
+fn follow(input: &Entity<InputState>, value: Decimal, window: &mut Window, cx: &mut gpui_kit::App) {
+    let text = value.normalize().to_string();
+    let focused = input.read(cx).focus_handle(cx).is_focused(window);
+    if !focused && input.read(cx).value() != text.as_str() {
+        input.update(cx, |i, cx| i.set_value(text, window, cx));
     }
 }
 
@@ -862,6 +945,20 @@ impl WatcherSection {
     /// The market update switch as drawn: `None` when it is not shown.
     pub fn market_update_shown(&self, cx: &gpui_kit::App) -> Option<bool> {
         self.market_update_on(cx)
+    }
+
+    /// The move alerts switch as drawn: `None` when it is not shown.
+    pub fn move_alerts_shown(&self, cx: &gpui_kit::App) -> Option<bool> {
+        self.move_alerts_on(cx)
+    }
+
+    pub fn move_pct_text(&self, cx: &gpui_kit::App) -> String {
+        self.move_pct.read(cx).value().to_string()
+    }
+
+    pub fn set_move_pct_text(&self, text: &str, window: &mut Window, cx: &mut Context<Self>) {
+        self.move_pct
+            .update(cx, |i, cx| i.set_value(text.to_string(), window, cx));
     }
 
     pub fn set_near_liq_text(&self, text: &str, window: &mut Window, cx: &mut Context<Self>) {

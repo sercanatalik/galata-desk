@@ -24,6 +24,8 @@
       "state": "armed"
     }
   ],
+  "move_alerts": true,
+  "move_pct": "1",
   "near_liquidation_pct": "15",
   "network": "mainnet",
   "pnl_summary": true,

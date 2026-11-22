@@ -901,6 +901,73 @@ fn a_watchlist_is_not_written_to_another_network_or_twice_when_refused(cx: &mut 
 }
 
 #[gpui_kit::test]
+fn move_alerts_are_one_switch_with_a_percentage_in_range(cx: &mut TestAppContext) {
+    let (window, desk, link, _dir) = configured(cx);
+    let section = go_to_watcher(cx, window, &desk);
+    cx.update(|cx| {
+        assert_eq!(section.read(cx).move_alerts_shown(cx), Some(true));
+        assert_eq!(section.read(cx).move_pct_text(cx), "1", "the watcher's percentage");
+    });
+
+    click(cx, window, "move-alerts");
+    cx.update(|cx| {
+        assert_eq!(link.read(cx).saved.last().unwrap().move_alerts, Some(false));
+        assert_eq!(section.read(cx).move_alerts_shown(cx), Some(false));
+        assert_eq!(
+            section.read(cx).message(),
+            Some(("Move alerts off.".into(), false))
+        );
+    });
+
+    let set = |cx: &mut TestAppContext, text: &str| {
+        cx.update_window(window.into(), |_, window, cx| {
+            section.update(cx, |s, cx| s.set_move_pct_text(text, window, cx));
+        })
+        .unwrap();
+        click(cx, window, "move-pct-save");
+    };
+    let saves = cx.update(|cx| link.read(cx).saved.len());
+    for out_of_range in ["15", "0.2", "wide"] {
+        set(cx, out_of_range);
+        cx.update(|cx| {
+            assert_eq!(link.read(cx).saved.len(), saves, "{out_of_range} is not saved");
+            assert_eq!(
+                section.read(cx).message(),
+                Some((crate::watcher::MOVE_RANGE.into(), true))
+            );
+        });
+    }
+    set(cx, "2%");
+    cx.update(|cx| {
+        let saved = link.read(cx).saved.last().unwrap().clone();
+        assert_eq!(saved.move_pct, Some(Decimal::new(2, 0)));
+        assert_eq!(saved.move_alerts, Some(false), "the switch is kept");
+        assert_eq!(saved.rest["telegram_chat"], recorded_config().rest["telegram_chat"], "the chat is kept");
+    });
+}
+
+#[gpui_kit::test]
+fn an_older_watcher_gets_no_move_controls_and_no_move_settings(cx: &mut TestAppContext) {
+    let mut older = recorded_config();
+    older.move_alerts = None;
+    older.move_pct = None;
+    let (window, desk, link, _dir) =
+        open_with_watcher(cx, answered(ConfigState::Read(older), now()));
+    let _section = go_to_watcher(cx, window, &desk);
+    cx.update_window(window.into(), |_, window, cx| {
+        window.render_frame(cx);
+        assert!(window.try_find("move-alerts").is_none());
+        assert!(window.try_find("move-pct-save").is_none());
+    })
+    .unwrap();
+    click(cx, window, "stop-alerts");
+    cx.update(|cx| {
+        let written = serde_json::to_value(link.read(cx).saved.last().unwrap()).unwrap();
+        assert!(written.get("move_alerts").is_none() && written.get("move_pct").is_none(), "{written}");
+    });
+}
+
+#[gpui_kit::test]
 fn the_near_liquidation_distance_is_tuned_within_its_range(cx: &mut TestAppContext) {
     let (window, desk, link, _dir) = configured(cx);
     let section = go_to_watcher(cx, window, &desk);
