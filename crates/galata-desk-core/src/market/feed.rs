@@ -736,9 +736,11 @@ impl<T: Transport + Clone, S: Subscriptions> State<T, S> {
         let interval = self.interval();
         let period = self.period;
         let listed = matches!(self.listing, Listing::Ready(_));
-        // Nothing older than two windows is ever asked for again.
-        for series in self.series.values_mut() {
-            series.trim(now, 2 * MarketPeriod::Week.millis());
+        // Nothing older than two of the longest windows at a series'
+        // interval is ever asked for again, and never less than two weeks.
+        for ((_, interval), series) in self.series.iter_mut() {
+            let keep = (2 * interval.longest_window()).max(2 * MarketPeriod::Week.millis());
+            series.trim(now, keep);
         }
         let tiles = self
             .watched

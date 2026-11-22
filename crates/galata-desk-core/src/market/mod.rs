@@ -67,10 +67,18 @@ pub enum MarketPeriod {
     #[default]
     Day,
     Week,
+    /// 30 days.
+    Month,
+    /// 90 days.
+    Quarter,
+    /// 180 days.
+    HalfYear,
+    /// 365 days.
+    Year,
 }
 
 impl MarketPeriod {
-    pub const ALL: [MarketPeriod; 7] = [
+    pub const ALL: [MarketPeriod; 11] = [
         MarketPeriod::Min3,
         MarketPeriod::Min5,
         MarketPeriod::Min15,
@@ -78,6 +86,10 @@ impl MarketPeriod {
         MarketPeriod::Hour,
         MarketPeriod::Day,
         MarketPeriod::Week,
+        MarketPeriod::Month,
+        MarketPeriod::Quarter,
+        MarketPeriod::HalfYear,
+        MarketPeriod::Year,
     ];
 
     pub fn label(self) -> &'static str {
@@ -89,6 +101,10 @@ impl MarketPeriod {
             MarketPeriod::Hour => "1H",
             MarketPeriod::Day => "24H",
             MarketPeriod::Week => "7D",
+            MarketPeriod::Month => "30D",
+            MarketPeriod::Quarter => "90D",
+            MarketPeriod::HalfYear => "180D",
+            MarketPeriod::Year => "1Y",
         }
     }
 
@@ -96,6 +112,7 @@ impl MarketPeriod {
     pub fn millis(self) -> u64 {
         const HOUR: u64 = 3_600_000;
         const MINUTE: u64 = 60_000;
+        const DAY: u64 = 24 * HOUR;
         match self {
             MarketPeriod::Min3 => 3 * MINUTE,
             MarketPeriod::Min5 => 5 * MINUTE,
@@ -103,7 +120,11 @@ impl MarketPeriod {
             MarketPeriod::Min30 => 30 * MINUTE,
             MarketPeriod::Hour => HOUR,
             MarketPeriod::Day => 24 * HOUR,
-            MarketPeriod::Week => 7 * 24 * HOUR,
+            MarketPeriod::Week => 7 * DAY,
+            MarketPeriod::Month => 30 * DAY,
+            MarketPeriod::Quarter => 90 * DAY,
+            MarketPeriod::HalfYear => 180 * DAY,
+            MarketPeriod::Year => 365 * DAY,
         }
     }
 
@@ -127,6 +148,9 @@ impl MarketPeriod {
             | MarketPeriod::Hour => Interval::M1,
             MarketPeriod::Day => Interval::M15,
             MarketPeriod::Week => Interval::H2,
+            MarketPeriod::Month => Interval::H8,
+            MarketPeriod::Quarter | MarketPeriod::HalfYear => Interval::D1,
+            MarketPeriod::Year => Interval::D3,
         }
     }
 
@@ -142,6 +166,9 @@ pub enum Interval {
     M1,
     M15,
     H2,
+    H8,
+    D1,
+    D3,
 }
 
 impl Interval {
@@ -150,6 +177,9 @@ impl Interval {
             Interval::M1 => "1m",
             Interval::M15 => "15m",
             Interval::H2 => "2h",
+            Interval::H8 => "8h",
+            Interval::D1 => "1d",
+            Interval::D3 => "3d",
         }
     }
 
@@ -158,6 +188,9 @@ impl Interval {
             "1m" => Some(Interval::M1),
             "15m" => Some(Interval::M15),
             "2h" => Some(Interval::H2),
+            "8h" => Some(Interval::H8),
+            "1d" => Some(Interval::D1),
+            "3d" => Some(Interval::D3),
             _ => None,
         }
     }
@@ -167,7 +200,20 @@ impl Interval {
             Interval::M1 => 60_000,
             Interval::M15 => 15 * 60_000,
             Interval::H2 => 2 * 3_600_000,
+            Interval::H8 => 8 * 3_600_000,
+            Interval::D1 => 24 * 3_600_000,
+            Interval::D3 => 3 * 24 * 3_600_000,
         }
+    }
+
+    /// The longest time a chart at this interval shows.
+    pub fn longest_window(self) -> u64 {
+        MarketPeriod::ALL
+            .iter()
+            .filter(|p| p.interval() == self)
+            .map(|p| p.chart_millis())
+            .max()
+            .unwrap_or(self.millis())
     }
 }
 
@@ -202,11 +248,46 @@ mod tests {
         assert_eq!(MarketPeriod::Week.interval().as_str(), "2h");
         assert_eq!(MarketPeriod::Week.candle_count(), 84);
         assert_eq!(MarketPeriod::default(), MarketPeriod::Day);
+        // The long periods: 60 to 180 candles each.
+        assert_eq!(MarketPeriod::Month.interval().as_str(), "8h");
+        assert_eq!(MarketPeriod::Month.candle_count(), 90);
+        assert_eq!(MarketPeriod::Quarter.interval().as_str(), "1d");
+        assert_eq!(MarketPeriod::Quarter.candle_count(), 90);
+        assert_eq!(MarketPeriod::HalfYear.interval().as_str(), "1d");
+        assert_eq!(MarketPeriod::HalfYear.candle_count(), 180);
+        assert_eq!(MarketPeriod::Year.interval().as_str(), "3d");
+        assert_eq!(MarketPeriod::Year.candle_count(), 121);
+    }
+
+    #[test]
+    fn each_period_has_its_own_label() {
+        let labels: std::collections::HashSet<String> = MarketPeriod::ALL
+            .iter()
+            .map(|p| p.label().to_lowercase())
+            .collect();
+        assert_eq!(labels.len(), MarketPeriod::ALL.len(), "{labels:?}");
+    }
+
+    #[test]
+    fn an_interval_keeps_its_longest_chart() {
+        assert_eq!(
+            Interval::D1.longest_window(),
+            MarketPeriod::HalfYear.millis()
+        );
+        assert_eq!(Interval::D3.longest_window(), MarketPeriod::Year.millis());
+        assert_eq!(Interval::M1.longest_window(), MarketPeriod::Hour.millis());
     }
 
     #[test]
     fn intervals_round_trip_through_the_venues_names() {
-        for interval in [Interval::M1, Interval::M15, Interval::H2] {
+        for interval in [
+            Interval::M1,
+            Interval::M15,
+            Interval::H2,
+            Interval::H8,
+            Interval::D1,
+            Interval::D3,
+        ] {
             assert_eq!(Interval::from_venue(interval.as_str()), Some(interval));
         }
         assert_eq!(Interval::from_venue("4h"), None);

@@ -41,6 +41,10 @@ impl ColourBy {
             (ColourBy::Change, MarketPeriod::Hour) => 0.01,
             (ColourBy::Change, MarketPeriod::Day) => 0.06,
             (ColourBy::Change, MarketPeriod::Week) => 0.15,
+            (ColourBy::Change, MarketPeriod::Month) => 0.30,
+            (ColourBy::Change, MarketPeriod::Quarter) => 0.50,
+            (ColourBy::Change, MarketPeriod::HalfYear) => 0.70,
+            (ColourBy::Change, MarketPeriod::Year) => 1.00,
             (ColourBy::Volatility, MarketPeriod::Min3) => 0.003,
             (ColourBy::Volatility, MarketPeriod::Min5) => 0.004,
             (ColourBy::Volatility, MarketPeriod::Min15) => 0.008,
@@ -48,6 +52,10 @@ impl ColourBy {
             (ColourBy::Volatility, MarketPeriod::Hour) => 0.015,
             (ColourBy::Volatility, MarketPeriod::Day) => 0.08,
             (ColourBy::Volatility, MarketPeriod::Week) => 0.20,
+            (ColourBy::Volatility, MarketPeriod::Month) => 0.40,
+            (ColourBy::Volatility, MarketPeriod::Quarter) => 0.65,
+            (ColourBy::Volatility, MarketPeriod::HalfYear) => 0.90,
+            (ColourBy::Volatility, MarketPeriod::Year) => 1.25,
             // Funding is hourly whatever the period: 0.008% an hour.
             (ColourBy::Funding, _) => 0.00008,
         }

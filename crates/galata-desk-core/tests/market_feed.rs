@@ -1035,6 +1035,26 @@ async fn a_chart_of_an_unwatched_market_is_streamed_loaded_once_and_stopped() {
 }
 
 #[tokio::test(start_paused = true)]
+async fn a_year_chart_keeps_a_year_of_three_day_candles() {
+    let mut r = rig(&["BTC"]);
+    r.settle().await;
+    let year = key("BTC", MarketPeriod::Year);
+    r.feed.set_charts([year.clone()]);
+    let snapshot = r.settle().await;
+    assert_eq!(r.venue.count("candleSnapshot BTC 3d"), 1);
+    let ChartView::Ready(chart) = &snapshot.charts[&year] else {
+        panic!("{:?}", snapshot.charts[&year]);
+    };
+    assert_eq!(chart.interval, Interval::D3);
+    // A year of three-day candles, plus the one forming: none trimmed away.
+    assert!(
+        (121..=123).contains(&chart.candles.len()),
+        "{}",
+        chart.candles.len()
+    );
+}
+
+#[tokio::test(start_paused = true)]
 async fn a_chart_of_a_watched_market_at_the_watchlists_period_costs_nothing_more() {
     let mut r = rig(&["BTC"]);
     r.settle().await;

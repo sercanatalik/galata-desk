@@ -7,7 +7,7 @@
 A heatmap of the markets you watch, up to 40. **+ Add market** adds one.
 
 - Each tile shows the last price, the change and volatility over the period
-  you pick (3 minutes to 7 days), and a dot when you hold a position there.
+  you pick (3 minutes to 1 year), and a dot when you hold a position there.
 - A held market's tile also shows the position's value and its 30-day,
   year-to-date and all-time PNL.
 - Tiles sort by change, volatility, funding or name, and are coloured by
@@ -93,8 +93,9 @@ Every part of the workspace is a panel with a header: its title, its link
 channels, **maximise** and **close**. **Add panel** adds one beside the
 largest panel:
 
-- **Chart**: a market's candles over its own period. Narrow charts drop the
-  price axis rather than cut figures off.
+- **Chart**: a market's candles over its own period, chosen from the period
+  button in its header. A new chart starts at the toolbar's period. Narrow
+  charts drop the price axis rather than cut figures off.
 - **Watchlist tiles**: the tiles, with the same colours, sort and figures.
 - **Market detail**, with Buy and Sell.
 - **Position**: the account's position in a market.

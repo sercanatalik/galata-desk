@@ -8209,6 +8209,44 @@ fn each_chart_picks_its_own_period_from_its_header_and_links_keep_it(cx: &mut Te
 }
 
 #[gpui_kit::test]
+fn a_chart_can_cover_up_to_a_year_and_every_period_saves_under_its_own_name(
+    cx: &mut TestAppContext,
+) {
+    use crate::markets::ChartPanel;
+    use crate::markets::dock::{PanelKind, period_name, period_named};
+    use crate::markets::period_item;
+    use gpui_kit::component::dock::DockLayout;
+    // Every period comes back as itself from its saved name.
+    for period in MarketPeriod::ALL {
+        assert_eq!(
+            period_named(&period_name(period)),
+            Some(period),
+            "{period:?}"
+        );
+    }
+    let (window, _desk, markets, _keys, _dir) =
+        workspace_with(cx, &["BTC"], |panel, window, cx| {
+            DockLayout::h_split().child(panel(PanelKind::Chart, Some("BTC"), window, cx), None)
+        });
+    cx.update_window(window.into(), |_, window, cx| {
+        let button = window.find("chart-period").bounds();
+        assert_eq!(period_item(MarketPeriod::Year), "1Y \u{b7} 3-day candles");
+        pick_from(window, button, &period_item(MarketPeriod::Year), cx);
+    })
+    .unwrap();
+    cx.update_window(window.into(), |_, window, cx| {
+        window.render_frame(cx);
+        let chart = &panels_of::<ChartPanel>(&markets, cx)[0];
+        assert_eq!(chart.read(cx).title_text(cx), "BTC \u{b7} 1Y");
+        assert_eq!(chart.read(cx).record(cx).interval.as_deref(), Some("1y"));
+        let held = markets.read(cx).model().read(cx).chart_holds();
+        assert_eq!(held.len(), 1);
+        assert_eq!(held[0].0.period, MarketPeriod::Year);
+    })
+    .unwrap();
+}
+
+#[gpui_kit::test]
 fn a_new_chart_starts_at_the_toolbar_period_and_keeps_it_through_a_relaunch(
     cx: &mut TestAppContext,
 ) {

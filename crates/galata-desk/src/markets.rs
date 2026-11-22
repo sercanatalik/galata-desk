@@ -720,6 +720,10 @@ impl Markets {
                         "30m" => MarketPeriod::Min30,
                         "hour" => MarketPeriod::Hour,
                         "week" => MarketPeriod::Week,
+                        "month" => MarketPeriod::Month,
+                        "quarter" => MarketPeriod::Quarter,
+                        "halfyear" => MarketPeriod::HalfYear,
+                        "year" => MarketPeriod::Year,
                         _ => MarketPeriod::Day,
                     };
                     m.period = period;
@@ -1678,6 +1682,10 @@ fn period_words(period: MarketPeriod) -> &'static str {
         MarketPeriod::Hour => "1 hour",
         MarketPeriod::Day => "24 hours",
         MarketPeriod::Week => "7 days",
+        MarketPeriod::Month => "30 days",
+        MarketPeriod::Quarter => "90 days",
+        MarketPeriod::HalfYear => "180 days",
+        MarketPeriod::Year => "1 year",
     }
 }
 
@@ -1687,6 +1695,9 @@ fn interval_words(interval: Interval) -> &'static str {
         Interval::M1 => "1-minute candles",
         Interval::M15 => "15-minute candles",
         Interval::H2 => "2-hour candles",
+        Interval::H8 => "8-hour candles",
+        Interval::D1 => "1-day candles",
+        Interval::D3 => "3-day candles",
     }
 }
 
@@ -1701,8 +1712,11 @@ fn time_label(open_ms: u64, span_ms: u64) -> String {
         at.format("%H:%M").to_string()
     } else if span_ms <= 72 * HOUR {
         at.format("%b %-d %H:%M").to_string()
-    } else {
+    } else if span_ms <= 120 * 24 * HOUR {
         at.format("%b %-d").to_string()
+    } else {
+        // Half a year or more crosses a year's end: the month and year.
+        at.format("%b %Y").to_string()
     }
 }
 
@@ -1714,8 +1728,10 @@ fn short_time_label(open_ms: u64, span_ms: u64) -> String {
         .with_timezone(&Local);
     if span_ms <= 72 * 3_600_000 {
         at.format("%H:%M").to_string()
-    } else {
+    } else if span_ms <= 120 * 24 * 3_600_000 {
         at.format("%b %-d").to_string()
+    } else {
+        at.format("%b '%y").to_string()
     }
 }
 
