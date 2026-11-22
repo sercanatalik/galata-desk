@@ -81,6 +81,8 @@ mod workspace;
 #[cfg(test)]
 pub use blotter::{BlotterPanel, BlotterTab};
 pub use chart::ChartPanel;
+#[cfg(test)]
+pub use chart::period_item;
 pub use detail::DetailPanel;
 use model::Account;
 pub use model::{MarketSource, MarketsModel};

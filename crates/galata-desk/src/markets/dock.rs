@@ -528,6 +528,15 @@ impl Panel for Kept {}
 /// the dock's default.
 macro_rules! dock_panel {
     ($panel:ty, $kind:expr) => {
+        $crate::markets::dock::dock_panel!(
+            $panel,
+            $kind,
+            |_: &mut Self, _: &mut gpui_kit::Context<Self>| None
+        );
+    };
+    // `$extra` draws controls of the panel's own before its channel menu,
+    // as a chart's period menu.
+    ($panel:ty, $kind:expr, $extra:expr) => {
         impl gpui_kit::Focusable for $panel {
             fn focus_handle(&self, _: &gpui_kit::App) -> gpui_kit::FocusHandle {
                 self.dock.focus.clone()
@@ -581,9 +590,12 @@ macro_rules! dock_panel {
             ) -> Option<impl gpui_kit::IntoElement> {
                 // Only a workspace panel has links to set.
                 self.dock.bus.as_ref()?;
-                Some($crate::markets::dock::channel_menu(
-                    cx.entity().downgrade(),
-                    self.dock.roles(cx),
+                let extra: Option<gpui_kit::AnyElement> = ($extra)(self, cx);
+                Some(gpui_kit::component::h_flex().gap_1().children(extra).child(
+                    $crate::markets::dock::channel_menu(
+                        cx.entity().downgrade(),
+                        self.dock.roles(cx),
+                    ),
                 ))
             }
 

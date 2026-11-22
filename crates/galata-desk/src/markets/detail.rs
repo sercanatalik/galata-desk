@@ -167,16 +167,25 @@ impl DetailPanel {
             };
         let funding_tone = |l: &Live| ui::tone_of(sign(l.funding));
 
+        // Docked, it fills its place, down to its windowed width; the dock
+        // draws the dividers. Windowed, it is a column beside the chart.
+        let docked = self.dock.area.is_some();
         v_flex()
             .id("market-detail")
-            .w(px(DETAIL_WIDTH))
+            .map(|d| {
+                if docked {
+                    d.w_full().min_w(px(DETAIL_WIDTH))
+                } else {
+                    d.w(px(DETAIL_WIDTH))
+                        .flex_shrink_0()
+                        .border_r_1()
+                        .border_color(Palette::rule())
+                }
+            })
             .h_full()
-            .flex_shrink_0()
             .px_4()
             .py_3()
             .gap(px(3.))
-            .border_r_1()
-            .border_color(Palette::rule())
             .child(
                 h_flex()
                     .gap(px(7.))

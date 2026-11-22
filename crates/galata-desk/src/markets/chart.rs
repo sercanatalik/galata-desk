@@ -49,7 +49,7 @@ pub struct ChartPanel {
     _subscriptions: Vec<Subscription>,
 }
 
-dock_panel!(ChartPanel, PanelKind::Chart);
+dock_panel!(ChartPanel, PanelKind::Chart, ChartPanel::period_menu);
 
 impl ChartPanel {
     pub fn new(model: Entity<MarketsModel>, source: MarketSource, cx: &mut Context<Self>) -> Self {
@@ -65,7 +65,41 @@ impl ChartPanel {
         dock: DockMeta,
         cx: &mut Context<Self>,
     ) -> Self {
+        // The chart owns its period: a new chart, or one saved without a
+        // period, starts at the toolbar's and keeps it.
+        let period = period.or(Some(model.read(cx).period));
         Self::build(model, MarketSource::Own(market), period, dock, cx)
+    }
+
+    /// The header's period menu: every period, with the candles it gives.
+    fn period_menu(&mut self, cx: &mut Context<Self>) -> Option<AnyElement> {
+        use gpui_kit::component::Sizable as _;
+        use gpui_kit::component::button::{Button, ButtonVariants as _};
+        use gpui_kit::component::menu::DropdownMenu as _;
+        let current = self.period(cx);
+        let panel = cx.entity().downgrade();
+        Some(
+            Button::new("chart-period")
+                .ghost()
+                .xsmall()
+                .label(current.label())
+                .accessibility_label(format!("Chart period: {}", current.label()))
+                .dropdown_menu(move |mut menu, _, _| {
+                    for period in MarketPeriod::ALL {
+                        let panel = panel.clone();
+                        menu = menu.item(
+                            PopupMenuItem::new(period_item(period))
+                                .checked(period == current)
+                                .on_click(move |_, _, cx| {
+                                    let _ =
+                                        panel.update(cx, |p, cx| p.set_period(Some(period), cx));
+                                }),
+                        );
+                    }
+                    menu
+                })
+                .into_any_element(),
+        )
     }
 
     fn build(
@@ -183,7 +217,6 @@ impl ChartPanel {
     }
 
     /// Cover `period`, or follow the toolbar's with `None`.
-    #[allow(dead_code, reason = "the workspace's chart panels use it")]
     pub fn set_period(&mut self, period: Option<MarketPeriod>, cx: &mut Context<Self>) {
         if self.period != period {
             self.period = period;
@@ -572,4 +605,13 @@ impl Render for ChartPanel {
             .child(chart)
             .into_any_element()
     }
+}
+
+/// A period in a chart's period menu: its label and the candles it gives.
+pub fn period_item(period: MarketPeriod) -> String {
+    format!(
+        "{} \u{b7} {}",
+        period.label(),
+        interval_words(period.interval())
+    )
 }

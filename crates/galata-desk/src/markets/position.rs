@@ -1086,14 +1086,23 @@ impl PositionPanel {
                 )
         });
 
+        // Docked, it fills its place, down to its windowed width; the dock
+        // draws the dividers. Windowed, it is a column beside the chart.
+        let docked = self.dock.area.is_some();
         v_flex()
             .id("position-panel")
             .relative()
-            .w(px(market_position::WIDTH))
+            .map(|d| {
+                if docked {
+                    d.w_full().min_w(px(market_position::WIDTH))
+                } else {
+                    d.w(px(market_position::WIDTH))
+                        .flex_shrink_0()
+                        .border_l_1()
+                        .border_color(Palette::rule())
+                }
+            })
             .h_full()
-            .flex_shrink_0()
-            .border_l_1()
-            .border_color(Palette::rule())
             .child(header)
             .child(
                 div()

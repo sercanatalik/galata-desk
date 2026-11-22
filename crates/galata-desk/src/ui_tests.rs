@@ -8044,6 +8044,239 @@ fn the_first_workspace_is_the_trader_preset(cx: &mut TestAppContext) {
 // ---- The remembered workspace ----------------------------------------------
 
 #[gpui_kit::test]
+fn docked_detail_and_position_panels_fill_their_group(cx: &mut TestAppContext) {
+    use crate::markets::dock::PanelKind;
+    use gpui_kit::component::dock::DockLayout;
+    let (window, desk, _markets, _keys, _dir) =
+        workspace_with(cx, &["BTC", "ETH"], |panel, window, cx| {
+            DockLayout::h_split()
+                .child(panel(PanelKind::Detail, Some("ETH"), window, cx), None)
+                .child(panel(PanelKind::Position, Some("ETH"), window, cx), None)
+        });
+    cx.update_window(window.into(), |_, window, cx| {
+        let fills = walked(vec![eth_fill(
+            60_000,
+            FillSide::Bought,
+            "2.5",
+            "1741.2",
+            "0",
+            "2.18",
+        )]);
+        give_account(&desk, Some(vec![eth_long_row()]), Some(fills), cx);
+        window.render_frame(cx);
+    })
+    .unwrap();
+    cx.update_window(window.into(), |_, window, cx| {
+        window.render_frame(cx);
+        let close = |a: gpui_kit::Pixels, b: gpui_kit::Pixels| (a - b).abs() <= px(1.);
+        let groups: Vec<_> = window
+            .find_all("panel-title")
+            .into_iter()
+            .map(|e| e.bounds())
+            .collect();
+        assert_eq!(groups.len(), 2);
+
+        // Each fills its half of the window, well past its windowed width.
+        let detail = window.find("market-detail").bounds();
+        let column = window.find("position-panel").bounds();
+        let half = window.bounds().size.width / 2.;
+        assert!(detail.size.width > half - px(20.), "{detail:?}");
+        assert!(column.size.width > half - px(20.), "{column:?}");
+        assert!(detail.right() <= column.left(), "{detail:?} {column:?}");
+
+        // The detail's buttons span it, inside its padding.
+        let buy = window.find("trade-buy").bounds();
+        let sell = window.find("trade-sell").bounds();
+        assert!(buy.left() - detail.left() < px(20.), "{buy:?} {detail:?}");
+        assert!(
+            detail.right() - sell.right() < px(20.),
+            "{sell:?} {detail:?}"
+        );
+        assert!(close(buy.size.width, sell.size.width));
+
+        // The last trade shows in full, inside the panel.
+        let trade = window.find("last-trade").bounds();
+        assert!(trade.right() <= column.right(), "{trade:?} {column:?}");
+    })
+    .unwrap();
+}
+
+/// Press the button at `bounds`, then the menu item labelled `item`.
+fn pick_from(
+    window: &mut gpui_kit::Window,
+    bounds: gpui_kit::Bounds<gpui_kit::Pixels>,
+    item: &str,
+    cx: &mut gpui_kit::App,
+) {
+    for (at, label) in [
+        (bounds.center(), None),
+        (gpui_kit::point(px(0.), px(0.)), Some(item)),
+    ] {
+        let at = match label {
+            Some(label) => window.find_by_label(label).bounds().center(),
+            None => at,
+        };
+        window.pointer_move(at, None, cx);
+        window.pointer_down(at, gpui_kit::MouseButton::Left, cx);
+        window.pointer_up(at, gpui_kit::MouseButton::Left, cx);
+        window.render_frame(cx);
+    }
+}
+
+#[gpui_kit::test]
+fn each_chart_picks_its_own_period_from_its_header_and_links_keep_it(cx: &mut TestAppContext) {
+    use crate::markets::ChartPanel;
+    use crate::markets::dock::{Action, PanelKind, Role};
+    use crate::markets::links::LinkEvent;
+    use crate::markets::period_item;
+    use gpui_kit::component::dock::DockLayout;
+    let (window, _desk, markets, keys, _dir) =
+        workspace_with(cx, &["BTC", "ETH"], |panel, window, cx| {
+            DockLayout::h_split()
+                .child(panel(PanelKind::Chart, Some("BTC"), window, cx), None)
+                .child(panel(PanelKind::Chart, Some("BTC"), window, cx), None)
+        });
+    let by_key = |markets: &Entity<Markets>, key: &str, cx: &gpui_kit::App| {
+        panels_of::<ChartPanel>(markets, cx)
+            .into_iter()
+            .find(|c| c.read(cx).record(cx).key == key)
+            .unwrap()
+    };
+    cx.update_window(window.into(), |_, window, cx| {
+        // Both start at the toolbar's period.
+        for key in &keys {
+            assert_eq!(
+                by_key(&markets, key, cx).read(cx).title_text(cx),
+                "BTC \u{b7} 24H"
+            );
+        }
+        let buttons: Vec<_> = window
+            .find_all("chart-period")
+            .into_iter()
+            .map(|e| e.bounds())
+            .collect();
+        assert_eq!(buttons.len(), 2, "a period menu in each chart's header");
+        let second = *buttons
+            .iter()
+            .max_by(|a, b| a.origin.x.partial_cmp(&b.origin.x).unwrap())
+            .unwrap();
+        pick_from(window, second, &period_item(MarketPeriod::Min30), cx);
+    })
+    .unwrap();
+    cx.update_window(window.into(), |_, window, cx| {
+        window.render_frame(cx);
+        let mut titles: Vec<String> = keys
+            .iter()
+            .map(|k| by_key(&markets, k, cx).read(cx).title_text(cx))
+            .collect();
+        titles.sort();
+        assert_eq!(titles, ["BTC \u{b7} 24H", "BTC \u{b7} 30m"]);
+        let held = markets.read(cx).model().read(cx).chart_holds();
+        assert_eq!(held.len(), 2, "one hold per period: {held:?}");
+    })
+    .unwrap();
+
+    // Both listen on A; a market sent there changes their market, not
+    // their period.
+    for key in &keys {
+        link(&markets, key, [Role::Listen, Role::Off, Role::Off], &[], cx);
+    }
+    link(
+        &markets,
+        "sender",
+        [Role::Send, Role::Off, Role::Off],
+        &[Action::SetMarket],
+        cx,
+    );
+    cx.update_window(window.into(), |_, window, cx| {
+        let bus = markets.read(cx).workspace_bus().unwrap();
+        bus.update(cx, |b, cx| {
+            b.publish("sender", LinkEvent::SetMarket(MarketId::new("ETH")), cx)
+        });
+        window.render_frame(cx);
+    })
+    .unwrap();
+    cx.update_window(window.into(), |_, window, cx| {
+        window.render_frame(cx);
+        let mut titles: Vec<String> = keys
+            .iter()
+            .map(|k| by_key(&markets, k, cx).read(cx).title_text(cx))
+            .collect();
+        titles.sort();
+        assert_eq!(titles, ["ETH \u{b7} 24H", "ETH \u{b7} 30m"]);
+    })
+    .unwrap();
+}
+
+#[gpui_kit::test]
+fn a_new_chart_starts_at_the_toolbar_period_and_keeps_it_through_a_relaunch(
+    cx: &mut TestAppContext,
+) {
+    use crate::markets::ChartPanel;
+    use crate::markets::dock::PanelKind;
+    use gpui_kit::component::dock::DockLayout;
+    let (window, _desk, markets, _keys, dir) =
+        workspace_with(cx, &["BTC", "ETH"], |panel, window, cx| {
+            DockLayout::h_split().child(panel(PanelKind::Detail, Some("BTC"), window, cx), None)
+        });
+    let toolbar_period = |window: &mut gpui_kit::Window, words: &str, cx: &mut gpui_kit::App| {
+        let bounds = window.find("mperiod").bounds();
+        pick_from(window, bounds, words, cx);
+    };
+    cx.update_window(window.into(), |_, window, cx| {
+        toolbar_period(window, "30 minutes", cx);
+    })
+    .unwrap();
+    cx.update_window(window.into(), |_, window, cx| {
+        window.render_frame(cx);
+        add_from_menu(window, "Chart", cx);
+    })
+    .unwrap();
+    cx.update_window(window.into(), |_, window, cx| {
+        window.render_frame(cx);
+        toolbar_period(window, "1 hour", cx);
+    })
+    .unwrap();
+    let title = cx
+        .update_window(window.into(), |_, window, cx| {
+            window.render_frame(cx);
+            let charts = panels_of::<ChartPanel>(&markets, cx);
+            assert_eq!(charts.len(), 1);
+            charts[0].read(cx).title_text(cx)
+        })
+        .unwrap();
+    assert!(
+        title.ends_with("\u{b7} 30m"),
+        "started at the toolbar's 30m and kept it: {title}"
+    );
+
+    // Written, then launched again on the same files.
+    cx.executor()
+        .advance_clock(std::time::Duration::from_secs(2));
+    cx.run_until_parked();
+    let (window2, desk2) = open_at(
+        cx,
+        dir.path(),
+        true,
+        size(
+            px(crate::DEFAULT_WINDOW_WIDTH),
+            px(crate::DEFAULT_WINDOW_HEIGHT),
+        ),
+    );
+    let markets2 = go_to_markets(window2, &desk2, cx);
+    fullscreen(cx, window2, &markets2, true);
+    cx.update(|cx| {
+        let charts = panels_of::<ChartPanel>(&markets2, cx);
+        assert_eq!(charts.len(), 1);
+        assert_eq!(
+            charts[0].read(cx).title_text(cx),
+            title,
+            "the period came back"
+        );
+    });
+}
+
+#[gpui_kit::test]
 fn the_workspace_and_its_links_come_back_after_a_relaunch(cx: &mut TestAppContext) {
     use crate::markets::ChartPanel;
     use crate::markets::dock::{self, PanelKind, Role};
