@@ -16,6 +16,7 @@ use crate::funding::Funding;
 use crate::history::History;
 use crate::markets::Markets;
 use crate::portfolio::{Portfolio, PortfolioEvent};
+use crate::risk::Risk;
 use crate::settings::{Settings, SettingsEvent};
 use crate::theme::Palette;
 use crate::watcher::WatcherSection;
@@ -29,6 +30,7 @@ pub enum Section {
     Markets,
     Funding,
     History,
+    Risk,
     /// Offered only while a watcher is connected.
     Watcher,
 }
@@ -46,6 +48,9 @@ enum Screen {
         /// Created with the portfolio: each of its tabs asks the venue
         /// nothing until it is first shown.
         history: Entity<History>,
+        /// Created with the portfolio: it asks the venue nothing until it is
+        /// first shown, and keeps its choices while another section is shown.
+        risk: Entity<Risk>,
         /// Created, and its stream opened, the first time Markets is chosen.
         markets: Option<Entity<Markets>>,
         _events: [Subscription; 2],
@@ -249,12 +254,17 @@ impl Desk {
             let portfolio = view.clone();
             cx.new(|cx| History::new(portfolio, address, window, cx))
         };
+        let risk = {
+            let portfolio = view.clone();
+            cx.new(|cx| Risk::new(portfolio, cx))
+        };
         #[allow(unused_mut)]
         let mut screen = Screen::Connected {
             section: Section::Portfolio,
             portfolio: view,
             funding,
             history,
+            risk,
             markets: None,
             _events: [events, changes],
         };
@@ -525,10 +535,11 @@ impl Render for Desk {
                 portfolio,
                 funding,
                 history,
+                risk,
                 markets,
                 ..
             } => {
-                let mut names = vec!["Portfolio", "Markets", "Funding", "History"];
+                let mut names = vec!["Portfolio", "Markets", "Funding", "History", "Risk"];
                 if self.watcher_section.is_some() {
                     names.push("Watcher");
                 }
@@ -540,7 +551,8 @@ impl Render for Desk {
                         Section::Markets => 1,
                         Section::Funding => 2,
                         Section::History => 3,
-                        Section::Watcher => 4,
+                        Section::Risk => 4,
+                        Section::Watcher => 5,
                     })
                     .on_click(cx.listener(|this, ix: &usize, window, cx| {
                         let to = match *ix {
@@ -548,6 +560,7 @@ impl Render for Desk {
                             1 => Section::Markets,
                             2 => Section::Funding,
                             3 => Section::History,
+                            4 => Section::Risk,
                             _ => Section::Watcher,
                         };
                         this.show(to, window, cx);
@@ -580,6 +593,11 @@ impl Render for Desk {
                     (Section::History, _) => (
                         portfolio.update(cx, |view, cx| view.freshness(cx)),
                         history.clone().into_any_element(),
+                    ),
+                    // Risk's positions are the portfolio's.
+                    (Section::Risk, _) => (
+                        portfolio.update(cx, |view, cx| view.freshness(cx)),
+                        risk.clone().into_any_element(),
                     ),
                     (Section::Watcher, _) if self.watcher_section.is_some() => (
                         portfolio.update(cx, |view, cx| view.freshness(cx)),
@@ -651,6 +669,14 @@ impl Desk {
     pub fn history_view(&self) -> Option<Entity<History>> {
         match &self.screen {
             Screen::Connected { history, .. } => Some(history.clone()),
+            Screen::Connect(_) => None,
+        }
+    }
+
+    /// The Risk view, when an account is connected.
+    pub fn risk_view(&self) -> Option<Entity<Risk>> {
+        match &self.screen {
+            Screen::Connected { risk, .. } => Some(risk.clone()),
             Screen::Connect(_) => None,
         }
     }

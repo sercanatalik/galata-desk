@@ -87,6 +87,7 @@ fn open_at(
             allow_mainnet_trading: stored.allow_mainnet_trading,
             quick_sizes: stored.quick_sizes,
             watcher_url: stored.watcher_url,
+            risk_benchmark: stored.risk_benchmark,
             // Nothing listens here: every venue request fails at once,
             // whichever network is chosen.
             info_override: Some("http://127.0.0.1:9/info".into()),
@@ -4784,6 +4785,7 @@ fn the_ticket_offers_the_quick_sizes_chosen_in_settings(cx: &mut TestAppContext)
 
 // ---- The History section -------------------------------------------------
 
+mod risk;
 mod watcher;
 
 mod history_section {

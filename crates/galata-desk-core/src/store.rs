@@ -146,6 +146,9 @@ pub struct Settings {
     /// Where galata-watcher answers, when one is connected. Its token is in
     /// the keychain, never here.
     pub watcher_url: Option<WatcherUrl>,
+    /// The Risk section's benchmark, kept while it is not held so that it
+    /// comes back when it is.
+    pub risk_benchmark: Option<MarketId>,
 }
 
 /// The order ticket's quick sizes: one to four whole US dollar amounts, each
@@ -287,6 +290,9 @@ struct SettingsRecord {
     /// its own.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     watcher_url: Option<String>,
+    /// Absent until a benchmark is chosen in Risk: the venue's coin name.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    risk_benchmark: Option<String>,
 }
 
 fn amounts_or_none<'de, D: serde::Deserializer<'de>>(d: D) -> Result<Option<Vec<u64>>, D::Error> {
@@ -415,6 +421,10 @@ impl Store {
                     .watcher_url
                     .as_deref()
                     .and_then(|u| WatcherUrl::parse(u).ok()),
+                risk_benchmark: record
+                    .risk_benchmark
+                    .filter(|c| !c.trim().is_empty())
+                    .map(MarketId::new),
             })
             .unwrap_or_default()
     }
@@ -429,6 +439,10 @@ impl Store {
                 .watcher_url
                 .as_ref()
                 .map(|u| u.as_str().to_string()),
+            risk_benchmark: settings
+                .risk_benchmark
+                .as_ref()
+                .map(|m| m.coin().to_string()),
         };
         let text = serde_json::to_string_pretty(&record).expect("the record serialises");
         self.write_whole(SETTINGS_FILE, &text)
@@ -593,7 +607,10 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let store = Store::at(dir.path());
         store.save_workspace(&workspace()).unwrap();
-        assert_eq!(store.workspace(), WorkspaceFile::Read(Box::new(workspace())));
+        assert_eq!(
+            store.workspace(),
+            WorkspaceFile::Read(Box::new(workspace()))
+        );
         // Markets are written by dex and ticker.
         let text = std::fs::read_to_string(dir.path().join(WORKSPACE_FILE)).unwrap();
         assert!(text.contains(r#""dex": "xyz""#) && text.contains(r#""ticker": "NVDA""#));
@@ -697,6 +714,7 @@ mod tests {
                 allow_mainnet_trading: false,
                 quick_sizes: QuickSizes::default(),
                 watcher_url: None,
+                risk_benchmark: None,
             }
         );
         let on = Settings {
@@ -706,6 +724,30 @@ mod tests {
         };
         store.save_settings(&on).unwrap();
         assert_eq!(store.settings(), on);
+    }
+
+    #[test]
+    fn the_risk_benchmark_is_remembered_and_absent_until_chosen() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::at(dir.path());
+        assert_eq!(store.settings().risk_benchmark, None);
+        store
+            .save_settings(&Settings {
+                risk_benchmark: Some(MarketId::new("xyz:SILVER")),
+                ..Settings::default()
+            })
+            .unwrap();
+        assert_eq!(
+            store.settings().risk_benchmark,
+            Some(MarketId::new("xyz:SILVER"))
+        );
+        let text = std::fs::read_to_string(dir.path().join(SETTINGS_FILE)).unwrap();
+        assert!(
+            text.contains("\"risk_benchmark\": \"xyz:SILVER\""),
+            "{text}"
+        );
+        // The rest of the settings are untouched by it.
+        assert_eq!(store.settings().network, Network::Mainnet);
     }
 
     #[test]
@@ -922,6 +964,7 @@ mod tests {
                 allow_mainnet_trading: true,
                 quick_sizes: QuickSizes::default(),
                 watcher_url: None,
+                risk_benchmark: None,
             }
         );
     }
@@ -963,6 +1006,7 @@ mod tests {
             allow_mainnet_trading: false,
             quick_sizes: QuickSizes::check(&["20000", "2000"]).unwrap(),
             watcher_url: None,
+            risk_benchmark: None,
         };
         store.save_settings(&settings).unwrap();
         assert_eq!(store.settings(), settings);
@@ -987,6 +1031,7 @@ mod tests {
                 allow_mainnet_trading: true,
                 quick_sizes: QuickSizes::check(&["2000"]).unwrap(),
                 watcher_url: None,
+                risk_benchmark: None,
             })
             .unwrap();
         let text = std::fs::read_to_string(dir.path().join(SETTINGS_FILE)).unwrap();

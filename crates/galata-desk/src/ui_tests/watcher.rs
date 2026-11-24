@@ -420,7 +420,7 @@ pub fn go_to_watcher(
 ) -> Entity<crate::watcher::WatcherSection> {
     cx.update_window(window.into(), |_, window, cx| {
         window.render_frame(cx);
-        window.within("sections").click(4usize, cx);
+        window.within("sections").click(5usize, cx);
     })
     .unwrap();
     cx.run_until_parked();
@@ -458,7 +458,7 @@ fn the_switch_offers_watcher_after_history_only_while_connected(cx: &mut TestApp
     let (window, desk, _dir) = open_tall(cx);
     cx.update_window(window.into(), |_, window, cx| {
         window.render_frame(cx);
-        assert!(window.within("sections").try_find(4usize).is_none());
+        assert!(window.within("sections").try_find(5usize).is_none());
         desk.update(cx, |d, cx| {
             d.show(crate::desk::Section::Watcher, window, cx)
         });
@@ -482,7 +482,7 @@ fn the_switch_offers_watcher_after_history_only_while_connected(cx: &mut TestApp
             desk.read(cx).section(),
             Some(crate::desk::Section::Portfolio)
         );
-        assert!(window.within("sections").try_find(4usize).is_none());
+        assert!(window.within("sections").try_find(5usize).is_none());
     })
     .unwrap();
 }

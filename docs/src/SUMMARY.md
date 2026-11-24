@@ -9,6 +9,7 @@
 - [Markets](markets.md)
 - [Funding](funding.md)
 - [History](history.md)
+- [Risk](risk.md)
 - [Watcher](watcher.md)
 - [Trading](trading.md)
 - [Settings and storage](settings.md)

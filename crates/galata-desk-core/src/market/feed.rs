@@ -14,7 +14,7 @@ use tokio::task::JoinHandle;
 use tokio::time::Instant;
 
 use super::candles::{Candle, Series, Stats, chart, stats};
-use super::history::{Budget, Loaded, Loader, Request};
+use super::history::{Loaded, Loader, Request, SharedBudget, shared_history_budget};
 use super::ws::{Event, Sub, Subscriptions, WsClient};
 use super::{Interval, MarketId, MarketPeriod};
 use crate::venue::{AssetCtx, Info, PerpMeta, Transport, VenueError};
@@ -208,7 +208,7 @@ impl MarketFeed {
             client,
             events,
             system_clock(),
-            Budget::for_history(),
+            shared_history_budget(),
             period,
             watched,
         )
@@ -220,7 +220,7 @@ impl MarketFeed {
         subscriptions: S,
         events: mpsc::UnboundedReceiver<Event>,
         clock: Clock,
-        budget: Budget,
+        budget: impl Into<SharedBudget>,
         period: MarketPeriod,
         watched: Vec<MarketId>,
     ) -> Self {

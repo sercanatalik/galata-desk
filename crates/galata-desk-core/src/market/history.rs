@@ -6,6 +6,7 @@
 //! burst to fill a small watchlist at once, then a steady pace.
 
 use std::collections::{HashSet, VecDeque};
+use std::sync::{Arc, Mutex, OnceLock};
 use std::time::Duration;
 
 use tokio::sync::mpsc;
@@ -70,6 +71,41 @@ impl Budget {
     }
 }
 
+/// One budget spent by several loaders, so together they stay inside it.
+/// Clones share the same tokens.
+#[derive(Debug, Clone)]
+pub struct SharedBudget(Arc<Mutex<Budget>>);
+
+impl SharedBudget {
+    pub fn new(budget: Budget) -> Self {
+        Self(Arc::new(Mutex::new(budget)))
+    }
+
+    /// As [`Budget::spend`], on the shared tokens.
+    pub fn spend(&self, weight: f64) -> Result<(), Duration> {
+        self.0
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .spend(weight)
+    }
+}
+
+impl From<Budget> for SharedBudget {
+    fn from(budget: Budget) -> Self {
+        Self::new(budget)
+    }
+}
+
+/// The app's one allowance for candle history, [`Budget::for_history`],
+/// shared by Markets and Risk so that both together keep to the measured
+/// first minute.
+pub fn shared_history_budget() -> SharedBudget {
+    static BUDGET: OnceLock<SharedBudget> = OnceLock::new();
+    BUDGET
+        .get_or_init(|| SharedBudget::new(Budget::for_history()))
+        .clone()
+}
+
 /// A request for one market's history at one interval.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Request {
@@ -111,11 +147,11 @@ pub struct Loader {
 impl Loader {
     pub fn start<T: Transport>(
         info: Info<T>,
-        budget: Budget,
+        budget: impl Into<SharedBudget>,
     ) -> (Self, mpsc::UnboundedReceiver<Loaded>) {
         let (requests, rx) = mpsc::unbounded_channel();
         let (tx, loaded) = mpsc::unbounded_channel();
-        let task = tokio::spawn(run(info, budget, rx, tx));
+        let task = tokio::spawn(run(info, budget.into(), rx, tx));
         (Self { requests, task }, loaded)
     }
 
@@ -143,7 +179,7 @@ impl Drop for Loader {
 
 async fn run<T: Transport>(
     info: Info<T>,
-    mut budget: Budget,
+    budget: SharedBudget,
     mut requests: mpsc::UnboundedReceiver<Ask>,
     loaded: mpsc::UnboundedSender<Loaded>,
 ) {
@@ -225,6 +261,16 @@ mod tests {
 
         tokio::time::advance(wait).await;
         assert!(budget.spend(REQUEST_WEIGHT).is_ok());
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn clones_of_a_shared_budget_spend_the_same_tokens() {
+        let markets = SharedBudget::new(Budget::new(44.0, 1.0));
+        let risk = markets.clone();
+        assert!(markets.spend(REQUEST_WEIGHT).is_ok());
+        assert!(risk.spend(REQUEST_WEIGHT).is_ok());
+        assert!(markets.spend(REQUEST_WEIGHT).is_err());
+        assert!(risk.spend(REQUEST_WEIGHT).is_err());
     }
 
     #[tokio::test(start_paused = true)]

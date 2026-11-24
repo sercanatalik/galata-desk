@@ -68,6 +68,9 @@ message. It is not a transaction and grants no permission to trade.
   history.
 - **History**: trades, orders, funding payments, deposits and withdrawals,
   with CSV export.
+- **Risk**: one-day VaR (parametric, Cornish-Fisher, historical, expected
+  shortfall) over 30D to 1Y, a correlation matrix, each position's share of
+  VaR, beta to a benchmark you pick, and clusters of correlated positions.
 - **Watcher**: with [galata-watcher](https://github.com/sercanatalik/galata-watcher)
   connected, edit its call levels, stop alerts and liquidation distance.
   Levels are drawn on the chart.

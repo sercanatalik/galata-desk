@@ -11,6 +11,7 @@ mod market_position;
 mod market_tile;
 mod markets;
 mod portfolio;
+mod risk;
 mod settings;
 #[cfg(feature = "shot")]
 mod shot;
@@ -59,6 +60,8 @@ pub struct Core {
     /// Where galata-watcher answers, when one is connected in settings. Its
     /// token is read from `secrets` when needed, never kept here.
     pub watcher_url: Option<galata_desk_core::watcher::WatcherUrl>,
+    /// The Risk section's chosen benchmark, kept while it is not held.
+    pub risk_benchmark: Option<galata_desk_core::market::MarketId>,
     /// `GALATA_DESK_INFO_URL` points the app at another info endpoint, for
     /// development. It is used whatever the network.
     pub info_override: Option<String>,
@@ -103,6 +106,7 @@ impl Core {
             allow_mainnet_trading: self.allow_mainnet_trading,
             quick_sizes: self.quick_sizes.clone(),
             watcher_url: self.watcher_url.clone(),
+            risk_benchmark: self.risk_benchmark.clone(),
         }
     }
 }
@@ -178,6 +182,7 @@ fn main() {
                 allow_mainnet_trading: settings.allow_mainnet_trading,
                 quick_sizes: settings.quick_sizes,
                 watcher_url: settings.watcher_url,
+                risk_benchmark: settings.risk_benchmark,
                 info_override: std::env::var("GALATA_DESK_INFO_URL").ok(),
                 ws_override: std::env::var("GALATA_DESK_WS_URL").ok(),
             });

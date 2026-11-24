@@ -13,6 +13,7 @@ pub mod history;
 pub mod market;
 pub mod model;
 pub mod network;
+pub mod risk;
 pub mod secrets;
 pub mod store;
 pub mod trade;
