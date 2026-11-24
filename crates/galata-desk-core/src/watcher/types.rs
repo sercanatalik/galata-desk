@@ -294,7 +294,10 @@ mod tests {
         assert_eq!(config.pnl_summary, Some(true));
         let mut off = config.clone();
         off.pnl_summary = Some(false);
-        assert_eq!(serde_json::to_value(&off).unwrap()["pnl_summary"], json!(false));
+        assert_eq!(
+            serde_json::to_value(&off).unwrap()["pnl_summary"],
+            json!(false)
+        );
 
         let mut older = read;
         older.as_object_mut().unwrap().remove("pnl_summary");
@@ -302,7 +305,10 @@ mod tests {
         assert_eq!(config.pnl_summary, None);
         assert!(!config.rest.contains_key("pnl_summary"));
         let written = serde_json::to_value(&config).unwrap();
-        assert!(written.get("pnl_summary").is_none(), "an older watcher would refuse it");
+        assert!(
+            written.get("pnl_summary").is_none(),
+            "an older watcher would refuse it"
+        );
     }
 
     #[test]
@@ -328,12 +334,18 @@ mod tests {
     fn move_settings_are_written_only_when_the_watcher_has_them() {
         let mut read: Value = serde_json::from_str(CONFIG).unwrap();
         let config: WatcherConfig = serde_json::from_value(read.clone()).unwrap();
-        assert_eq!((config.move_alerts, config.move_pct), (Some(true), Some(Decimal::ONE)));
+        assert_eq!(
+            (config.move_alerts, config.move_pct),
+            (Some(true), Some(Decimal::ONE))
+        );
         let mut set = config.clone();
         set.move_alerts = Some(false);
         set.move_pct = Some(Decimal::new(25, 1));
         let written = serde_json::to_value(&set).unwrap();
-        assert_eq!((written["move_alerts"].clone(), written["move_pct"].clone()), (json!(false), json!("2.5")));
+        assert_eq!(
+            (written["move_alerts"].clone(), written["move_pct"].clone()),
+            (json!(false), json!("2.5"))
+        );
 
         read.as_object_mut().unwrap().remove("move_alerts");
         read.as_object_mut().unwrap().remove("move_pct");

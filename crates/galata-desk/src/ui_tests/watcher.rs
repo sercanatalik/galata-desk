@@ -906,7 +906,11 @@ fn move_alerts_are_one_switch_with_a_percentage_in_range(cx: &mut TestAppContext
     let section = go_to_watcher(cx, window, &desk);
     cx.update(|cx| {
         assert_eq!(section.read(cx).move_alerts_shown(cx), Some(true));
-        assert_eq!(section.read(cx).move_pct_text(cx), "1", "the watcher's percentage");
+        assert_eq!(
+            section.read(cx).move_pct_text(cx),
+            "1",
+            "the watcher's percentage"
+        );
     });
 
     click(cx, window, "move-alerts");
@@ -930,7 +934,11 @@ fn move_alerts_are_one_switch_with_a_percentage_in_range(cx: &mut TestAppContext
     for out_of_range in ["15", "0.2", "wide"] {
         set(cx, out_of_range);
         cx.update(|cx| {
-            assert_eq!(link.read(cx).saved.len(), saves, "{out_of_range} is not saved");
+            assert_eq!(
+                link.read(cx).saved.len(),
+                saves,
+                "{out_of_range} is not saved"
+            );
             assert_eq!(
                 section.read(cx).message(),
                 Some((crate::watcher::MOVE_RANGE.into(), true))
@@ -942,7 +950,11 @@ fn move_alerts_are_one_switch_with_a_percentage_in_range(cx: &mut TestAppContext
         let saved = link.read(cx).saved.last().unwrap().clone();
         assert_eq!(saved.move_pct, Some(Decimal::new(2, 0)));
         assert_eq!(saved.move_alerts, Some(false), "the switch is kept");
-        assert_eq!(saved.rest["telegram_chat"], recorded_config().rest["telegram_chat"], "the chat is kept");
+        assert_eq!(
+            saved.rest["telegram_chat"],
+            recorded_config().rest["telegram_chat"],
+            "the chat is kept"
+        );
     });
 }
 
@@ -963,7 +975,10 @@ fn an_older_watcher_gets_no_move_controls_and_no_move_settings(cx: &mut TestAppC
     click(cx, window, "stop-alerts");
     cx.update(|cx| {
         let written = serde_json::to_value(link.read(cx).saved.last().unwrap()).unwrap();
-        assert!(written.get("move_alerts").is_none() && written.get("move_pct").is_none(), "{written}");
+        assert!(
+            written.get("move_alerts").is_none() && written.get("move_pct").is_none(),
+            "{written}"
+        );
     });
 }
 

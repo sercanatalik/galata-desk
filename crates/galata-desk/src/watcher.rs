@@ -278,7 +278,11 @@ impl WatcherSection {
             cx.notify();
             return;
         };
-        self.save(move |c| c.move_pct = Some(pct), "Move percentage saved.", cx);
+        self.save(
+            move |c| c.move_pct = Some(pct),
+            "Move percentage saved.",
+            cx,
+        );
     }
 
     fn save_near_liq(&mut self, cx: &mut Context<Self>) {
@@ -575,7 +579,8 @@ impl WatcherSection {
         let update = self.market_update_on(cx);
         let moves = self.move_alerts_on(cx);
         let mut about =
-            "An alert each time a take-profit or stop-loss order fills, on every ticker".to_string();
+            "An alert each time a take-profit or stop-loss order fills, on every ticker"
+                .to_string();
         about.push_str(match (summary.is_some(), update.is_some()) {
             (true, true) => {
                 ", a PnL summary every half hour and the watchlist's prices every 15 minutes, from 07:00 to 23:00."
@@ -693,7 +698,10 @@ impl WatcherSection {
 
     /// The move alerts switch's state, when the watcher reports the setting.
     fn move_alerts_on(&self, cx: &gpui_kit::App) -> Option<bool> {
-        self.snapshot(cx).config.config().and_then(|c| c.move_alerts)
+        self.snapshot(cx)
+            .config
+            .config()
+            .and_then(|c| c.move_alerts)
     }
 
     /// The market update switch's state, when the watcher reports the
@@ -707,7 +715,10 @@ impl WatcherSection {
 
     /// The PnL summary switch's state, when the watcher reports the setting.
     fn pnl_summary_on(&self, cx: &gpui_kit::App) -> Option<bool> {
-        self.snapshot(cx).config.config().and_then(|c| c.pnl_summary)
+        self.snapshot(cx)
+            .config
+            .config()
+            .and_then(|c| c.pnl_summary)
     }
 
     /// The switch's state: the watcher's, or on before it has been read.
