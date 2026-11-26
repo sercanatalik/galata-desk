@@ -1,0 +1,66 @@
+# The site, published to GitHub Pages at https://sercanatalik.github.io/galata-desk/
+# on every push to main: the landing page at /, the book at /docs/.
+#
+# site/build.sh does the work, the same here as locally (site/README.md). A
+# pull request builds and uploads the site without deploying it, so a broken
+# build or a book screenshot that differs from assets/screenshots/ is caught
+# before it reaches main.
+#
+# No path filter: the site depends on site/, docs/ and assets/, and the build
+# takes under a minute.
+
+name: Pages
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+# One deployment at a time, and never cancel one half-way: a cancelled
+# deploy can leave the site on a partial upload.
+concurrency:
+  group: pages
+  cancel-in-progress: false
+
+jobs:
+  build:
+    name: Build the site
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install mdBook
+        run: |
+          mkdir -p "$HOME/bin"
+          curl -sSL https://github.com/rust-lang/mdBook/releases/download/v0.5.4/mdbook-v0.5.4-x86_64-unknown-linux-gnu.tar.gz \
+            | tar -xz -C "$HOME/bin"
+          echo "$HOME/bin" >> "$GITHUB_PATH"
+
+      - name: Build
+        run: ./site/build.sh
+
+      # Uploaded on a pull request too, so the built site can be downloaded
+      # and looked at before it is published.
+      - uses: actions/upload-pages-artifact@v3
+        with:
+          path: site/_build
+
+  deploy:
+    name: Deploy to Pages
+    # Pushes and manual runs only: a fork's pull request must not publish.
+    if: github.event_name != 'pull_request'
+    needs: build
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    permissions:
+      pages: write
+      id-token: write
+    steps:
+      - id: deployment
+        uses: actions/deploy-pages@v4
