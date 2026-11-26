@@ -210,7 +210,6 @@ async fn choosing_another_market_abandons_the_first_ones_pages_and_keeps_its_row
 #[tokio::test(start_paused = true)]
 async fn a_young_market_stops_at_its_first_hour() {
     let v = venue();
-    // Listed 28 days ago.
     let since = T0 - 28 * 24 * HOUR_MS;
     v.fake
         .listed_since
