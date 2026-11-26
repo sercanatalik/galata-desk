@@ -503,7 +503,6 @@ impl TilesPanel {
             .on_key_down(cx.listener(move |this, event: &KeyDownEvent, window, cx| {
                 match event.keystroke.key.as_str() {
                     "enter" | "space" => this.select(&key_market, window, cx),
-                    // A focused tile is removed with Delete or Backspace.
                     "backspace" | "delete" => this.remove(&key_market, cx),
                     _ => {}
                 }

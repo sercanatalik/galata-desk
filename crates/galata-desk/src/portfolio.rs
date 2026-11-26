@@ -1245,7 +1245,6 @@ fn history_chart(
         .max(high.abs().max(low.abs()) * 0.001)
         .max(0.01);
     let chart = chart.y_domain(low - air, high + air);
-    // Mark zero where the series crosses it.
     let chart = if low < 0. && high > 0. {
         chart.reference_line(0.)
     } else {
