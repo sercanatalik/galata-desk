@@ -10,3 +10,6 @@
 
 .DS_Store
 /docs/book
+
+# A take-profit and stop-loss probe's output: what the venue answered, not source.
+/tpsl-probe-out/
