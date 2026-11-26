@@ -1,0 +1,247 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>galata desk</title>
+<meta name="description" content="A native macOS desktop for one Hyperliquid account: portfolio, markets, funding and history, with orders and positions you can manage from the same window.">
+<link rel="icon" href="assets/favicon.svg" type="image/svg+xml">
+<link rel="icon" href="assets/favicon.png" type="image/png">
+<style>
+@font-face { font-family: "Instrument Sans"; src: url("assets/fonts/InstrumentSans-Regular.ttf") format("truetype"); font-weight: 400; font-display: swap; }
+@font-face { font-family: "Instrument Sans"; src: url("assets/fonts/InstrumentSans-Medium.ttf") format("truetype"); font-weight: 500; font-display: swap; }
+@font-face { font-family: "Instrument Sans"; src: url("assets/fonts/InstrumentSans-SemiBold.ttf") format("truetype"); font-weight: 600; font-display: swap; }
+@font-face { font-family: "JetBrains Mono"; src: url("assets/fonts/JetBrainsMono-Regular.ttf") format("truetype"); font-weight: 400; font-display: swap; }
+@font-face { font-family: "JetBrains Mono"; src: url("assets/fonts/JetBrainsMono-Medium.ttf") format("truetype"); font-weight: 500; font-display: swap; }
+:root {
+  --ground: #0e1012; --panel: #15181b; --raised: #1b1f23; --line: #262b30;
+  --text: #ece8df; --muted: #a29e94; --brand: #f0a73a; --brand-hover: #f4b85c;
+  --sans: "Instrument Sans", system-ui, -apple-system, sans-serif;
+  --mono: "JetBrains Mono", ui-monospace, Menlo, monospace;
+}
+* { box-sizing: border-box; }
+html { background: var(--ground); }
+body { margin: 0; background: var(--ground); color: var(--text); font: 400 16px/1.55 var(--sans); -webkit-font-smoothing: antialiased; }
+a { color: var(--text); }
+img { display: block; max-width: 100%; height: auto; }
+.wrap { max-width: 1200px; margin: 0 auto; padding: 0 24px; }
+.mark { width: 22px; height: 22px; color: var(--text); flex: none; }
+
+header { position: sticky; top: 0; z-index: 10; background: rgba(14, 16, 18, 0.92); backdrop-filter: blur(8px); border-bottom: 1px solid var(--line); }
+header .wrap { display: flex; align-items: center; gap: 24px; height: 56px; }
+.brand { display: flex; align-items: center; gap: 10px; text-decoration: none; font-weight: 600; letter-spacing: -0.01em; }
+.brand .galata { color: var(--brand); }
+.brand .desk { color: var(--muted); }
+nav { margin-left: auto; display: flex; gap: 22px; }
+nav a { color: var(--muted); text-decoration: none; font-size: 15px; }
+nav a:hover { color: var(--text); }
+
+.hero { padding: 64px 0 40px; }
+.hero-top { display: grid; grid-template-columns: 7fr 5fr; gap: 40px; align-items: center; }
+.eyebrow { font: 500 12px/1 var(--mono); letter-spacing: 0.12em; color: var(--muted); text-transform: uppercase; }
+h1 { font-weight: 600; font-size: 48px; line-height: 1.08; letter-spacing: -0.025em; margin: 16px 0 16px; }
+h2 { font-weight: 600; font-size: 30px; line-height: 1.15; letter-spacing: -0.02em; margin: 0 0 12px; }
+h3 { font-weight: 600; font-size: 19px; letter-spacing: -0.01em; margin: 0 0 8px; }
+.lead { color: var(--muted); font-size: 18px; margin: 0 0 24px; max-width: 34em; }
+.buttons { display: flex; gap: 12px; flex-wrap: wrap; }
+.button { display: inline-block; padding: 10px 18px; border-radius: 6px; text-decoration: none; font-weight: 600; font-size: 15px; border: 1px solid var(--line); }
+.button.primary { background: var(--brand); color: var(--ground); border-color: var(--brand); }
+.button.primary:hover { background: var(--brand-hover); border-color: var(--brand-hover); }
+.button.secondary:hover { border-color: var(--muted); }
+.terminal { background: var(--panel); border: 1px solid var(--line); border-radius: 8px; padding: 18px 20px; font: 400 14px/1.8 var(--mono); overflow-x: auto; }
+.terminal .prompt { color: var(--muted); user-select: none; }
+.terminal div { overflow-wrap: anywhere; }
+/* A grid column shrinks below its content, so one long line cannot widen the page. */
+.hero-top > *, .row > *, .safeguards > *, .cards > * { min-width: 0; }
+.terminal small { display: block; margin-top: 8px; color: var(--muted); font-family: var(--sans); font-size: 13px; }
+.shot { display: block; margin-top: 40px; border: 1px solid var(--line); border-radius: 8px; overflow: hidden; background: var(--panel); }
+.caption { color: var(--muted); font-size: 14px; margin: 10px 0 0; }
+
+.notice { border-top: 1px solid var(--line); border-bottom: 1px solid var(--line); background: var(--panel); }
+.notice p { margin: 0; padding: 14px 0; font-size: 15px; }
+.notice strong { color: var(--brand); font-weight: 600; }
+
+section { padding: 72px 0; border-bottom: 1px solid var(--line); }
+.row { display: grid; grid-template-columns: 4fr 8fr; gap: 40px; align-items: center; margin-top: 48px; }
+.row.flip { grid-template-columns: 8fr 4fr; }
+.row p, .card p { color: var(--muted); margin: 0 0 12px; }
+.row a.more, .card a.more { color: var(--brand); text-decoration: none; font-weight: 500; font-size: 15px; }
+.row .shot { margin-top: 0; }
+.cards { display: grid; grid-template-columns: repeat(4, 1fr); gap: 16px; margin-top: 48px; }
+.card { background: var(--panel); border: 1px solid var(--line); border-radius: 8px; padding: 22px; }
+
+.safeguards { background: var(--panel); border: 1px solid var(--line); border-radius: 8px; padding: 32px; margin-top: 32px; display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 32px; align-items: start; }
+.safeguards h3 { font: 500 12px/1 var(--mono); letter-spacing: 0.12em; text-transform: uppercase; color: var(--muted); margin-bottom: 16px; }
+.safeguards ul { margin: 0; padding-left: 18px; }
+.safeguards li { margin-bottom: 10px; }
+.safeguards li::marker { color: var(--brand); }
+.safeguards code { font: 400 14px var(--mono); color: var(--text); }
+.connect img { border: 1px solid var(--line); border-radius: 6px; }
+
+footer { padding: 32px 0 48px; color: var(--muted); font-size: 14px; }
+footer .wrap { display: flex; gap: 16px; align-items: center; flex-wrap: wrap; }
+footer a { color: var(--muted); }
+footer a:hover { color: var(--text); }
+footer .links { margin-left: auto; display: flex; gap: 18px; }
+
+@media (max-width: 900px) {
+  .hero-top, .row, .row.flip, .safeguards { grid-template-columns: 1fr; }
+  .row.flip .shot { order: 2; }
+  .cards { grid-template-columns: 1fr 1fr; }
+  nav .wide { display: none; }
+  h1 { font-size: 36px; }
+  section { padding: 48px 0; }
+}
+@media (max-width: 520px) {
+  .cards { grid-template-columns: 1fr; }
+  .wrap { padding: 0 16px; }
+  footer .links { margin-left: 0; }
+}
+</style>
+</head>
+<body>
+<svg width="0" height="0" style="position:absolute" aria-hidden="true">
+  <symbol id="tower" viewBox="0 0 64 64">
+    <circle cx="32" cy="4.2" r="1.6" fill="currentColor"/>
+    <path fill="currentColor" fill-rule="evenodd" d="M32 6.5L46.5 25.5H44.5V34H42V56H46V60H18V56H22V34H19.5V25.5H17.5ZM24.2 32V29.4A1.8 1.8 0 0 1 27.8 29.4V32ZM30.2 32V29.4A1.8 1.8 0 0 1 33.8 29.4V32ZM36.2 32V29.4A1.8 1.8 0 0 1 39.8 29.4V32ZM30.8 42V38.6A1.2 1.2 0 0 1 33.2 38.6V42ZM29.6 47.5A2.4 2.4 0 0 1 34.4 47.5A2.4 2.4 0 0 1 33.38 49.47L34.3 55H29.7L30.62 49.47A2.4 2.4 0 0 1 29.6 47.5Z"/>
+  </symbol>
+</svg>
+
+<header>
+  <div class="wrap">
+    <a class="brand" href="./"><svg class="mark" aria-hidden="true"><use href="#tower"/></svg><span><span class="galata">galata</span> <span class="desk">desk</span></span></a>
+    <nav>
+      <a href="docs/">Docs</a>
+      <a class="wide" href="#trading">Trading</a>
+      <a class="wide" href="#risk">Risk</a>
+      <a href="https://github.com/sercanatalik/galata-desk">GitHub</a>
+    </nav>
+  </div>
+</header>
+
+<main>
+  <div class="hero">
+    <div class="wrap">
+      <div class="hero-top">
+        <div>
+          <div class="eyebrow">macOS · Hyperliquid · Rust</div>
+          <h1>A native macOS desktop for one Hyperliquid account.</h1>
+          <p class="lead">Portfolio, markets, funding and history, with orders and positions you can manage from the same window.</p>
+          <div class="buttons">
+            <a class="button primary" href="docs/getting-started.html">Get started</a>
+            <a class="button secondary" href="https://github.com/sercanatalik/galata-desk">Source on GitHub</a>
+          </div>
+        </div>
+        <div class="terminal" aria-label="Quick start">
+          <div><span class="prompt">$ </span>git clone https://github.com/sercanatalik/galata-desk</div>
+          <div><span class="prompt">$ </span>cd galata-desk</div>
+          <div><span class="prompt">$ </span>cargo run -p galata-desk</div>
+          <small>You need macOS and Rust.</small>
+        </div>
+      </div>
+      <a class="shot" href="assets/screenshots/workspace.png"><img src="assets/screenshots/workspace.png" width="2960" height="1920" alt="Markets in fullscreen: a workspace of linked panels: watchlist, market detail, position, charts at three periods and a blotter"></a>
+      <p class="caption">Markets in fullscreen: a workspace you arrange, linked by channel. The account shown is one of Hyperliquid's own public vaults.</p>
+    </div>
+  </div>
+
+  <div class="notice">
+    <div class="wrap"><p><strong>Status: 0.x, macOS only.</strong> It runs from source, built with Cargo as above.</p></div>
+  </div>
+
+  <section id="sections">
+    <div class="wrap">
+      <h2>The account, section by section</h2>
+
+      <div class="row">
+        <div>
+          <h3>Portfolio</h3>
+          <p>Account value, PNL, volume and drawdown by period, equity breakdown, a value/PNL chart, and tabs for positions, balances and open orders.</p>
+          <a class="more" href="docs/portfolio.html">Portfolio in the docs →</a>
+        </div>
+        <a class="shot" href="assets/screenshots/portfolio.png"><img src="assets/screenshots/portfolio.png" width="2960" height="1920" loading="lazy" alt="Portfolio: account value, breakdown, PNL chart and positions"></a>
+      </div>
+
+      <div class="row flip">
+        <a class="shot" href="assets/screenshots/markets.png"><img src="assets/screenshots/markets.png" width="2960" height="1920" loading="lazy" alt="Markets: the selected market's detail and candlestick chart above heatmap tiles"></a>
+        <div>
+          <h3>Markets</h3>
+          <p>A heatmap of up to 40 watched markets. Selecting one shows its details, a candlestick chart with your fills and entry price, and a position panel with PNL, last trade, open orders and alerts.</p>
+          <a class="more" href="docs/markets.html">Markets in the docs →</a>
+        </div>
+      </div>
+
+      <div class="cards">
+        <div class="card" id="risk">
+          <h3>Risk</h3>
+          <p>One-day VaR (parametric, Cornish-Fisher, historical, expected shortfall) over 30D to 1Y, a correlation matrix, each position's share of VaR, beta to a benchmark you pick, and clusters of correlated positions.</p>
+          <a class="more" href="docs/risk.html">Risk →</a>
+        </div>
+        <div class="card">
+          <h3>Funding</h3>
+          <p>What your positions pay and earn, current rates, and rate history.</p>
+          <a class="more" href="docs/funding.html">Funding →</a>
+        </div>
+        <div class="card">
+          <h3>History</h3>
+          <p>Trades, orders, funding payments, deposits and withdrawals, with CSV export.</p>
+          <a class="more" href="docs/history.html">History →</a>
+        </div>
+        <div class="card">
+          <h3>Watcher</h3>
+          <p>With galata-watcher connected, edit its call levels, stop alerts and liquidation distance. Levels are drawn on the chart.</p>
+          <a class="more" href="docs/watcher.html">Watcher →</a>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <section id="trading">
+    <div class="wrap">
+      <h2>What it takes to trade</h2>
+      <p class="lead">You connect by signing a message in your browser wallet. Nothing is signed for trading unless you save an API key and confirm an action.</p>
+      <div class="safeguards">
+        <div>
+          <h3>Before anything is sent</h3>
+          <ul>
+            <li>Trading needs an API wallet key, saved in Settings and kept in the macOS Keychain.</li>
+            <li>Nothing is sent until you confirm.</li>
+            <li>Mainnet trading also needs <em>Allow trading on mainnet</em>, off by default.</li>
+            <li>Every action passes one gate in the core (<code>trade::gate</code>) that checks the network, the key and that the key is an approved API wallet of the account.</li>
+          </ul>
+        </div>
+        <div>
+          <h3>It never</h3>
+          <ul>
+            <li>asks for a seed phrase or a private key to connect;</li>
+            <li>retries an order on its own;</li>
+            <li>writes a key or seed phrase to its storage;</li>
+            <li>closes a position other than reduce-only.</li>
+          </ul>
+        </div>
+        <div class="connect">
+          <a href="assets/screenshots/connect.png"><img src="assets/screenshots/connect.png" width="700" height="420" loading="lazy" alt="The connect page in a browser"></a>
+          <p class="caption">The connect page, served by the app to your browser. Signing in is not a transaction and grants no permission to trade.</p>
+        </div>
+      </div>
+      <p style="margin-top:24px"><a class="more" style="color:var(--brand);text-decoration:none;font-weight:500" href="docs/trading.html">Trading in the docs →</a></p>
+    </div>
+  </section>
+</main>
+
+<footer>
+  <div class="wrap">
+    <svg class="mark" aria-hidden="true"><use href="#tower"/></svg>
+    <span>MIT · part of Galata:
+      <a href="https://github.com/sercanatalik/galata-datawatch">datawatch</a>
+      <a href="https://github.com/sercanatalik/galata-tower">tower</a>
+      <a href="https://github.com/sercanatalik/galata-vault">vault</a>
+      <a href="https://github.com/sercanatalik/galata-watcher">watcher</a></span>
+    <span class="links">
+      <a href="docs/roadmap.html">Not built yet</a>
+      <a href="https://github.com/sercanatalik/galata-desk/releases">Releases</a>
+      <a href="docs/">All docs</a>
+    </span>
+  </div>
+</footer>
+</body>
+</html>

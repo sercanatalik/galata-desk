@@ -10,6 +10,8 @@
 
 .DS_Store
 /docs/book
+# The built site: site/build.sh writes it, Pages publishes it.
+/site/_build
 
 # A take-profit and stop-loss probe's output: what the venue answered, not source.
 /tpsl-probe-out/

@@ -5,11 +5,17 @@ authors = ["Sercan Atalik"]
 language = "en"
 src = "src"
 
+[build]
+# Under the landing page: site/build.sh builds both into site/_build.
+build-dir = "../site/_build/docs"
+
 [output.html]
 additional-css = ["theme/galata.css"]
+# A link back to the landing page at the top of the sidebar.
+additional-js = ["theme/galata.js"]
 git-repository-url = "https://github.com/sercanatalik/galata-desk"
 edit-url-template = "https://github.com/sercanatalik/galata-desk/edit/main/docs/{path}"
-site-url = "/galata-desk/"
+site-url = "/galata-desk/docs/"
 default-theme = "navy"
 preferred-dark-theme = "navy"
 no-section-label = true

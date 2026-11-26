@@ -13,3 +13,12 @@
 .ayu .menu-title::before {
   background-image: url("../images/logo-on-dark.svg");
 }
+
+/* The link back to the landing page, at the top of the sidebar (galata.js). */
+.gd-home {
+  display: block;
+  margin: 0 0 1em;
+  font-weight: 600;
+  text-decoration: none;
+  color: #f0a73a !important;
+}

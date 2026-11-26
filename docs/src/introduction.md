@@ -16,6 +16,9 @@ API key and confirm an action.
 
 The account shown is a public Hyperliquid vault.
 
+The project's home page, with every screenshot and the trading safeguards
+on one page: [galata desk](../).
+
 ## Status
 
 0.x, macOS only. It can place orders from the Markets section, amend and
