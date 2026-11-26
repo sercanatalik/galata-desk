@@ -16,7 +16,8 @@ cargo run -p galata-desk-core --example signing                    # check signi
 crates/galata-desk-core/   no UI: venue client, figures, feeds, signing, store
 crates/galata-desk/        the GPUI app
 connect/                   the connect page, built to connect/dist (committed)
-docs/                      this site (mdBook)
+docs/                      this book (mdBook)
+site/                      the landing page, and the build of both (site/README.md)
 ```
 
 Everything that can be tested without a window lives in the core. Its tests
@@ -79,6 +80,8 @@ built it.
 
 ## This site
 
-The docs are an [mdBook](https://rust-lang.github.io/mdBook/) in `docs/`.
-Preview with `mdbook serve docs`. Pushing to `main` publishes them through
-GitHub Actions.
+The docs are an [mdBook](https://rust-lang.github.io/mdBook/) in `docs/`,
+built with the landing page into `site/_build` by `site/build.sh`; pass
+`--serve` to preview the book. Every push to `main` builds the site in
+GitHub Actions. It is not published: GitHub Pages is off for the repository,
+and `site/README.md` says how to turn it on.
