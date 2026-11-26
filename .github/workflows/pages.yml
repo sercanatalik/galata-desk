@@ -1,10 +1,11 @@
-# The site, published to GitHub Pages at https://sercanatalik.github.io/galata-desk/
-# on every push to main: the landing page at /, the book at /docs/.
+# The site: the landing page at /, the book at /docs/ (site/README.md).
 #
-# site/build.sh does the work, the same here as locally (site/README.md). A
-# pull request builds and uploads the site without deploying it, so a broken
-# build or a book screenshot that differs from assets/screenshots/ is caught
-# before it reaches main.
+# site/build.sh does the work, the same here as locally. Every push to main
+# and every pull request builds it and uploads the result, so a broken build
+# or a book screenshot that differs from assets/screenshots/ is caught. Pages
+# is not enabled on the repository, so nothing deploys on its own: the
+# deploy job runs only when this workflow is run by hand, once Pages is on
+# with source "GitHub Actions".
 #
 # No path filter: the site depends on site/, docs/ and assets/, and the build
 # takes under a minute.
@@ -51,8 +52,9 @@ jobs:
 
   deploy:
     name: Deploy to Pages
-    # Pushes and manual runs only: a fork's pull request must not publish.
-    if: github.event_name != 'pull_request'
+    # By hand only: Pages is off, and a deploy to it fails. A fork's pull
+    # request must never publish either way.
+    if: github.event_name == 'workflow_dispatch'
     needs: build
     runs-on: ubuntu-latest
     environment:

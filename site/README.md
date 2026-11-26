@@ -1,7 +1,7 @@
 # The site
 
-`https://sercanatalik.github.io/galata-desk/`: a landing page, with the book
-under it at `/docs/`.
+A landing page, with the book under it at `/docs/`. It is built and checked
+on every push but not published: GitHub Pages is off for the repository.
 
 | File | What it is |
 |---|---|
@@ -28,10 +28,12 @@ keeps copies because mdBook needs images inside `src`.
 
 ## Publishing it
 
-`.github/workflows/pages.yml` runs `site/build.sh` on every push to `main`, on
-pull requests and by hand. A pull request builds and uploads the site without
-deploying it. A push to `main` deploys it to GitHub Pages, whose source is set
-to "GitHub Actions" in the repository's settings.
+`.github/workflows/pages.yml` runs `site/build.sh` on every push to `main` and
+on pull requests, and uploads the built site as an artifact, which can be
+downloaded from the run. It deploys only when run by hand. To publish at
+`https://sercanatalik.github.io/galata-desk/`: turn Pages on with source
+"GitHub Actions" (`gh api -X POST repos/sercanatalik/galata-desk/pages -f
+build_type=workflow`), then run the workflow from the Actions tab.
 
 ## Its look
 
