@@ -1363,6 +1363,16 @@ impl Portfolio {
             .map(|t| (t.market.coin().to_string(), t.buy, t.at_market))
     }
 
+    /// Whether any of what the ticket asks the venue for when it opens, its
+    /// market, the account's limits in it and its mid, is still to come.
+    pub fn ticket_loading(&self) -> Option<bool> {
+        self.actions.ticket.as_ref().map(|t| {
+            matches!(t.asset, Fetch::Loading)
+                || matches!(t.active, Fetch::Loading)
+                || matches!(t.mid, Fetch::Loading)
+        })
+    }
+
     /// What the ticket says now, and whether it can be sent.
     pub fn ticket_state(&self, cx: &App) -> Option<(String, bool)> {
         let Some(t) = &self.actions.ticket else {

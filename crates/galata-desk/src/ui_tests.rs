@@ -6308,6 +6308,24 @@ fn with_a_ticket_panel_buy_fills_and_focuses_it_and_opens_no_dialog(cx: &mut Tes
 }
 
 #[gpui_kit::test]
+fn on_the_default_trader_the_ticket_settles_without_waiting_on_another_thread(
+    cx: &mut TestAppContext,
+) {
+    // No stand-in: the gate the app makes for itself.
+    let (window, desk, _dir) = open(cx, true);
+    let view = cx.update(|cx| desk.read(cx).portfolio_view().unwrap());
+    // One run until parked: a fact still to come is being waited for on the
+    // I/O runtime's threads.
+    on_view(cx, window, &view, |v, w, cx| {
+        v.open_ticket(MarketId::new("HYPE"), true, w, cx)
+    });
+    cx.update_window(window.into(), |_, _, cx| {
+        assert_eq!(view.read(cx).ticket_loading(), Some(false));
+    })
+    .unwrap();
+}
+
+#[gpui_kit::test]
 fn the_blotter_shows_the_sections_lists_and_closes_only_through_their_confirmation(
     cx: &mut TestAppContext,
 ) {
