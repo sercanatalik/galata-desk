@@ -205,7 +205,15 @@ async fn a_refused_save_returns_its_problems_and_changes_nothing() {
     let f = feed(&fake, SLOW).await;
     let mut rx = f.snapshots();
     let before = until(&mut rx, |s| s.reached_ms.is_some()).await;
-    match f.save(|c| c.accounts = Some(vec![galata_desk_core::watcher::WatchedAccount::new("hyperliquid", "0x00000000000000000000000000000000000000aa")])).await {
+    match f
+        .save(|c| {
+            c.accounts = Some(vec![galata_desk_core::watcher::WatchedAccount::new(
+                "hyperliquid",
+                "0x00000000000000000000000000000000000000aa",
+            )])
+        })
+        .await
+    {
         Err(WatcherError::Refused { problems }) => assert_eq!(problems.len(), 2),
         other => panic!("{other:?}"),
     }

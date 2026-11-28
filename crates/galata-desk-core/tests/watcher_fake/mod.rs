@@ -160,7 +160,11 @@ async fn handle(
         (Method::GET, "/alerts") => axum::Json(fixture("alerts.json")).into_response(),
         (Method::GET, "/accounts") => match &i.config {
             Some(_) => axum::Json(fixture("accounts.json")).into_response(),
-            None => (StatusCode::NOT_FOUND, axum::Json(json!({"error": "no configuration yet"}))).into_response(),
+            None => (
+                StatusCode::NOT_FOUND,
+                axum::Json(json!({"error": "no configuration yet"})),
+            )
+                .into_response(),
         },
         (Method::GET, "/config") => match &i.config {
             Some(c) => with_etag(StatusCode::OK, i.version, c.clone()),

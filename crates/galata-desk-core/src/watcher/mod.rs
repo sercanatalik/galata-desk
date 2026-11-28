@@ -12,5 +12,8 @@ mod url;
 pub use self::client::{Client, WatcherError};
 pub use self::feed::{ALERTS_KEPT, ConfigState, EVERY, Problem, WatcherFeed, WatcherSnapshot};
 
-pub use self::types::{Accounts, AlertRow, Direction, Health, Level, LevelState, ListedAccount, WatchedAccount, WatcherConfig};
+pub use self::types::{
+    Accounts, AlertRow, Direction, Health, Level, LevelState, ListedAccount, WatchedAccount,
+    WatcherConfig,
+};
 pub use self::url::{WatcherUrl, WatcherUrlError};

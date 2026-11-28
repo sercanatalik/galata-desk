@@ -319,7 +319,10 @@ fn test_connection_reports_each_outcome(cx: &mut TestAppContext) {
         config_version: Some(1),
     };
     let now = now();
-    let every = WatcherConfig { accounts: None, ..recorded_config() };
+    let every = WatcherConfig {
+        accounts: None,
+        ..recorded_config()
+    };
     let cases: Vec<(crate::watcher_link::TestAnswer, &str, bool)> = vec![
         (
             Ok((health(Some(now - 40_000)), Ok(recorded_config()), None)),
@@ -327,7 +330,11 @@ fn test_connection_reports_each_outcome(cx: &mut TestAppContext) {
             false,
         ),
         (
-            Ok((health(Some(now - 40_000)), Ok(every.clone()), Some(listing()))),
+            Ok((
+                health(Some(now - 40_000)),
+                Ok(every.clone()),
+                Some(listing()),
+            )),
             "Connected. Watching every account (derive-xyz owner_s3, hyperliquid main) on mainnet, configuration version 1, last checked 40 s ago.",
             false,
         ),
@@ -376,8 +383,17 @@ fn test_connection_reports_each_outcome(cx: &mut TestAppContext) {
 
 /// What the watcher lists: two accounts galata-markets serves it.
 fn listing() -> Accounts {
-    let listed = |venue: &str, alias: &str, watched| ListedAccount { venue: venue.into(), alias: alias.into(), watched };
-    Accounts { accounts: vec![listed("derive-xyz", "owner_s3", false), listed("hyperliquid", "main", true)] }
+    let listed = |venue: &str, alias: &str, watched| ListedAccount {
+        venue: venue.into(),
+        alias: alias.into(),
+        watched,
+    };
+    Accounts {
+        accounts: vec![
+            listed("derive-xyz", "owner_s3", false),
+            listed("hyperliquid", "main", true),
+        ],
+    }
 }
 
 /// As [`open_with_watcher`], with the watcher answering `GET /accounts` with
@@ -386,7 +402,12 @@ fn open_with_accounts(
     cx: &mut TestAppContext,
     snapshot: WatcherSnapshot,
     answer: Result<Accounts, WatcherError>,
-) -> (WindowHandle<Root>, Entity<Settings>, Entity<WatcherLink>, tempfile::TempDir) {
+) -> (
+    WindowHandle<Root>,
+    Entity<Settings>,
+    Entity<WatcherLink>,
+    tempfile::TempDir,
+) {
     let (window, desk, dir) = open_tall(cx);
     let settings = open_settings_page(cx, window, &desk);
     save_connection(cx, window, &settings, URL, TOKEN);
@@ -404,13 +425,29 @@ fn open_with_accounts(
 }
 
 #[gpui_kit::test]
-fn the_accounts_listed_are_chosen_by_venue_and_alias_and_no_address_is_sent(cx: &mut TestAppContext) {
-    let (window, settings, link, _dir) = open_with_accounts(cx, answered(ConfigState::Read(recorded_config()), now()), Ok(listing()));
+fn the_accounts_listed_are_chosen_by_venue_and_alias_and_no_address_is_sent(
+    cx: &mut TestAppContext,
+) {
+    let (window, settings, link, _dir) = open_with_accounts(
+        cx,
+        answered(ConfigState::Read(recorded_config()), now()),
+        Ok(listing()),
+    );
     cx.update(|cx| {
-        assert_eq!(link.read(cx).accounts_asked, 1, "asked once the watcher is configured");
+        assert_eq!(
+            link.read(cx).accounts_asked,
+            1,
+            "asked once the watcher is configured"
+        );
         assert_eq!(
             settings.read(cx).accounts_shown(cx),
-            (false, vec![("derive-xyz owner_s3".into(), false), ("hyperliquid main".into(), true)]),
+            (
+                false,
+                vec![
+                    ("derive-xyz owner_s3".into(), false),
+                    ("hyperliquid main".into(), true)
+                ]
+            ),
             "the recorded configuration watches main"
         );
     });
@@ -423,14 +460,27 @@ fn the_accounts_listed_are_chosen_by_venue_and_alias_and_no_address_is_sent(cx: 
         assert_eq!(saved.len(), 1);
         assert_eq!(
             saved[0].accounts,
-            Some(vec![WatchedAccount::new("derive-xyz", "owner_s3"), WatchedAccount::new("hyperliquid", "main")])
+            Some(vec![
+                WatchedAccount::new("derive-xyz", "owner_s3"),
+                WatchedAccount::new("hyperliquid", "main")
+            ])
         );
         let sent = serde_json::to_string(&saved[0]).unwrap();
-        assert!(!sent.contains("address") && !sent.contains("0x"), "no address goes to the watcher: {sent}");
-        assert_eq!(saved[0].rest.get("telegram_chat"), Some(&serde_json::json!("123456789")), "the rest kept as read");
+        assert!(
+            !sent.contains("address") && !sent.contains("0x"),
+            "no address goes to the watcher: {sent}"
+        );
+        assert_eq!(
+            saved[0].rest.get("telegram_chat"),
+            Some(&serde_json::json!("123456789")),
+            "the rest kept as read"
+        );
         assert_eq!(
             settings.read(cx).watcher_message(),
-            Some(("Saved. The watcher watches derive-xyz owner_s3, hyperliquid main.".into(), false))
+            Some((
+                "Saved. The watcher watches derive-xyz owner_s3, hyperliquid main.".into(),
+                false
+            ))
         );
     });
 
@@ -442,7 +492,13 @@ fn the_accounts_listed_are_chosen_by_venue_and_alias_and_no_address_is_sent(cx: 
         let saved = &link.read(cx).saved;
         assert_eq!(saved.len(), 2);
         assert_eq!(saved[1].accounts, None);
-        assert!(!serde_json::to_value(&saved[1]).unwrap().as_object().unwrap().contains_key("accounts"));
+        assert!(
+            !serde_json::to_value(&saved[1])
+                .unwrap()
+                .as_object()
+                .unwrap()
+                .contains_key("accounts")
+        );
         assert_eq!(
             settings.read(cx).watcher_message(),
             Some(("Saved. The watcher watches every account.".into(), false))
@@ -452,10 +508,22 @@ fn the_accounts_listed_are_chosen_by_venue_and_alias_and_no_address_is_sent(cx: 
 
 #[gpui_kit::test]
 fn an_unchanged_or_empty_choice_cannot_be_saved(cx: &mut TestAppContext) {
-    let (window, settings, link, _dir) = open_with_accounts(cx, answered(ConfigState::Read(recorded_config()), now()), Ok(listing()));
+    let (window, settings, link, _dir) = open_with_accounts(
+        cx,
+        answered(ConfigState::Read(recorded_config()), now()),
+        Ok(listing()),
+    );
     // Unticking main leaves nothing chosen.
     click(cx, window, ("watch-account", 1usize));
-    cx.update(|cx| assert_eq!(settings.read(cx).accounts_shown(cx).1, vec![("derive-xyz owner_s3".into(), false), ("hyperliquid main".into(), false)]));
+    cx.update(|cx| {
+        assert_eq!(
+            settings.read(cx).accounts_shown(cx).1,
+            vec![
+                ("derive-xyz owner_s3".into(), false),
+                ("hyperliquid main".into(), false)
+            ]
+        )
+    });
     click(cx, window, "save-accounts");
     // And ticking it again is what is watched already.
     click(cx, window, ("watch-account", 1usize));
@@ -465,21 +533,32 @@ fn an_unchanged_or_empty_choice_cannot_be_saved(cx: &mut TestAppContext) {
 
 #[gpui_kit::test]
 fn an_unconfigured_watcher_offers_no_account_choice(cx: &mut TestAppContext) {
-    let (window, settings, link, _dir) = open_with_accounts(cx, answered(ConfigState::Missing, now()), Ok(listing()));
+    let (window, settings, link, _dir) =
+        open_with_accounts(cx, answered(ConfigState::Missing, now()), Ok(listing()));
     cx.update_window(window.into(), |_, window, cx| {
         window.render_frame(cx);
         assert!(window.try_find("watched-accounts").is_none());
         assert!(window.try_find("watch-every").is_none());
         assert!(settings.read(cx).notice_unconfigured(cx));
-        assert_eq!(link.read(cx).accounts_asked, 0, "nothing asked of an unconfigured watcher");
+        assert_eq!(
+            link.read(cx).accounts_asked,
+            0,
+            "nothing asked of an unconfigured watcher"
+        );
     })
     .unwrap();
 }
 
 #[gpui_kit::test]
 fn accounts_that_cannot_be_listed_say_why_and_can_be_asked_again(cx: &mut TestAppContext) {
-    let why = WatcherError::NoAccounts { reason: "the configuration has no `markets_url`".into() };
-    let (window, settings, link, _dir) = open_with_accounts(cx, answered(ConfigState::Read(recorded_config()), now()), Err(why));
+    let why = WatcherError::NoAccounts {
+        reason: "the configuration has no `markets_url`".into(),
+    };
+    let (window, settings, link, _dir) = open_with_accounts(
+        cx,
+        answered(ConfigState::Read(recorded_config()), now()),
+        Err(why),
+    );
     cx.update(|cx| {
         assert_eq!(
             settings.read(cx).accounts_problem().as_deref(),

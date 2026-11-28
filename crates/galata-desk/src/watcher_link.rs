@@ -112,14 +112,22 @@ impl WatcherLink {
         #[cfg(not(test))]
         {
             let client = self.client.clone();
-            let asking = Core::get(cx).runtime.spawn(async move { client.accounts().await });
-            cx.background_spawn(async move { asking.await.unwrap_or(Err(WatcherError::Unreachable)) })
+            let asking = Core::get(cx)
+                .runtime
+                .spawn(async move { client.accounts().await });
+            cx.background_spawn(
+                async move { asking.await.unwrap_or(Err(WatcherError::Unreachable)) },
+            )
         }
         #[cfg(test)]
         {
             let _ = cx;
             self.accounts_asked += 1;
-            Task::ready(self.accounts_answer.clone().unwrap_or(Err(WatcherError::Unreachable)))
+            Task::ready(
+                self.accounts_answer
+                    .clone()
+                    .unwrap_or(Err(WatcherError::Unreachable)),
+            )
         }
     }
 

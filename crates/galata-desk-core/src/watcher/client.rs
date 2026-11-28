@@ -120,7 +120,9 @@ impl Client {
         match r.status() {
             StatusCode::OK => json(r).await,
             StatusCode::NOT_FOUND => Err(WatcherError::NoConfig),
-            s @ (StatusCode::CONFLICT | StatusCode::BAD_GATEWAY | StatusCode::SERVICE_UNAVAILABLE) => {
+            s @ (StatusCode::CONFLICT
+            | StatusCode::BAD_GATEWAY
+            | StatusCode::SERVICE_UNAVAILABLE) => {
                 #[derive(serde::Deserialize)]
                 struct Said {
                     error: String,

@@ -101,7 +101,10 @@ async fn a_refused_configuration_names_its_problems() {
     let fake = Fake::configured();
     let c = client(&fake.serve().await, TOKEN);
     let mut config = c.config().await.unwrap();
-    config.accounts = Some(vec![galata_desk_core::watcher::WatchedAccount::new("hyperliquid", "0x00000000000000000000000000000000000000aa")]);
+    config.accounts = Some(vec![galata_desk_core::watcher::WatchedAccount::new(
+        "hyperliquid",
+        "0x00000000000000000000000000000000000000aa",
+    )]);
     match c.put_config(&config).await {
         Err(WatcherError::Refused { problems }) => {
             assert_eq!(problems.len(), 2);
@@ -179,10 +182,27 @@ async fn the_accounts_are_listed_by_venue_and_alias_with_whether_each_is_watched
     let fake = Fake::configured();
     let c = client(&fake.serve().await, TOKEN);
     let listed = c.accounts().await.unwrap();
-    let names: Vec<(String, bool)> = listed.accounts.iter().map(|a| (a.account().to_string(), a.watched)).collect();
-    assert_eq!(names, [("derive-xyz owner_s3".to_string(), false), ("hyperliquid main".to_string(), true)]);
-    let asked = fake.seen().into_iter().find(|s| s.path == "/accounts").unwrap();
-    assert_eq!(asked.authorization.as_deref(), Some(&*format!("Bearer {TOKEN}")));
+    let names: Vec<(String, bool)> = listed
+        .accounts
+        .iter()
+        .map(|a| (a.account().to_string(), a.watched))
+        .collect();
+    assert_eq!(
+        names,
+        [
+            ("derive-xyz owner_s3".to_string(), false),
+            ("hyperliquid main".to_string(), true)
+        ]
+    );
+    let asked = fake
+        .seen()
+        .into_iter()
+        .find(|s| s.path == "/accounts")
+        .unwrap();
+    assert_eq!(
+        asked.authorization.as_deref(),
+        Some(&*format!("Bearer {TOKEN}"))
+    );
 
     let fresh = Fake::default();
     let c = client(&fresh.serve().await, TOKEN);
@@ -191,11 +211,18 @@ async fn the_accounts_are_listed_by_venue_and_alias_with_whether_each_is_watched
 
 #[tokio::test]
 async fn the_recorded_configuration_names_accounts_and_never_an_address() {
-    let config: galata_desk_core::watcher::WatcherConfig = serde_json::from_value(watcher_fake::fixture("config.json")).unwrap();
+    let config: galata_desk_core::watcher::WatcherConfig =
+        serde_json::from_value(watcher_fake::fixture("config.json")).unwrap();
     assert_eq!(config.watched(), "hyperliquid main");
-    let all = galata_desk_core::watcher::WatcherConfig { accounts: None, ..config.clone() };
+    let all = galata_desk_core::watcher::WatcherConfig {
+        accounts: None,
+        ..config.clone()
+    };
     assert_eq!(all.watched(), "every account");
     let written = serde_json::to_value(&all).unwrap();
-    assert!(written.get("accounts").is_none(), "every account: none named");
+    assert!(
+        written.get("accounts").is_none(),
+        "every account: none named"
+    );
     assert!(written.get("address").is_none());
 }

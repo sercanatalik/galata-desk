@@ -411,15 +411,12 @@ impl WatcherSection {
                     .child(dot())
                     .child(part(error))
                     .child(div().flex_1())
-                    .child(
-                        Button::new("alert-history")
-                            .small()
-                            .label(label)
-                            .on_click(cx.listener(|this, _, _, cx| {
-                                this.show_history = !this.show_history;
-                                cx.notify();
-                            })),
-                    ),
+                    .child(Button::new("alert-history").small().label(label).on_click(
+                        cx.listener(|this, _, _, cx| {
+                            this.show_history = !this.show_history;
+                            cx.notify();
+                        }),
+                    )),
             )
             .into_any_element()
     }

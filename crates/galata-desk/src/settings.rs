@@ -249,14 +249,18 @@ impl Settings {
     }
 
     fn list_accounts(&mut self, cx: &mut Context<Self>) {
-        let Some(link) = self.link.clone() else { return };
+        let Some(link) = self.link.clone() else {
+            return;
+        };
         self.listing = Listing::Asking;
         let asking = link.update(cx, |link, cx| link.accounts(cx));
         cx.spawn(async move |this, cx| {
             let answer = asking.await;
             let _ = this.update(cx, |this, cx| {
                 this.listing = match answer {
-                    Ok(listed) => Listing::Listed(listed.accounts.iter().map(|a| a.account()).collect()),
+                    Ok(listed) => {
+                        Listing::Listed(listed.accounts.iter().map(|a| a.account()).collect())
+                    }
                     Err(e) => Listing::Failed(e.to_string()),
                 };
                 cx.notify();
@@ -325,7 +329,10 @@ impl Settings {
                 this.watcher_message = Some(match outcome {
                     Ok(saved) => {
                         this.chosen = None;
-                        (format!("Saved. The watcher watches {}.", saved.watched()).into(), false)
+                        (
+                            format!("Saved. The watcher watches {}.", saved.watched()).into(),
+                            false,
+                        )
                     }
                     Err(e) => (e.to_string().into(), true),
                 });
@@ -441,7 +448,12 @@ impl Settings {
         let _ = (url, token);
     }
 
-    fn finish_test(&mut self, url: &WatcherUrl, answer: watcher_link::TestAnswer, cx: &mut Context<Self>) {
+    fn finish_test(
+        &mut self,
+        url: &WatcherUrl,
+        answer: watcher_link::TestAnswer,
+        cx: &mut Context<Self>,
+    ) {
         let (text, problem) = watcher_link::describe_test(url, answer, watcher_link::now_ms());
         self.testing = false;
         self.watcher_message = Some((text.into(), problem));
@@ -905,15 +917,25 @@ impl Settings {
                 Checkbox::new(("watch-account", ix))
                     .label(label)
                     .checked(on)
-                    .on_click(cx.listener(move |this, on: &bool, _, cx| this.choose_account(account.clone(), *on, cx)))
+                    .on_click(cx.listener(move |this, on: &bool, _, cx| {
+                        this.choose_account(account.clone(), *on, cx)
+                    }))
                     .into_any_element()
             })
             .collect();
         let listing: AnyElement = match &self.listing {
-            Listing::NotAsked | Listing::Asking => ui::label("Asking the watcher for its accounts\u{2026}").into_any_element(),
+            Listing::NotAsked | Listing::Asking => {
+                ui::label("Asking the watcher for its accounts\u{2026}").into_any_element()
+            }
             Listing::Failed(why) => h_flex()
                 .gap_3()
-                .child(div().flex_1().text_color(Palette::loss()).text_size(px(12.5)).child(why.clone()))
+                .child(
+                    div()
+                        .flex_1()
+                        .text_color(Palette::loss())
+                        .text_size(px(12.5))
+                        .child(why.clone()),
+                )
                 .child(
                     Button::new("list-accounts")
                         .small()
@@ -935,7 +957,12 @@ impl Settings {
         v_flex()
             .id("watched-accounts")
             .gap(px(6.))
-            .child(div().font_weight(gpui_kit::FontWeight::SEMIBOLD).text_size(px(12.5)).child("Watched accounts"))
+            .child(
+                div()
+                    .font_weight(gpui_kit::FontWeight::SEMIBOLD)
+                    .text_size(px(12.5))
+                    .child("Watched accounts"),
+            )
             .child(ui::label(WATCHED_NOTE))
             .child(listing)
             .child(

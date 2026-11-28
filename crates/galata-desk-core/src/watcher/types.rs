@@ -89,7 +89,11 @@ impl WatcherConfig {
     pub fn watched(&self) -> String {
         match &self.accounts {
             None => "every account".into(),
-            Some(named) => named.iter().map(|a| a.to_string()).collect::<Vec<_>>().join(", "),
+            Some(named) => named
+                .iter()
+                .map(|a| a.to_string())
+                .collect::<Vec<_>>()
+                .join(", "),
         }
     }
 }
