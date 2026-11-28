@@ -13,12 +13,11 @@
 //! The headless tests give a link its snapshots and record its saves instead:
 //! nothing in a test ever reaches a watcher.
 
-use galata_desk_core::format::short_address;
 use galata_desk_core::rust_decimal::Decimal;
 #[cfg(not(test))]
 use galata_desk_core::watcher::WatcherFeed;
 use galata_desk_core::watcher::{
-    Client, Direction, Level, WatcherConfig, WatcherError, WatcherSnapshot, WatcherUrl,
+    Accounts, Client, Direction, Level, WatcherConfig, WatcherError, WatcherSnapshot, WatcherUrl,
 };
 use gpui_kit::{App, AppContext, Context, Entity, Task};
 
@@ -35,6 +34,9 @@ pub struct WatcherLink {
     watchlist_tried: Option<Vec<String>>,
     #[cfg(not(test))]
     feed: WatcherFeed,
+    /// For what the feed does not read: the accounts galata-markets serves.
+    #[cfg(not(test))]
+    client: Client,
     #[cfg(not(test))]
     _watch: Task<()>,
     /// What a test's saves did, in order.
@@ -47,6 +49,12 @@ pub struct WatcherLink {
     /// not listed.
     #[cfg(test)]
     pub mids: std::collections::HashMap<String, Decimal>,
+    /// What a test's watcher answers to `GET /accounts`, and how many times
+    /// it was asked.
+    #[cfg(test)]
+    pub accounts_answer: Option<Result<Accounts, WatcherError>>,
+    #[cfg(test)]
+    pub accounts_asked: usize,
 }
 
 impl WatcherLink {
@@ -56,10 +64,11 @@ impl WatcherLink {
         cx.new(|cx: &mut Context<Self>| {
             #[cfg(not(test))]
             {
+                let client = Client::new(url.clone(), token);
                 let feed = {
                     let core = Core::get(cx);
                     let _io = core.runtime.enter();
-                    WatcherFeed::start(Client::new(url.clone(), token))
+                    WatcherFeed::start(client.clone())
                 };
                 let mut snapshots = feed.snapshots();
                 let _watch = cx.spawn(async move |this, cx| {
@@ -77,6 +86,7 @@ impl WatcherLink {
                     snapshot: WatcherSnapshot::default(),
                     watchlist_tried: None,
                     feed,
+                    client,
                     _watch,
                 }
             }
@@ -89,9 +99,28 @@ impl WatcherLink {
                     saved: Vec::new(),
                     next_outcome: None,
                     mids: Default::default(),
+                    accounts_answer: None,
+                    accounts_asked: 0,
                 }
             }
         })
+    }
+
+    /// The accounts galata-markets serves the watcher, by venue and alias,
+    /// as the watcher's `GET /accounts` lists them.
+    pub fn accounts(&mut self, cx: &mut Context<Self>) -> Task<Result<Accounts, WatcherError>> {
+        #[cfg(not(test))]
+        {
+            let client = self.client.clone();
+            let asking = Core::get(cx).runtime.spawn(async move { client.accounts().await });
+            cx.background_spawn(async move { asking.await.unwrap_or(Err(WatcherError::Unreachable)) })
+        }
+        #[cfg(test)]
+        {
+            let _ = cx;
+            self.accounts_asked += 1;
+            Task::ready(self.accounts_answer.clone().unwrap_or(Err(WatcherError::Unreachable)))
+        }
     }
 
     pub fn snapshot(&self) -> &WatcherSnapshot {
@@ -290,35 +319,44 @@ pub fn now_ms() -> u64 {
         .unwrap_or_default()
 }
 
-/// What "Test connection" says about the answers it got.
-pub fn describe_test(
-    url: &WatcherUrl,
-    answer: Result<
-        (
-            galata_desk_core::watcher::Health,
-            Result<WatcherConfig, WatcherError>,
-        ),
-        WatcherError,
-    >,
-    now_ms: u64,
-) -> (String, bool) {
+/// What "Test connection" got: the watcher's health, its configuration, and
+/// when it watches every account, the accounts it lists.
+pub type TestAnswer = Result<
+    (
+        galata_desk_core::watcher::Health,
+        Result<WatcherConfig, WatcherError>,
+        Option<Accounts>,
+    ),
+    WatcherError,
+>;
+
+/// What "Test connection" says about the answers it got: the watched
+/// accounts by venue and alias, never an address.
+pub fn describe_test(url: &WatcherUrl, answer: TestAnswer, now_ms: u64) -> (String, bool) {
     match answer {
         Err(WatcherError::Unreachable) => (format!("Nothing answered at {url}. Is the watcher running?"), true),
         Err(e) => (e.to_string(), true),
-        Ok((_, Err(WatcherError::NoConfig))) => (
+        Ok((_, Err(WatcherError::NoConfig), _)) => (
             "Connected, but the watcher has no configuration yet. Write its first one, with its Telegram chat, as galata-watcher's README shows.".into(),
             false,
         ),
-        Ok((_, Err(e))) => (e.to_string(), true),
-        Ok((health, Ok(config))) => {
+        Ok((_, Err(e), _)) => (e.to_string(), true),
+        Ok((health, Ok(config), listed)) => {
             let checked = health
                 .last_ok_ms
                 .map(|t| format!("last checked {}", ago(now_ms, t)))
                 .unwrap_or_else(|| "it has not checked yet".into());
+            let watching = match (&config.accounts, listed) {
+                (Some(_), _) => config.watched(),
+                (None, Some(listed)) if !listed.accounts.is_empty() => format!(
+                    "every account ({})",
+                    listed.accounts.iter().map(|a| a.account().to_string()).collect::<Vec<_>>().join(", ")
+                ),
+                (None, _) => "every account galata-markets serves it".into(),
+            };
             (
                 format!(
-                    "Connected. Watching {} on {}, configuration version {}, {checked}.",
-                    short_address(&config.address),
+                    "Connected. Watching {watching} on {}, configuration version {}, {checked}.",
                     config.network.label().to_lowercase(),
                     config.version,
                 ),

@@ -12,6 +12,13 @@ with the PnL summary switch (galata-watcher after `6f62379`) reports it.
 It was then given `"move_alerts": true` and `"move_pct": "1"` by hand, as a
 watcher with move alerts reports them when they were never written.
 
+On 2026-11-28 they were brought to the watcher that reads galata-markets
+(`move-watcher-onto-markets`): `config.json` names its accounts by venue and
+alias in place of an address, `health.json` no longer names one, and
+`problems.json` is what that watcher's configuration check says of an address
+where an alias belongs and a distance out of range. `accounts.json` is its
+`GET /accounts`, in the shape its API test asserts.
+
 | File | Answer to |
 |---|---|
 | `config.json` | `GET /config`, 200, `ETag: "1"`: one fired and one armed level, stop alerts off, PnL summary on, a digest |
@@ -20,3 +27,4 @@ watcher with move alerts reports them when they were never written.
 | `alerts.json` | `GET /alerts?since=0`: a late, undelivered stop-loss and a delivered level alert |
 | `changed.json` | `PUT /config` with a stale `If-Match`, 412, `ETag: "1"` |
 | `problems.json` | `PUT /config` with an invalid body, 422 |
+| `accounts.json` | `GET /accounts`: two accounts galata-markets serves, one watched |

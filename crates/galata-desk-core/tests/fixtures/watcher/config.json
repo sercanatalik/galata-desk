@@ -1,5 +1,10 @@
 {
-  "address": "0x00000000000000000000000000000000000000aa",
+  "accounts": [
+    {
+      "venue": "hyperliquid",
+      "alias": "main"
+    }
+  ],
   "digest": {
     "time": "07:00",
     "zone": "Europe/Istanbul"

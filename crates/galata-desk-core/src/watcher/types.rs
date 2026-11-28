@@ -22,8 +22,11 @@ pub struct WatcherConfig {
     /// never in the body.
     #[serde(default, skip_serializing)]
     pub version: u64,
-    /// The watched account.
-    pub address: String,
+    /// The watched accounts, by venue and alias, as galata-markets names
+    /// them. `None` watches every account galata-markets serves the watcher.
+    /// The desk never sends an address.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub accounts: Option<Vec<WatchedAccount>>,
     #[serde(default)]
     pub network: Network,
     /// Percent, 2 to 50.
@@ -56,6 +59,61 @@ pub struct WatcherConfig {
     /// Every other field, as read.
     #[serde(flatten)]
     pub rest: Map<String, Value>,
+}
+
+/// An account the watcher watches: its venue and alias.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+pub struct WatchedAccount {
+    pub venue: String,
+    pub alias: String,
+}
+
+impl WatchedAccount {
+    pub fn new(venue: impl Into<String>, alias: impl Into<String>) -> Self {
+        Self {
+            venue: venue.into(),
+            alias: alias.into(),
+        }
+    }
+}
+
+impl std::fmt::Display for WatchedAccount {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{} {}", self.venue, self.alias)
+    }
+}
+
+impl WatcherConfig {
+    /// What the watcher watches, as a person reads it: `every account`, or
+    /// `hyperliquid main, derive-xyz owner_s3`.
+    pub fn watched(&self) -> String {
+        match &self.accounts {
+            None => "every account".into(),
+            Some(named) => named.iter().map(|a| a.to_string()).collect::<Vec<_>>().join(", "),
+        }
+    }
+}
+
+/// One account `GET /accounts` lists: one galata-markets serves the watcher.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+pub struct ListedAccount {
+    pub venue: String,
+    pub alias: String,
+    /// Whether the watcher watches it now.
+    #[serde(default)]
+    pub watched: bool,
+}
+
+impl ListedAccount {
+    pub fn account(&self) -> WatchedAccount {
+        WatchedAccount::new(&self.venue, &self.alias)
+    }
+}
+
+/// `GET /accounts`.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+pub struct Accounts {
+    pub accounts: Vec<ListedAccount>,
 }
 
 fn on() -> bool {
@@ -193,8 +251,6 @@ pub struct Health {
     pub last_error: Option<String>,
     pub last_error_ms: Option<u64>,
     pub config_version: Option<u64>,
-    /// The watched account, when configured.
-    pub address: Option<String>,
 }
 
 /// One row of `GET /alerts`.

@@ -8,8 +8,11 @@ use galata_desk_core::connect::Address;
 use galata_desk_core::network::Network;
 use galata_desk_core::secrets::{WATCHER_TOKEN_NAME, api_key_name};
 use galata_desk_core::store::{QuickSizeRule, QuickSizes};
-use galata_desk_core::watcher::{ConfigState, WatcherUrl};
+use std::collections::BTreeSet;
+
+use galata_desk_core::watcher::{ConfigState, WatchedAccount, WatcherUrl};
 use gpui_kit::component::button::{Button, ButtonVariants};
+use gpui_kit::component::checkbox::Checkbox;
 use gpui_kit::component::input::{Input, InputEvent, InputState};
 use gpui_kit::component::switch::Switch;
 use gpui_kit::component::{Disableable, Sizable, h_flex, v_flex};
@@ -34,7 +37,10 @@ pub const MAINNET_SWITCH_NOTE: &str = "Lets the saved mainnet key place, amend a
 pub const QUICK_SIZES_NOTE: &str = "The dollar amounts the order ticket offers as Quick buttons. Each is the order's value, not its margin. Up to four, from $10. The same on mainnet and testnet. Saved as you type once every amount is valid; until then the last valid list stays in use.";
 
 /// What the page says about the watcher.
-pub const WATCHER_NOTE: &str = "galata-watcher sends Telegram alerts for this account while the desk is closed. Connect it here to see its health and change its call levels and stop alerts. Its token is kept in the macOS Keychain, never in a file, and is not shown again after saving.";
+pub const WATCHER_NOTE: &str = "galata-watcher sends Telegram alerts for your accounts while the desk is closed. Connect it here to see its health, choose the accounts it watches, and change its call levels and stop alerts. Its token is kept in the macOS Keychain, never in a file, and is not shown again after saving.";
+
+/// What the page says about the accounts the watcher watches.
+pub const WATCHED_NOTE: &str = "The accounts galata-markets serves the watcher, by venue and alias. Watching every account includes one added later, such as a new Derive subaccount.";
 
 /// What the page asks of the window.
 pub enum SettingsEvent {
@@ -50,6 +56,47 @@ pub enum SettingsEvent {
     Watcher(Option<WatcherUrl>),
     /// Go back to where the user was.
     Done,
+}
+
+/// The accounts the watcher lists, as far as the page knows them.
+#[derive(Debug, Clone, PartialEq)]
+enum Listing {
+    NotAsked,
+    Asking,
+    Listed(Vec<WatchedAccount>),
+    Failed(String),
+}
+
+/// What the watcher watches, or is being chosen to watch.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Watching {
+    /// Every account galata-markets serves it.
+    Every,
+    These(BTreeSet<WatchedAccount>),
+}
+
+impl Watching {
+    fn of(accounts: Option<&Vec<WatchedAccount>>) -> Self {
+        match accounts {
+            None => Watching::Every,
+            Some(named) => Watching::These(named.iter().cloned().collect()),
+        }
+    }
+
+    fn watches(&self, account: &WatchedAccount) -> bool {
+        match self {
+            Watching::Every => true,
+            Watching::These(set) => set.contains(account),
+        }
+    }
+
+    /// As the configuration writes it: no account named, or these.
+    fn written(&self) -> Option<Vec<WatchedAccount>> {
+        match self {
+            Watching::Every => None,
+            Watching::These(set) => Some(set.iter().cloned().collect()),
+        }
+    }
 }
 
 /// What is saved for the network in use.
@@ -80,6 +127,11 @@ pub struct Settings {
     watcher_message: Option<(SharedString, bool)>,
     /// A connection test is under way.
     testing: bool,
+    /// The accounts the watcher lists, asked once it is configured.
+    listing: Listing,
+    /// The choice being made of what it watches; `None` while untouched,
+    /// which shows what it watches now.
+    chosen: Option<Watching>,
     /// The window's connection to the watcher, while it has one.
     link: Option<Entity<WatcherLink>>,
     _link_changes: Option<Subscription>,
@@ -120,6 +172,8 @@ impl Settings {
             watcher_token_saved: false,
             watcher_message: None,
             testing: false,
+            listing: Listing::NotAsked,
+            chosen: None,
             link: None,
             _link_changes: None,
         };
@@ -161,9 +215,124 @@ impl Settings {
     /// Use this connection to the watcher, or none. The window calls this
     /// whenever its connection changes.
     pub fn set_link(&mut self, link: Option<Entity<WatcherLink>>, cx: &mut Context<Self>) {
-        self._link_changes = link.as_ref().map(|l| cx.observe(l, |_, _, cx| cx.notify()));
+        self._link_changes = link.as_ref().map(|l| {
+            cx.observe(l, |this, _, cx| {
+                this.list_when_configured(cx);
+                cx.notify()
+            })
+        });
         self.link = link;
+        self.listing = Listing::NotAsked;
+        self.chosen = None;
+        self.list_when_configured(cx);
         cx.notify();
+    }
+
+    /// What the watcher's configuration watches now, once it has one.
+    fn watching_now(&self, cx: &gpui_kit::App) -> Option<Watching> {
+        let config = self.link.as_ref()?.read(cx).snapshot().config.config()?;
+        Some(Watching::of(config.accounts.as_ref()))
+    }
+
+    /// What the page shows as watched: the choice being made, or else what
+    /// the watcher watches now.
+    fn watching_shown(&self, cx: &gpui_kit::App) -> Option<Watching> {
+        self.chosen.clone().or_else(|| self.watching_now(cx))
+    }
+
+    /// Ask the watcher for its accounts once it has a configuration, and
+    /// not again until asked.
+    fn list_when_configured(&mut self, cx: &mut Context<Self>) {
+        if self.listing == Listing::NotAsked && self.watching_now(cx).is_some() {
+            self.list_accounts(cx);
+        }
+    }
+
+    fn list_accounts(&mut self, cx: &mut Context<Self>) {
+        let Some(link) = self.link.clone() else { return };
+        self.listing = Listing::Asking;
+        let asking = link.update(cx, |link, cx| link.accounts(cx));
+        cx.spawn(async move |this, cx| {
+            let answer = asking.await;
+            let _ = this.update(cx, |this, cx| {
+                this.listing = match answer {
+                    Ok(listed) => Listing::Listed(listed.accounts.iter().map(|a| a.account()).collect()),
+                    Err(e) => Listing::Failed(e.to_string()),
+                };
+                cx.notify();
+            });
+        })
+        .detach();
+        cx.notify();
+    }
+
+    /// The accounts the choice is made among: those listed, and any the
+    /// configuration names that galata-markets no longer lists.
+    fn choosable(&self, cx: &gpui_kit::App) -> Vec<WatchedAccount> {
+        let mut all: BTreeSet<WatchedAccount> = match &self.listing {
+            Listing::Listed(listed) => listed.iter().cloned().collect(),
+            _ => BTreeSet::new(),
+        };
+        if let Some(Watching::These(named)) = self.watching_now(cx) {
+            all.extend(named);
+        }
+        all.into_iter().collect()
+    }
+
+    /// Choose every account, or, unticking it, each listed one by name.
+    fn choose_every(&mut self, on: bool, cx: &mut Context<Self>) {
+        self.chosen = Some(if on {
+            Watching::Every
+        } else {
+            Watching::These(self.choosable(cx).into_iter().collect())
+        });
+        cx.notify();
+    }
+
+    fn choose_account(&mut self, account: WatchedAccount, on: bool, cx: &mut Context<Self>) {
+        let mut set: BTreeSet<WatchedAccount> = match self.watching_shown(cx) {
+            Some(Watching::These(set)) => set,
+            _ => self.choosable(cx).into_iter().collect(),
+        };
+        if on {
+            set.insert(account);
+        } else {
+            set.remove(&account);
+        }
+        self.chosen = Some(Watching::These(set));
+        cx.notify();
+    }
+
+    /// A choice that differs from what is watched and names at least one
+    /// account.
+    fn choice_to_save(&self, cx: &gpui_kit::App) -> Option<Watching> {
+        let chosen = self.chosen.clone()?;
+        let valid = !matches!(&chosen, Watching::These(set) if set.is_empty());
+        (valid && Some(&chosen) != self.watching_now(cx).as_ref()).then_some(chosen)
+    }
+
+    /// Save the choice with a versioned save. Only venues and aliases are
+    /// sent; never an address.
+    fn save_accounts(&mut self, cx: &mut Context<Self>) {
+        let (Some(link), Some(choice)) = (self.link.clone(), self.choice_to_save(cx)) else {
+            return;
+        };
+        let written = choice.written();
+        let saving = link.update(cx, |link, cx| link.save(move |c| c.accounts = written, cx));
+        cx.spawn(async move |this, cx| {
+            let outcome = saving.await;
+            let _ = this.update(cx, |this, cx| {
+                this.watcher_message = Some(match outcome {
+                    Ok(saved) => {
+                        this.chosen = None;
+                        (format!("Saved. The watcher watches {}.", saved.watched()).into(), false)
+                    }
+                    Err(e) => (e.to_string().into(), true),
+                });
+                cx.notify();
+            });
+        })
+        .detach();
     }
 
     /// The watcher is connected: an address is saved and its token is in the
@@ -252,7 +421,13 @@ impl Settings {
             let client = galata_desk_core::watcher::Client::new(url.clone(), token);
             let asking = runtime.spawn(async move {
                 let health = client.health().await?;
-                Ok((health, client.config().await))
+                let config = client.config().await;
+                // Watching every account: say which they are.
+                let listed = match &config {
+                    Ok(c) if c.accounts.is_none() => client.accounts().await.ok(),
+                    _ => None,
+                };
+                Ok((health, config, listed))
             });
             cx.spawn(async move |this, cx| {
                 let answer = asking
@@ -266,62 +441,11 @@ impl Settings {
         let _ = (url, token);
     }
 
-    fn finish_test(
-        &mut self,
-        url: &WatcherUrl,
-        answer: Result<
-            (
-                galata_desk_core::watcher::Health,
-                Result<
-                    galata_desk_core::watcher::WatcherConfig,
-                    galata_desk_core::watcher::WatcherError,
-                >,
-            ),
-            galata_desk_core::watcher::WatcherError,
-        >,
-        cx: &mut Context<Self>,
-    ) {
+    fn finish_test(&mut self, url: &WatcherUrl, answer: watcher_link::TestAnswer, cx: &mut Context<Self>) {
         let (text, problem) = watcher_link::describe_test(url, answer, watcher_link::now_ms());
         self.testing = false;
         self.watcher_message = Some((text.into(), problem));
         cx.notify();
-    }
-
-    /// Point the watcher at the connected account.
-    fn watch_account(&mut self, cx: &mut Context<Self>) {
-        let (Some(link), Some(account)) = (self.link.clone(), Core::get(cx).store.account()) else {
-            return;
-        };
-        let address = account.address.as_str().to_lowercase();
-        let saving = link.update(cx, |link, cx| link.save(move |c| c.address = address, cx));
-        cx.spawn(async move |this, cx| {
-            let outcome = saving.await;
-            let _ = this.update(cx, |this, cx| {
-                this.watcher_message = Some(match outcome {
-                    Ok(_) => ("The watcher now watches this account.".into(), false),
-                    Err(e) => (e.to_string().into(), true),
-                });
-                cx.notify();
-            });
-        })
-        .detach();
-    }
-
-    /// The account the watcher watches, when it is not the connected one.
-    fn watching_another(&self, cx: &gpui_kit::App) -> Option<String> {
-        let account = Core::get(cx).store.account()?;
-        let config = self
-            .link
-            .as_ref()?
-            .read(cx)
-            .snapshot()
-            .config
-            .config()?
-            .clone();
-        (!config
-            .address
-            .eq_ignore_ascii_case(account.address.as_str()))
-        .then_some(config.address)
     }
 
     /// The watcher answers but has never been configured.
@@ -766,10 +890,70 @@ impl Settings {
             .into_any_element()
     }
 
+    /// The accounts the watcher watches: every one, or a choice of those it
+    /// lists, by venue and alias.
+    fn accounts_panel(&self, cx: &mut Context<Self>) -> AnyElement {
+        let shown = self.watching_shown(cx);
+        let every = shown == Some(Watching::Every);
+        let choices: Vec<AnyElement> = self
+            .choosable(cx)
+            .into_iter()
+            .enumerate()
+            .map(|(ix, account)| {
+                let on = shown.as_ref().is_some_and(|w| w.watches(&account));
+                let label = format!("{} \u{b7} {}", account.venue, account.alias);
+                Checkbox::new(("watch-account", ix))
+                    .label(label)
+                    .checked(on)
+                    .on_click(cx.listener(move |this, on: &bool, _, cx| this.choose_account(account.clone(), *on, cx)))
+                    .into_any_element()
+            })
+            .collect();
+        let listing: AnyElement = match &self.listing {
+            Listing::NotAsked | Listing::Asking => ui::label("Asking the watcher for its accounts\u{2026}").into_any_element(),
+            Listing::Failed(why) => h_flex()
+                .gap_3()
+                .child(div().flex_1().text_color(Palette::loss()).text_size(px(12.5)).child(why.clone()))
+                .child(
+                    Button::new("list-accounts")
+                        .small()
+                        .label("Try again")
+                        .on_click(cx.listener(|this, _, _, cx| this.list_accounts(cx))),
+                )
+                .into_any_element(),
+            Listing::Listed(_) => v_flex()
+                .gap(px(6.))
+                .child(
+                    Checkbox::new("watch-every")
+                        .label("Every account")
+                        .checked(every)
+                        .on_click(cx.listener(|this, on: &bool, _, cx| this.choose_every(*on, cx))),
+                )
+                .children(choices)
+                .into_any_element(),
+        };
+        v_flex()
+            .id("watched-accounts")
+            .gap(px(6.))
+            .child(div().font_weight(gpui_kit::FontWeight::SEMIBOLD).text_size(px(12.5)).child("Watched accounts"))
+            .child(ui::label(WATCHED_NOTE))
+            .child(listing)
+            .child(
+                h_flex().child(
+                    Button::new("save-accounts")
+                        .small()
+                        .primary()
+                        .label("Save accounts")
+                        .disabled(self.choice_to_save(cx).is_none())
+                        .on_click(cx.listener(|this, _, _, cx| this.save_accounts(cx))),
+                ),
+            )
+            .into_any_element()
+    }
+
     fn watcher_panel(&self, cx: &mut Context<Self>) -> AnyElement {
         let saved = self.watcher_saved(cx);
         let saved_url = Core::get(cx).watcher_url.as_ref().map(|u| u.to_string());
-        let account_connected = Core::get(cx).store.account().is_some();
         let configured = self
             .link
             .as_ref()
@@ -804,14 +988,6 @@ impl Settings {
                         .child(ui::label("Token saved in the keychain.")),
                 )
                 .child(test_button)
-                .when(account_connected && configured, |d| {
-                    d.child(
-                        Button::new("watch-account")
-                            .small()
-                            .label("Watch this account")
-                            .on_click(cx.listener(|this, _, _, cx| this.watch_account(cx))),
-                    )
-                })
                 .child(
                     Button::new("remove-watcher")
                         .small()
@@ -852,12 +1028,7 @@ impl Settings {
             .child(Self::heading("WATCHER"))
             .child(ui::label(WATCHER_NOTE))
             .child(body)
-            .when_some(self.watching_another(cx), |d, address| {
-                d.child(ui::notice(format!(
-                    "The watcher watches {}, not the connected account.",
-                    galata_desk_core::format::short_address(&address)
-                )))
-            })
+            .when(saved && configured, |d| d.child(self.accounts_panel(cx)))
             .when(self.watcher_unconfigured(cx), |d| {
                 d.child(ui::notice(
                     "The watcher has no configuration yet. Write its first one, with its Telegram chat, as galata-watcher's README shows.",
@@ -1013,20 +1184,7 @@ impl Settings {
     }
 
     /// Answer the connection test as the watcher would have.
-    pub fn answer_test(
-        &mut self,
-        answer: Result<
-            (
-                galata_desk_core::watcher::Health,
-                Result<
-                    galata_desk_core::watcher::WatcherConfig,
-                    galata_desk_core::watcher::WatcherError,
-                >,
-            ),
-            galata_desk_core::watcher::WatcherError,
-        >,
-        cx: &mut Context<Self>,
-    ) {
+    pub fn answer_test(&mut self, answer: watcher_link::TestAnswer, cx: &mut Context<Self>) {
         let url = WatcherUrl::parse(&self.watcher_url.read(cx).value()).unwrap();
         self.finish_test(&url, answer, cx);
     }
@@ -1035,9 +1193,24 @@ impl Settings {
         self.testing
     }
 
-    /// The other account the panel says the watcher watches, if it says so.
-    pub fn notice_other_account(&self, cx: &gpui_kit::App) -> Option<String> {
-        self.watching_another(cx)
+    /// The accounts the panel offers, by venue and alias, each with whether
+    /// it shows it watched; and whether "Every account" is ticked.
+    pub fn accounts_shown(&self, cx: &gpui_kit::App) -> (bool, Vec<(String, bool)>) {
+        let shown = self.watching_shown(cx);
+        let rows = self
+            .choosable(cx)
+            .iter()
+            .map(|a| (a.to_string(), shown.as_ref().is_some_and(|w| w.watches(a))))
+            .collect();
+        (shown == Some(Watching::Every), rows)
+    }
+
+    /// Why the accounts could not be listed, when they could not.
+    pub fn accounts_problem(&self) -> Option<String> {
+        match &self.listing {
+            Listing::Failed(why) => Some(why.clone()),
+            _ => None,
+        }
     }
 
     /// The panel says the watcher needs its first configuration.

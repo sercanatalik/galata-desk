@@ -11,7 +11,7 @@ use std::time::Duration;
 use reqwest::header::{AUTHORIZATION, ETAG, IF_MATCH};
 use reqwest::{StatusCode, redirect};
 
-use super::types::{AlertRow, Alerts, Health, Problems, WatcherConfig};
+use super::types::{Accounts, AlertRow, Alerts, Health, Problems, WatcherConfig};
 use super::url::WatcherUrl;
 
 /// Why a request to the watcher did not give what was asked.
@@ -34,6 +34,11 @@ pub enum WatcherError {
     /// 422: the watcher named what is wrong.
     #[error("The watcher refused the configuration: {}", problems.join("; "))]
     Refused { problems: Vec<String> },
+    /// `GET /accounts` could not list galata-markets' accounts: the watcher
+    /// says why (no `markets_url`, no token, galata-markets refused or
+    /// unreachable).
+    #[error("The watcher could not list its accounts: {reason}")]
+    NoAccounts { reason: String },
     /// Any other answer.
     #[error("The watcher answered {status}.")]
     Unexpected { status: u16 },
@@ -108,6 +113,27 @@ impl Client {
     }
 
     /// Alerts detected after `since_ms`, newest first.
+    /// `GET /accounts`: the accounts galata-markets serves the watcher, by
+    /// venue and alias, each with whether it is watched.
+    pub async fn accounts(&self) -> Result<Accounts, WatcherError> {
+        let r = send(self.get("/accounts")).await?;
+        match r.status() {
+            StatusCode::OK => json(r).await,
+            StatusCode::NOT_FOUND => Err(WatcherError::NoConfig),
+            s @ (StatusCode::CONFLICT | StatusCode::BAD_GATEWAY | StatusCode::SERVICE_UNAVAILABLE) => {
+                #[derive(serde::Deserialize)]
+                struct Said {
+                    error: String,
+                }
+                match json::<Said>(r).await {
+                    Ok(said) => Err(WatcherError::NoAccounts { reason: said.error }),
+                    Err(_) => Err(WatcherError::Unexpected { status: s.as_u16() }),
+                }
+            }
+            s => Err(refusal(s)),
+        }
+    }
+
     pub async fn alerts(&self, since_ms: u64) -> Result<Vec<AlertRow>, WatcherError> {
         let r = send(self.get(&format!("/alerts?since={since_ms}"))).await?;
         match r.status() {

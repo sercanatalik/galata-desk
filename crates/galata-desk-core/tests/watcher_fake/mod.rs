@@ -1,7 +1,8 @@
 //! A stand-in for `galata-watcher-api`, answering with the answers recorded
 //! from the real one (`tests/fixtures/watcher`), and keeping its version
 //! rules: `PUT /config` needs the current version in `If-Match`, and a body
-//! whose address is not an address is refused with the recorded problems.
+//! naming an address, where an account's alias belongs or at all, is refused
+//! with the recorded problems.
 
 #![allow(dead_code)]
 
@@ -157,6 +158,10 @@ async fn handle(
             axum::Json(h).into_response()
         }
         (Method::GET, "/alerts") => axum::Json(fixture("alerts.json")).into_response(),
+        (Method::GET, "/accounts") => match &i.config {
+            Some(_) => axum::Json(fixture("accounts.json")).into_response(),
+            None => (StatusCode::NOT_FOUND, axum::Json(json!({"error": "no configuration yet"}))).into_response(),
+        },
         (Method::GET, "/config") => match &i.config {
             Some(c) => with_etag(StatusCode::OK, i.version, c.clone()),
             None => with_etag(StatusCode::NOT_FOUND, 0, fixture("no_config.json")),
@@ -175,10 +180,13 @@ async fn handle(
             let Ok(mut doc) = serde_json::from_slice::<Value>(&body) else {
                 return StatusCode::UNPROCESSABLE_ENTITY.into_response();
             };
-            if !doc["address"]
-                .as_str()
-                .is_some_and(|a| a.starts_with("0x") && a.len() == 42)
-            {
+            let an_address = doc.get("address").is_some()
+                || doc["accounts"]
+                    .as_array()
+                    .into_iter()
+                    .flatten()
+                    .any(|a| a["alias"].as_str().is_some_and(|a| a.starts_with("0x")));
+            if an_address {
                 return (
                     StatusCode::UNPROCESSABLE_ENTITY,
                     axum::Json(fixture("problems.json")),

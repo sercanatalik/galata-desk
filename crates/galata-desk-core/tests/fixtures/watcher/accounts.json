@@ -1,0 +1,23 @@
+{
+  "accounts": [
+    {
+      "venue": "derive-xyz",
+      "alias": "owner_s3",
+      "kinds": {
+        "margin_state": 1795130940000000
+      },
+      "watched": false
+    },
+    {
+      "venue": "hyperliquid",
+      "alias": "main",
+      "kinds": {
+        "fills": 1795130940000000,
+        "positions": 1795130940000000
+      },
+      "watched": true
+    }
+  ],
+  "watching": "named",
+  "stream_reached": true
+}

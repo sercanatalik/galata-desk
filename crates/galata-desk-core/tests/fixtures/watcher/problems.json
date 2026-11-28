@@ -1,6 +1,6 @@
 {
   "problems": [
-    "`address`: must be 0x followed by 40 hexadecimal characters",
+    "`accounts[0].alias`: `0x00000000000000000000000000000000000000aa` is an address; name the account by its alias, as galata-markets lists it",
     "`near_liquidation_pct`: must be a number from 2 to 50"
   ]
 }

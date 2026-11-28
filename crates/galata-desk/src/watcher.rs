@@ -6,7 +6,7 @@
 //! sends one. While the watcher can't be reached, the section shows what it
 //! last read, marked stale, and offers no edits.
 
-use galata_desk_core::format::{self as f, short_address};
+use galata_desk_core::format::{self as f};
 use galata_desk_core::rust_decimal::Decimal;
 use galata_desk_core::watcher::{
     AlertRow, Direction, WatcherConfig, WatcherError, WatcherSnapshot,
@@ -21,7 +21,6 @@ use gpui_kit::{
     div, px,
 };
 
-use crate::Core;
 use crate::level_form::{LevelForm, LevelFormEvent};
 use crate::theme::{MONO, Palette};
 use crate::ui;
@@ -308,16 +307,6 @@ impl WatcherSection {
         self.save(move |c| c.near_liquidation_pct = pct, "Distance saved.", cx);
     }
 
-    /// The account the watcher watches, when it is not the connected one.
-    fn other_account(&self, cx: &gpui_kit::App) -> Option<String> {
-        let config = self.snapshot(cx).config.config()?;
-        let account = Core::get(cx).store.account()?;
-        (!config
-            .address
-            .eq_ignore_ascii_case(account.address.as_str()))
-        .then(|| config.address.clone())
-    }
-
     /// The health line: a short state and whether it needs attention.
     fn health_state(&self, now: u64, cx: &gpui_kit::App) -> (String, bool) {
         match self.snapshot(cx).health.as_ref().and_then(|h| h.last_ok_ms) {
@@ -360,7 +349,6 @@ impl WatcherSection {
         let config = s.config.config();
         let health = s.health.clone();
         let sent = s.alerts.len();
-        let other = self.other_account(cx);
         let part = |text: String| div().text_color(Palette::muted()).child(text);
         let dot = || div().text_color(Palette::line()).child("\u{b7}");
         let last_check = health
@@ -372,7 +360,7 @@ impl WatcherSection {
             .map(|c| {
                 format!(
                     "{} \u{b7} {}",
-                    short_address(&c.address),
+                    c.watched(),
                     c.network.label().to_lowercase()
                 )
             })
@@ -433,12 +421,6 @@ impl WatcherSection {
                             })),
                     ),
             )
-            .when_some(other, |d, address| {
-                d.child(ui::notice(format!(
-                    "The watcher watches {}, not the connected account. Settings has \u{201c}Watch this account\u{201d}.",
-                    short_address(&address)
-                )))
-            })
             .into_any_element()
     }
 
@@ -934,10 +916,6 @@ impl WatcherSection {
 
     pub fn health_text(&self, cx: &gpui_kit::App) -> (String, bool) {
         self.health_state(now_ms(), cx)
-    }
-
-    pub fn notice_other_account(&self, cx: &gpui_kit::App) -> Option<String> {
-        self.other_account(cx)
     }
 
     pub fn banner(&self, cx: &gpui_kit::App) -> Option<String> {

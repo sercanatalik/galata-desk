@@ -16,8 +16,12 @@
   is in `galata-watcher/var/secrets/api/api_token`. Plain `http://` is
   accepted only for this Mac, a home network or Tailscale; anything else must
   be `https://`. The token is kept in the Keychain and never shown again.
-  **Test connection** says whether the watcher answers, and **Watch this
-  account** points it at the connected account.
+  **Test connection** says whether the watcher answers and which accounts it
+  watches. **Watched accounts** lists the accounts galata-markets serves the
+  watcher, by venue and alias, such as `hyperliquid main` and `derive-xyz
+  owner_s3`: choose **Every account**, which includes one added later, or
+  some of them, and **Save accounts**. The desk never sends the watcher an
+  address.
 
 ## Storage
 

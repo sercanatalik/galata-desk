@@ -1,7 +1,9 @@
 # Watcher
 
 [galata-watcher](https://github.com/sercanatalik/galata-watcher) sends
-Telegram alerts for the account while the desk is closed. Once it is
+Telegram alerts for the accounts it watches, on Hyperliquid and Derive, while
+the desk is closed. Which accounts those are is chosen in
+[Settings](settings.md). Once it is
 connected in [Settings](settings.md), the Watcher section shows and edits
 what it alerts on. The desk never sends an alert itself.
 
@@ -14,8 +16,9 @@ From the top:
   ticker. When on, each TP or SL order that fills sends an alert.
 - **Near liquidation**: the distance, from 2% to 50%. Liquidation alerts
   can't be switched off.
-- **Health**: one line at the bottom: when the watcher last checked the
-  account, which account and network it watches, the configuration version
+- **Health**: one line at the bottom: when the watcher last checked, which
+  accounts it watches (every account, or each by venue and alias) and on
+  which network, the configuration version
   and its last error. It turns amber once the watcher hasn't checked for
   three minutes.
 - **Alert history**: hidden until you press "Alert history (N)" on the health

@@ -43,7 +43,8 @@ impl Problem {
             // Not answers to a read.
             WatcherError::NoConfig
             | WatcherError::Changed { .. }
-            | WatcherError::Refused { .. } => Self::Unexpected(0),
+            | WatcherError::Refused { .. }
+            | WatcherError::NoAccounts { .. } => Self::Unexpected(0),
         }
     }
 
